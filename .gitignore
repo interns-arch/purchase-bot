@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+database/*.db
+output/*.csv
+output/*.xlsx
+charts/*.png
+.pytest_cache/
+
+# Web app (backend/frontend)
+uploads/
+backend/.env
+frontend/node_modules/
+frontend/dist/

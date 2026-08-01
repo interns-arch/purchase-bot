@@ -1,0 +1,7 @@
+-r ../requirements.txt
+fastapi>=0.111
+uvicorn[standard]>=0.29
+pyjwt>=2.8
+bcrypt>=4.1
+python-multipart>=0.0.9
+python-dotenv>=1.0
