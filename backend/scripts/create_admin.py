@@ -47,7 +47,7 @@ def main() -> int:
             if len(password) < 8:
                 print("Password must be at least 8 characters.", file=sys.stderr)
                 return 1
-            from app.auth.security import hash_password
+            from backend.app.auth.security import hash_password
 
             existing.password_hash = hash_password(password)
             existing.is_active = True

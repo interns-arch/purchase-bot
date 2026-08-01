@@ -60,7 +60,7 @@ class Vendor(Base):
     name: Mapped[str] = mapped_column(nullable=False)
     contact_info: Mapped[str | None] = mapped_column(default=None)
     payment_terms: Mapped[str | None] = mapped_column(default=None)
-    active: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
+    active: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
@@ -125,7 +125,7 @@ class InventoryImport(Base):
         default=ImportStatus.PENDING,
         nullable=False,
     )
-    is_active: Mapped[bool] = mapped_column(default=False, server_default=text("0"))
+    is_active: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     row_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     error_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     sheet_name: Mapped[str | None] = mapped_column(default=None)

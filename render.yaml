@@ -1,0 +1,44 @@
+# Render Blueprint for the FastAPI backend. Deploy via Render's "New +" ->
+# "Blueprint" and point it at this repo -- Render reads this file and
+# provisions the service below. The database itself is NOT provisioned
+# here: this app uses a hosted Neon Postgres instance, connected via the
+# DATABASE_URL env var (set manually in the Render dashboard after the
+# first deploy, since it holds a real credential and must never be
+# committed to git).
+services:
+  - type: web
+    name: procurehub-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      # Neon connection string (postgres:// or postgresql:// -- core/db.py
+      # normalizes either). Set this in the Render dashboard after deploy.
+      - key: DATABASE_URL
+        sync: false
+      # Generated once by Render and kept stable across deploys; changing
+      # it invalidates every existing login session.
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_EXPIRE_MINUTES
+        value: "480"
+      # Comma-separated. Add your Vercel frontend URL here once it exists,
+      # e.g. https://your-app.vercel.app,http://localhost:5173
+      - key: CORS_ORIGINS
+        sync: false
+      # NOTE: Render's free plan has no persistent disk -- files written
+      # here are wiped on every redeploy/restart. Only the *original*
+      # uploaded inventory/order files are affected; imported data itself
+      # lives in Postgres and is unaffected.
+      - key: UPLOAD_DIR
+        value: uploads/inventory
+      # Optional one-time admin bootstrap -- only takes effect while zero
+      # user accounts exist. Set both, deploy once, then remove them (or
+      # leave them; they're ignored once the admin account exists).
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
