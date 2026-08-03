@@ -1,24 +1,50 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, BrowserRouter as Router, Routes } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider } from "./context/ToastContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
-import { LoginPage } from "./pages/LoginPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { VendorInventoryPage } from "./pages/VendorInventoryPage";
-import { CustomerOrdersPage } from "./pages/CustomerOrdersPage";
-import { VendorComparisonPage } from "./pages/VendorComparisonPage";
-import { DocumentInboxPage } from "./pages/DocumentInboxPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { IntegrationStatusPage } from "./pages/IntegrationStatusPage";
-import { DeliveryTrackingPage } from "./pages/DeliveryTrackingPage";
-import { VendorPerformancePage } from "./pages/VendorPerformancePage";
-import { VendorPerformanceDetailPage } from "./pages/VendorPerformanceDetailPage";
+
+// Lazy-loaded so each page is its own chunk instead of one large bundle.
+const LoginPage = lazy(() => import("./pages/LoginPage").then((m) => ({ default: m.LoginPage })));
+const DashboardPage = lazy(() =>
+  import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage }))
+);
+const VendorInventoryPage = lazy(() =>
+  import("./pages/VendorInventoryPage").then((m) => ({ default: m.VendorInventoryPage }))
+);
+const CustomerOrdersPage = lazy(() =>
+  import("./pages/CustomerOrdersPage").then((m) => ({ default: m.CustomerOrdersPage }))
+);
+const VendorComparisonPage = lazy(() =>
+  import("./pages/VendorComparisonPage").then((m) => ({ default: m.VendorComparisonPage }))
+);
+const DocumentInboxPage = lazy(() =>
+  import("./pages/DocumentInboxPage").then((m) => ({ default: m.DocumentInboxPage }))
+);
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage }))
+);
+const IntegrationStatusPage = lazy(() =>
+  import("./pages/IntegrationStatusPage").then((m) => ({ default: m.IntegrationStatusPage }))
+);
+const DeliveryTrackingPage = lazy(() =>
+  import("./pages/DeliveryTrackingPage").then((m) => ({ default: m.DeliveryTrackingPage }))
+);
+const VendorPerformancePage = lazy(() =>
+  import("./pages/VendorPerformancePage").then((m) => ({ default: m.VendorPerformancePage }))
+);
+const VendorPerformanceDetailPage = lazy(() =>
+  import("./pages/VendorPerformanceDetailPage").then((m) => ({
+    default: m.VendorPerformanceDetailPage,
+  }))
+);
 
 function App() {
   return (
     <Router>
       <ToastProvider>
         <AuthProvider>
+          <Suspense fallback={null}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route
@@ -104,6 +130,7 @@ function App() {
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
+          </Suspense>
         </AuthProvider>
       </ToastProvider>
     </Router>

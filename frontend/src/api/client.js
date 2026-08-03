@@ -2,8 +2,15 @@ import axios from "axios";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
+// Generous default: file imports (inventory/delivery/customer-order uploads)
+// are processed synchronously by the backend, so a short timeout would abort
+// legitimate large-file requests. Override per-call via the `timeout` option
+// if a specific request needs something different.
+const DEFAULT_TIMEOUT_MS = 60000;
+
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
 apiClient.interceptors.request.use((config) => {

@@ -8,11 +8,13 @@ package) and `backend` are importable:
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from backend.app.api.routes.customer_orders import router as customer_orders_router
@@ -76,6 +78,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+if "*" in settings.cors_origins:
+    logger.warning(
+        "CORS_ORIGINS includes '*' -- do not use a wildcard origin in production."
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -83,6 +90,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "%s %s -> %s (%.1fms)",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSONResponse:
+    """Last-resort handler for anything a route didn't already turn into an
+    HTTPException. Logs the full exception server-side; the client only
+    ever sees a generic message, never a stack trace."""
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error."},
+    )
+
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)
@@ -98,6 +133,8 @@ app.include_router(vendor_performance_router)
 app.include_router(whatsapp_router)
 
 
+@app.get("/health", tags=["health"])
 @app.get("/api/health", tags=["health"])
 def health_check() -> dict[str, str]:
+    """Used by Render to determine whether the service is up."""
     return {"status": "ok"}

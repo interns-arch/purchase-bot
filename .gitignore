@@ -8,6 +8,10 @@ charts/*.png
 
 # Web app (backend/frontend)
 uploads/
-backend/.env
 frontend/node_modules/
 frontend/dist/
+
+# Never commit real environment files, only *.env.example templates.
+.env
+*.env
+!*.env.example

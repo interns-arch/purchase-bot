@@ -23,19 +23,24 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
 def _get_secret_key() -> str:
-    key = os.environ.get("JWT_SECRET_KEY")
+    # JWT_SECRET_KEY is this app's original name; SECRET_KEY is accepted as a
+    # fallback alias (same pattern as WHATSAPP_VERIFY_TOKEN below).
+    key = os.environ.get("JWT_SECRET_KEY") or os.environ.get("SECRET_KEY")
     if key:
         return key
     # Dev fallback so the app boots without setup. Every restart invalidates
     # existing tokens, which is fine for local development but must be
-    # overridden via JWT_SECRET_KEY in any shared/production environment.
+    # overridden via JWT_SECRET_KEY (or SECRET_KEY) in any shared/production
+    # environment.
     return secrets.token_hex(32)
 
 
 class Settings:
     jwt_secret_key: str = _get_secret_key()
-    jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = int(os.environ.get("JWT_EXPIRE_MINUTES", "480"))
+    jwt_algorithm: str = os.environ.get("ALGORITHM", "HS256")
+    jwt_expire_minutes: int = int(
+        os.environ.get("JWT_EXPIRE_MINUTES") or os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES") or "480"
+    )
     cors_origins: list[str] = [
         origin.strip()
         for origin in os.environ.get(
