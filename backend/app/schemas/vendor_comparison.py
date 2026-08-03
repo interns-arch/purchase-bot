@@ -7,6 +7,7 @@ class VendorComparisonRowOut(BaseModel):
     customer_part_number: str
     requested_quantity: float
     vendor_name: str | None
+    vendor_id: int | None = None
     vendor_part_number: str | None
     part_description: str | None
     brand: str | None
@@ -16,6 +17,7 @@ class VendorComparisonRowOut(BaseModel):
     discount: str | None
     stock_status: str
     inventory_file: str | None
+    order_item_id: int | None = None
 
 
 class VendorComparisonSummaryOut(BaseModel):

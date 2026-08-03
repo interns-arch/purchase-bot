@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -10,7 +11,8 @@ def get_logger(name: str) -> logging.Logger:
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    level_name = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+    logger.setLevel(getattr(logging, level_name, logging.INFO))
     handler = logging.StreamHandler()
     handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S")

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
     CheckConstraint,
+    Date,
     Enum,
     ForeignKey,
     Index,
@@ -53,6 +54,11 @@ class CustomerOrderStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class VendorSelectionStatus(str, enum.Enum):
+    SELECTED = "SELECTED"
+    ORDERED = "ORDERED"
+
+
 class Vendor(Base):
     __tablename__ = "vendors"
 
@@ -60,6 +66,7 @@ class Vendor(Base):
     name: Mapped[str] = mapped_column(nullable=False)
     contact_info: Mapped[str | None] = mapped_column(default=None)
     payment_terms: Mapped[str | None] = mapped_column(default=None)
+    whatsapp_number: Mapped[str | None] = mapped_column(default=None)
     active: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -68,6 +75,13 @@ class Vendor(Base):
 
     __table_args__ = (
         Index("ux_vendors_name_lower", func.lower(name), unique=True),
+        Index(
+            "ux_vendors_whatsapp_number",
+            whatsapp_number,
+            unique=True,
+            sqlite_where=text("whatsapp_number IS NOT NULL"),
+            postgresql_where=text("whatsapp_number IS NOT NULL"),
+        ),
     )
 
 
@@ -270,6 +284,54 @@ class PurchaseOrderItem(Base):
     )
 
 
+class VendorSelection(Base):
+    """The purchase team's choice of vendor + quantity for one
+    `CustomerOrderItem` (Module 2.5 -- Vendor Selection). At most one
+    selection per order line (single-vendor-per-line allocation, per
+    ARCHITECTURE.md's locked decision). `status` starts `SELECTED` and
+    flips to `ORDERED` -- with `purchase_order_item_id` set -- once
+    `purchase_order_service.generate_purchase_orders_from_selections`
+    turns it into a real PO line; selections are immutable after that."""
+
+    __tablename__ = "vendor_selections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_order_item_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_order_items.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    vendor_id: Mapped[int] = mapped_column(
+        ForeignKey("vendors.id", ondelete="RESTRICT"), nullable=False
+    )
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("parts.id", ondelete="RESTRICT"), nullable=False
+    )
+    vendor_part_number: Mapped[str] = mapped_column(nullable=False)
+    quantity_selected: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    status: Mapped[VendorSelectionStatus] = mapped_column(
+        Enum(VendorSelectionStatus, name="vendor_selection_status"),
+        default=VendorSelectionStatus.SELECTED,
+        nullable=False,
+    )
+    purchase_order_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("purchase_order_items.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
+
+    vendor: Mapped[Vendor] = relationship()
+    part: Mapped[Part] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("quantity_selected > 0", name="ck_vendor_selections_qty_positive"),
+        Index("ix_vendor_selections_vendor_id", "vendor_id"),
+        Index("ix_vendor_selections_part_id", "part_id"),
+    )
+
+
 class DeliveryImport(Base):
     """Import-history record for one delivery file scanned from
     `delivery_files/` (mirrors `InventoryImport`, but deliveries are purely
@@ -290,8 +352,20 @@ class DeliveryImport(Base):
     completed_at: Mapped[datetime | None] = mapped_column(default=None)
 
     __table_args__ = (
-        UniqueConstraint(
-            "file_name", "content_hash", name="ux_delivery_imports_file_hash"
+        # Partial, not a plain UniqueConstraint: `run_delivery_import`'s
+        # duplicate check only treats COMPLETED/COMPLETED_WITH_ERRORS as
+        # "already imported" -- a FAILED attempt is meant to be retryable
+        # (e.g. after fixing the file, or once the PO/vendor data it
+        # depends on exists). The constraint must match that, or a retry of
+        # a FAILED import raises an unhandled UniqueViolation instead of
+        # either succeeding or being cleanly reported as a duplicate.
+        Index(
+            "ux_delivery_imports_file_hash",
+            "file_name",
+            "content_hash",
+            unique=True,
+            sqlite_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
+            postgresql_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
         ),
         Index("ix_delivery_imports_content_hash", "content_hash"),
     )
@@ -362,6 +436,107 @@ class DeliveryImportError(Base):
     )
 
 
+class VendorDeliveryImport(Base):
+    """Import-history record for one vendor delivery file uploaded through
+    the web app's Delivery Tracking module. Deliberately separate from
+    `DeliveryImport` above -- that table matches deliveries against
+    `PurchaseOrderItem` for the pre-existing CLI pipeline
+    (`delivery_import.py`), which stays untouched. Since the web app has no
+    Purchase Order concept, deliveries here are matched directly by
+    vendor + part number and reconciled against `VendorSelection`
+    (see `core/services/vendor_delivery_service.py` and
+    `delivery_tracking_service.py`)."""
+
+    __tablename__ = "vendor_delivery_imports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    file_name: Mapped[str] = mapped_column(nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(nullable=False)
+    content_hash: Mapped[str] = mapped_column(nullable=False)
+    status: Mapped[DeliveryImportStatus] = mapped_column(
+        Enum(DeliveryImportStatus, name="vendor_delivery_import_status"), nullable=False
+    )
+    row_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    error_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    __table_args__ = (
+        # Partial, not a plain UniqueConstraint -- same reasoning as
+        # `DeliveryImport.ux_delivery_imports_file_hash`: a FAILED import
+        # must stay retryable.
+        Index(
+            "ux_vendor_delivery_imports_file_hash",
+            "file_name",
+            "content_hash",
+            unique=True,
+            sqlite_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
+            postgresql_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
+        ),
+        Index("ix_vendor_delivery_imports_content_hash", "content_hash"),
+    )
+
+
+class VendorDeliveryItem(Base):
+    """One delivered-quantity line from a vendor delivery file, matched
+    directly by vendor + part (no PO). `delivery_date` is read from the
+    file when present (see `column_detector.DELIVERY_DATE_HEADERS`),
+    otherwise falls back to the import's `created_at` date -- this is what
+    powers the Daily Deliveries / Monthly Trend charts and date-range
+    filtering on the Delivery Tracking / Vendor Performance dashboards."""
+
+    __tablename__ = "vendor_delivery_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_delivery_import_id: Mapped[int] = mapped_column(
+        ForeignKey("vendor_delivery_imports.id", ondelete="CASCADE"), nullable=False
+    )
+    vendor_id: Mapped[int] = mapped_column(
+        ForeignKey("vendors.id", ondelete="RESTRICT"), nullable=False
+    )
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("parts.id", ondelete="RESTRICT"), nullable=False
+    )
+    vendor_part_number: Mapped[str] = mapped_column(nullable=False)
+    quantity_delivered: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    delivery_date: Mapped[date | None] = mapped_column(Date, default=None)
+    row_number: Mapped[int] = mapped_column(nullable=False)
+    raw_data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    vendor_delivery_import: Mapped[VendorDeliveryImport] = relationship()
+    vendor: Mapped[Vendor] = relationship()
+    part: Mapped[Part] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("quantity_delivered >= 0", name="ck_vendor_delivery_items_qty_nonneg"),
+        Index("ix_vendor_delivery_items_import_id", "vendor_delivery_import_id"),
+        Index("ix_vendor_delivery_items_vendor_id", "vendor_id"),
+        Index("ix_vendor_delivery_items_part_id", "part_id"),
+        Index("ix_vendor_delivery_items_delivery_date", "delivery_date"),
+    )
+
+
+class VendorDeliveryImportError(Base):
+    """Row- or file-level error logged during a vendor delivery import."""
+
+    __tablename__ = "vendor_delivery_import_errors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_delivery_import_id: Mapped[int] = mapped_column(
+        ForeignKey("vendor_delivery_imports.id", ondelete="CASCADE"), nullable=False
+    )
+    row_number: Mapped[int | None] = mapped_column(default=None)
+    raw_row: Mapped[dict | None] = mapped_column(JSON, default=None)
+    error_reason: Mapped[str] = mapped_column(nullable=False)
+    error_detail: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_vendor_delivery_import_errors_import_id", "vendor_delivery_import_id"),
+    )
+
+
 class CustomerOrder(Base):
     """Import-history record for one customer order file. Mirrors
     `DeliveryImport`: purely additive history -- there is no active/
@@ -383,8 +558,18 @@ class CustomerOrder(Base):
     completed_at: Mapped[datetime | None] = mapped_column(default=None)
 
     __table_args__ = (
-        UniqueConstraint(
-            "file_name", "content_hash", name="ux_customer_orders_file_hash"
+        # Partial, not a plain UniqueConstraint -- same reasoning as
+        # `DeliveryImport.ux_delivery_imports_file_hash`: a FAILED import is
+        # meant to be retryable per `run_customer_order_import`'s duplicate
+        # check, which only treats COMPLETED/COMPLETED_WITH_ERRORS as
+        # "already imported".
+        Index(
+            "ux_customer_orders_file_hash",
+            "file_name",
+            "content_hash",
+            unique=True,
+            sqlite_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
+            postgresql_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
         ),
         Index("ix_customer_orders_content_hash", "content_hash"),
     )

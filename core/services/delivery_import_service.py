@@ -306,3 +306,15 @@ def list_delivery_import_history(session: Session) -> list[DeliveryImport]:
             select(DeliveryImport).order_by(DeliveryImport.created_at.desc())
         ).scalars()
     )
+
+
+def list_delivery_import_errors(
+    delivery_import_id: int, session: Session
+) -> list[DeliveryImportError]:
+    return list(
+        session.execute(
+            select(DeliveryImportError)
+            .where(DeliveryImportError.delivery_import_id == delivery_import_id)
+            .order_by(DeliveryImportError.id)
+        ).scalars()
+    )

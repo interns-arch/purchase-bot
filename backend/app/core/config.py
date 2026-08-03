@@ -43,7 +43,17 @@ class Settings:
         ).split(",")
         if origin.strip()
     ]
-    upload_dir: str = os.environ.get("UPLOAD_DIR", "uploads/inventory")
+    # Document Processing Engine folder structure (see
+    # `backend/app/services/document_processor/staging.py`): every incoming
+    # file (manual upload or WhatsApp download) lands in `temp_upload_dir`,
+    # then gets moved to `upload_dir` (successfully processed) or
+    # `failed_upload_dir` (failed/needs-review/unsupported).
+    # `archive_upload_dir` is created but not actively used yet -- reserved
+    # for a future retention/cleanup job.
+    upload_dir: str = os.environ.get("UPLOAD_DIR", "uploads/processed")
+    temp_upload_dir: str = os.environ.get("TEMP_UPLOAD_DIR", "uploads/incoming")
+    archive_upload_dir: str = os.environ.get("ARCHIVE_UPLOAD_DIR", "uploads/archive")
+    failed_upload_dir: str = os.environ.get("FAILED_UPLOAD_DIR", "uploads/failed")
 
     # Optional one-time admin bootstrap (see main.py's startup hook). Both
     # must be set for it to do anything; otherwise use

@@ -53,6 +53,7 @@ def get_vendor_comparison(order_id: int, db: Session = Depends(get_db)) -> Vendo
                 customer_part_number=row.customer_part_number,
                 requested_quantity=float(row.requested_quantity),
                 vendor_name=row.vendor_name,
+                vendor_id=row.vendor_id,
                 vendor_part_number=row.vendor_part_number,
                 part_description=row.part_description,
                 brand=row.brand,
@@ -66,6 +67,7 @@ def get_vendor_comparison(order_id: int, db: Session = Depends(get_db)) -> Vendo
                 discount=row.discount,
                 stock_status=row.stock_status,
                 inventory_file=row.inventory_file,
+                order_item_id=row.order_item_id,
             )
             for row in result.rows
         ],

@@ -1,0 +1,295 @@
+"""Orchestrates the web app's Delivery Tracking upload workflow: validate,
+resolve each row by vendor + part number directly (no Purchase Order --
+that concept was removed from this application), and store
+`VendorDeliveryItem` rows. Reconciliation against `VendorSelection`
+allocations happens separately in `delivery_tracking_service.py`.
+
+Deliberately mirrors `delivery_import_service.py`'s shape (dedupe-by-hash,
+per-row error logging) for consistency, but is a fully separate module --
+`delivery_import_service.py` stays untouched, still serving the
+pre-existing CLI pipeline (`delivery_import.py`) which matches against
+`PurchaseOrderItem`.
+
+Pure business logic -- no `print()`/`input()` here.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from core.hashing import sha256_of_file
+from core.ingestion.column_detector import (
+    find_vendor_delivery_columns,
+    is_parseable_quantity,
+    normalise_part_number,
+    parse_quantity,
+)
+from core.ingestion.csv_reader import read_csv_rows
+from core.ingestion.excel_reader import read_excel_rows
+from core.ingestion.types import ParsedFile
+from core.models import (
+    DeliveryImportStatus,
+    Part,
+    PartAlias,
+    Vendor,
+    VendorDeliveryImport,
+    VendorDeliveryImportError,
+    VendorDeliveryItem,
+)
+
+SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
+
+_DATE_FORMATS = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"]
+
+
+class DuplicateVendorDeliveryFileError(Exception):
+    """Raised when this exact file (name + content) was already imported."""
+
+    def __init__(self, existing_import_id: int):
+        self.existing_import_id = existing_import_id
+        super().__init__(
+            f"This file's content was already imported as delivery import #{existing_import_id}."
+        )
+
+
+@dataclass
+class VendorDeliveryImportResult:
+    import_id: int
+    file_name: str
+    status: DeliveryImportStatus
+    row_count: int
+    error_count: int
+    errors: list[str] = field(default_factory=list)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _read_file(file_path: Path) -> ParsedFile:
+    if file_path.suffix.lower() == ".csv":
+        return read_csv_rows(file_path)
+    return read_excel_rows(file_path)
+
+
+def _resolve_vendor(raw_name: str, session: Session) -> Vendor | None:
+    raw_name = raw_name.strip()
+    if not raw_name:
+        return None
+    return session.execute(
+        select(Vendor).where(func.lower(Vendor.name) == raw_name.lower())
+    ).scalar_one_or_none()
+
+
+def _resolve_part(vendor_id: int, raw_part_number: str, session: Session) -> Part | None:
+    normalized = normalise_part_number(raw_part_number)
+    if not normalized:
+        return None
+
+    alias = session.execute(
+        select(PartAlias).where(
+            PartAlias.vendor_id == vendor_id,
+            PartAlias.normalized_part_number == normalized,
+        )
+    ).scalar_one_or_none()
+    if alias is not None:
+        return alias.part
+
+    return session.execute(
+        select(Part).where(Part.canonical_part_number == normalized)
+    ).scalar_one_or_none()
+
+
+def _parse_delivery_date(raw_value: str) -> date | None:
+    """Best-effort, never raises -- an unparseable or absent date just means
+    the caller falls back to the import's own timestamp."""
+    raw_value = (raw_value or "").strip()
+    if not raw_value:
+        return None
+
+    try:
+        return datetime.fromisoformat(raw_value).date()
+    except ValueError:
+        pass
+
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(raw_value, fmt).date()
+        except ValueError:
+            continue
+
+    return None
+
+
+def run_vendor_delivery_import(file_path: Path, session: Session) -> VendorDeliveryImportResult:
+    """Import one vendor delivery file. Raises
+    `DuplicateVendorDeliveryFileError` if this exact file content was
+    already imported successfully."""
+    if not file_path.exists():
+        raise FileNotFoundError(str(file_path))
+
+    if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file extension '{file_path.suffix}'. "
+            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}."
+        )
+
+    file_size = file_path.stat().st_size
+    if file_size == 0:
+        raise ValueError(f"'{file_path.name}' is empty.")
+
+    content_hash = sha256_of_file(file_path)
+
+    existing = session.execute(
+        select(VendorDeliveryImport).where(
+            VendorDeliveryImport.file_name == file_path.name,
+            VendorDeliveryImport.content_hash == content_hash,
+            VendorDeliveryImport.status.in_(
+                (DeliveryImportStatus.COMPLETED, DeliveryImportStatus.COMPLETED_WITH_ERRORS)
+            ),
+        )
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        raise DuplicateVendorDeliveryFileError(existing.id)
+
+    parsed_file = _read_file(file_path)
+    vendor_column, part_column, quantity_column, date_column = find_vendor_delivery_columns(
+        parsed_file.headers, file_path.name
+    )
+
+    vendor_delivery_import = VendorDeliveryImport(
+        file_name=file_path.name,
+        file_size_bytes=file_size,
+        content_hash=content_hash,
+        status=DeliveryImportStatus.COMPLETED,
+        row_count=0,
+        error_count=0,
+    )
+    session.add(vendor_delivery_import)
+    session.flush()  # assign vendor_delivery_import.id
+
+    row_count = 0
+    error_count = 0
+    error_messages: list[str] = []
+
+    def _log_error(row_number: int, row: dict, reason: str, detail: str) -> None:
+        nonlocal error_count
+        session.add(
+            VendorDeliveryImportError(
+                vendor_delivery_import_id=vendor_delivery_import.id,
+                row_number=row_number,
+                raw_row=row,
+                error_reason=reason,
+                error_detail=detail,
+            )
+        )
+        error_count += 1
+        error_messages.append(f"Row {row_number}: {reason} -- {detail}")
+
+    for row_number, row in enumerate(parsed_file.rows, start=2):
+        raw_vendor = row.get(vendor_column, "")
+        raw_part_number = row.get(part_column, "")
+        raw_quantity = row.get(quantity_column, "")
+        raw_date = row.get(date_column, "") if date_column else ""
+
+        if not raw_vendor.strip():
+            _log_error(row_number, row, "INVALID_VENDOR", "Vendor is blank.")
+            continue
+
+        if not raw_part_number.strip():
+            _log_error(row_number, row, "INVALID_PART_NUMBER", "Part Number is blank.")
+            continue
+
+        if not is_parseable_quantity(raw_quantity):
+            _log_error(
+                row_number,
+                row,
+                "INVALID_QUANTITY",
+                f"Could not parse delivered quantity {raw_quantity!r}.",
+            )
+            continue
+
+        quantity_delivered = parse_quantity(raw_quantity)
+        if quantity_delivered < 0:
+            _log_error(
+                row_number, row, "INVALID_QUANTITY", "Delivered quantity cannot be negative."
+            )
+            continue
+
+        vendor = _resolve_vendor(raw_vendor, session)
+        if vendor is None:
+            _log_error(
+                row_number, row, "VENDOR_NOT_FOUND", f"No vendor named {raw_vendor!r}."
+            )
+            continue
+
+        part = _resolve_part(vendor.id, raw_part_number, session)
+        if part is None:
+            _log_error(
+                row_number,
+                row,
+                "PART_NOT_FOUND",
+                f"Part {raw_part_number!r} is not a known part for vendor {raw_vendor!r}.",
+            )
+            continue
+
+        session.add(
+            VendorDeliveryItem(
+                vendor_delivery_import_id=vendor_delivery_import.id,
+                vendor_id=vendor.id,
+                part_id=part.id,
+                row_number=row_number,
+                vendor_part_number=raw_part_number.strip(),
+                quantity_delivered=quantity_delivered,
+                delivery_date=_parse_delivery_date(raw_date),
+                raw_data=row,
+            )
+        )
+        row_count += 1
+
+    vendor_delivery_import.row_count = row_count
+    vendor_delivery_import.error_count = error_count
+    vendor_delivery_import.status = (
+        DeliveryImportStatus.FAILED
+        if row_count == 0 and error_count > 0
+        else DeliveryImportStatus.COMPLETED_WITH_ERRORS
+        if error_count > 0
+        else DeliveryImportStatus.COMPLETED
+    )
+    vendor_delivery_import.completed_at = _utcnow()
+    session.flush()
+
+    return VendorDeliveryImportResult(
+        import_id=vendor_delivery_import.id,
+        file_name=file_path.name,
+        status=vendor_delivery_import.status,
+        row_count=row_count,
+        error_count=error_count,
+        errors=error_messages,
+    )
+
+
+def list_vendor_delivery_import_history(session: Session) -> list[VendorDeliveryImport]:
+    return list(
+        session.execute(
+            select(VendorDeliveryImport).order_by(VendorDeliveryImport.created_at.desc())
+        ).scalars()
+    )
+
+
+def list_vendor_delivery_import_errors(
+    vendor_delivery_import_id: int, session: Session
+) -> list[VendorDeliveryImportError]:
+    return list(
+        session.execute(
+            select(VendorDeliveryImportError)
+            .where(VendorDeliveryImportError.vendor_delivery_import_id == vendor_delivery_import_id)
+            .order_by(VendorDeliveryImportError.id)
+        ).scalars()
+    )

@@ -2,17 +2,18 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 
-// Ordered around the actual business workflow: bring in vendors -> import
-// their stock -> take a customer order -> compare -> (future) act on it.
+// Ordered around the actual business workflow: import vendor stock -> take
+// a customer order -> compare -> select vendor -> export allocation.
+// Vendors are never managed manually -- they're identified automatically
+// from each imported inventory file.
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
-  { to: "/vendors", label: "Vendor Management" },
   { to: "/vendor-inventory", label: "Vendor Inventory" },
   { to: "/customer-orders", label: "Customer Orders" },
   { to: "/vendor-comparison", label: "Vendor Comparison" },
-  { to: "/purchase-orders", label: "Purchase Orders", comingSoon: true },
-  { to: "/delivery-upload", label: "Delivery Upload", comingSoon: true },
-  { to: "/vendor-performance", label: "Vendor Performance", comingSoon: true },
+  { to: "/delivery-tracking", label: "Vendor Invoices" },
+  { to: "/vendor-performance", label: "Vendor Performance" },
+  { to: "/document-inbox", label: "Document Inbox" },
   { to: "/settings", label: "Settings" },
 ];
 

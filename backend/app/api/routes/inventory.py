@@ -4,17 +4,13 @@ is `core.services.inventory_import_service`, reused unchanged."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from backend.app.auth.dependencies import get_current_user
+from backend.app.auth.models import User
 from backend.app.database.session import get_db
-from backend.app.schemas.inventory import (
-    ImportErrorOut,
-    ImportHistoryOut,
-    ImportResultOut,
-    VendorInventoryItemOut,
-)
+from backend.app.schemas.inventory import ImportErrorOut, ImportHistoryOut, ImportResultOut
 from backend.app.services.inventory_service import process_uploads
 from core.services import inventory_import_service as import_service
 from core.services import vendor_service
@@ -27,7 +23,7 @@ router = APIRouter(
 @router.post("/imports", response_model=list[ImportResultOut])
 def upload_inventory_files(
     files: list[UploadFile],
-    vendor_id: int | None = Form(default=None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[ImportResultOut]:
     if not files:
@@ -35,10 +31,7 @@ def upload_inventory_files(
             status_code=status.HTTP_400_BAD_REQUEST, detail="No files were uploaded."
         )
 
-    try:
-        outcomes = process_uploads(files, db, vendor_id=vendor_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    outcomes = process_uploads(files, db, sender=current_user.username)
 
     results: list[ImportResultOut] = []
     for outcome in outcomes:
@@ -102,25 +95,6 @@ def list_imports(
 @router.get("/imports/{import_id}/errors", response_model=list[ImportErrorOut])
 def list_import_errors(import_id: int, db: Session = Depends(get_db)) -> list[ImportErrorOut]:
     return import_service.list_import_errors(import_id, db)
-
-
-@router.get("/vendors/{vendor_id}/items", response_model=list[VendorInventoryItemOut])
-def list_vendor_inventory_items(
-    vendor_id: int, db: Session = Depends(get_db)
-) -> list[VendorInventoryItemOut]:
-    """Vendor-wise inventory: every part currently active for this vendor."""
-    if vendor_service.get_vendor(vendor_id, db) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vendor not found.")
-
-    return [
-        VendorInventoryItemOut(
-            part_number=row.vendor_part_number,
-            quantity_available=float(row.quantity_available),
-            price=float(row.price) if row.price is not None else None,
-            mrp=float(row.mrp) if row.mrp is not None else None,
-        )
-        for row in import_service.get_active_inventory(vendor_id, db)
-    ]
 
 
 @router.post("/imports/{import_id}/confirm", response_model=ImportResultOut)

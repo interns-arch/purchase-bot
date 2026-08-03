@@ -110,6 +110,8 @@ class VendorComparisonRow:
     discount: str | None
     stock_status: str
     inventory_file: str | None
+    order_item_id: int | None = None
+    vendor_id: int | None = None
 
 
 @dataclass
@@ -127,7 +129,9 @@ class VendorComparisonResult:
     summary: VendorComparisonSummary = field(default_factory=VendorComparisonSummary)
 
 
-def _not_found_row(part_number: str, requested_quantity: Decimal) -> VendorComparisonRow:
+def _not_found_row(
+    part_number: str, requested_quantity: Decimal, *, order_item_id: int | None = None
+) -> VendorComparisonRow:
     return VendorComparisonRow(
         customer_part_number=part_number,
         requested_quantity=requested_quantity,
@@ -141,6 +145,7 @@ def _not_found_row(part_number: str, requested_quantity: Decimal) -> VendorCompa
         discount=None,
         stock_status=NOT_FOUND,
         inventory_file=None,
+        order_item_id=order_item_id,
     )
 
 
@@ -149,12 +154,20 @@ def compare_vendors(
     part_column: str,
     quantity_column: str,
     session: Session,
+    *,
+    id_column: str | None = None,
 ) -> VendorComparisonResult:
     """Search every active vendor inventory for every customer order line.
 
     Lists ALL vendors that stock a part -- never picks one. Rows for a given
     part are sorted with the best-stocked vendor first so the Purchase Team
     can compare at a glance.
+
+    `id_column`, when given, names a column in `input_rows` holding the
+    originating `CustomerOrderItem.id` (as a string) -- passed through as
+    `VendorComparisonRow.order_item_id` so a later Vendor Selection step can
+    tie a chosen offer back to the exact order line. CLI callers (which have
+    no such row identity) simply omit it and get `order_item_id=None`.
     """
     offer_index = {
         part_row.canonical_part_number: part_row
@@ -167,6 +180,8 @@ def compare_vendors(
     for row in input_rows:
         raw_part_number = row.get(part_column, "").strip()
         raw_quantity = row.get(quantity_column, "")
+        raw_order_item_id = row.get(id_column) if id_column else None
+        order_item_id = int(raw_order_item_id) if raw_order_item_id else None
 
         if (
             not raw_part_number
@@ -181,7 +196,11 @@ def compare_vendors(
         part_row = offer_index.get(normalized)
 
         if part_row is None or not part_row.vendors:
-            result.rows.append(_not_found_row(raw_part_number, requested_quantity))
+            result.rows.append(
+                _not_found_row(
+                    raw_part_number, requested_quantity, order_item_id=order_item_id
+                )
+            )
             result.summary.not_found_items += 1
             continue
 
@@ -198,6 +217,7 @@ def compare_vendors(
                     customer_part_number=raw_part_number,
                     requested_quantity=requested_quantity,
                     vendor_name=offer.vendor_name,
+                    vendor_id=offer.vendor_id,
                     vendor_part_number=offer.vendor_part_number,
                     part_description=_resolve_description(
                         part_row.part_description, offer
@@ -211,6 +231,7 @@ def compare_vendors(
                         offer.quantity_available, requested_quantity
                     ),
                     inventory_file=offer.inventory_file,
+                    order_item_id=order_item_id,
                 )
             )
             result.summary.matching_vendors_found += 1
@@ -228,16 +249,20 @@ def compare_vendors_for_order(order_id: int, session: Session) -> VendorComparis
     synthetic column names below just need to agree with each other."""
     part_column = "Part Number"
     quantity_column = "Quantity"
+    id_column = "__order_item_id__"
 
     input_rows = [
         {
             part_column: item.part_number_raw,
             quantity_column: decimal_to_string(item.quantity_requested),
+            id_column: str(item.id),
         }
         for item in list_customer_order_items(order_id, session)
     ]
 
-    return compare_vendors(input_rows, part_column, quantity_column, session)
+    return compare_vendors(
+        input_rows, part_column, quantity_column, session, id_column=id_column
+    )
 
 
 REPORT_HEADERS = [

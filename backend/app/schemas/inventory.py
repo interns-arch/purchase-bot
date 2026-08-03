@@ -36,10 +36,3 @@ class ImportErrorOut(BaseModel):
     error_reason: str
     error_detail: str | None
     raw_row: dict | None
-
-
-class VendorInventoryItemOut(BaseModel):
-    part_number: str
-    quantity_available: float
-    price: float | None
-    mrp: float | None

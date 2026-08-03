@@ -1,3 +1,205 @@
+We have finalized the business workflow. Please update the application accordingly.
+
+=====================================================
+1. REMOVE "DELIVERY" DOCUMENT TYPE
+=====================================================
+
+The "DELIVERY" document type is incorrect.
+
+Remove it completely from the Document Inbox filter.
+
+Also remove the "UNKNOWN" document type.
+
+The final document types should only be:
+
+- Vendor Inventory
+- Customer Order
+- Vendor Invoice
+
+There should never be a Delivery or Unknown option.
+
+=====================================================
+2. ADD VENDOR INVOICE MODULE
+=====================================================
+
+Remove the "Document Inbox" page from the sidebar.
+
+Instead add a new page:
+
+Vendor Invoice
+
+This page will be used for manually uploading Vendor Invoice files.
+
+Supported formats:
+
+- PDF
+- Excel
+- CSV
+
+This module replaces the current Document Inbox functionality.
+
+=====================================================
+3. VENDOR INVOICE WORKFLOW
+=====================================================
+
+Vendor Inventory
+↓
+
+Customer Order
+
+↓
+
+Vendor Comparison
+
+↓
+
+Vendor Selection
+
+↓
+
+Export Vendor Allocation Excel
+
+↓
+
+Vendor sends Invoice
+
+↓
+
+Upload Vendor Invoice
+
+↓
+
+System extracts:
+
+Vendor Name
+
+Vendor Part Number
+
+Quantity Delivered
+
+Invoice Number
+
+Invoice Date (if available)
+
+↓
+
+Store the delivery information
+
+↓
+
+Update Delivery Tracking automatically
+
+↓
+
+Update Vendor Performance automatically
+
+=====================================================
+4. DELIVERY TRACKING
+=====================================================
+
+Delivery Tracking should NOT require manual data entry.
+
+It should automatically calculate data using:
+
+Vendor Allocation
++
+Vendor Invoice Upload
+
+Display:
+
+- Ordered Quantity
+- Delivered Quantity
+- Short Quantity
+- Complete
+- Partial
+- Pending
+
+=====================================================
+5. VENDOR PERFORMANCE
+=====================================================
+
+Vendor Performance should also update automatically.
+
+Calculate:
+
+- Total Allocated Quantity
+- Delivered Quantity
+- Fulfillment %
+- Short Supply
+- Vendor Ranking
+- Delivery Accuracy
+
+Everything should come from actual imported data.
+
+=====================================================
+6. REMOVE DOCUMENT INBOX
+=====================================================
+
+The Document Inbox page is no longer required.
+
+Delete:
+
+- Sidebar item
+- Page
+- Navigation
+- Routes
+
+Replace it with Vendor Invoice.
+
+=====================================================
+7. UPDATED SIDEBAR
+=====================================================
+
+Dashboard
+
+Vendor Inventory
+
+Customer Orders
+
+Vendor Comparison
+
+Vendor Invoice
+
+Delivery Tracking
+
+Vendor Performance
+
+Settings
+
+=====================================================
+8. IMPORTANT
+=====================================================
+
+Delivery Tracking and Vendor Performance must no longer display "Coming Soon".
+
+Implement both modules using real data from:
+
+- Vendor Inventory
+- Customer Orders
+- Vendor Comparison
+- Vendor Invoice Upload
+
+The dashboards should update automatically whenever a new Vendor Invoice is imported.
+
+Do not use dummy data or placeholder cards.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 Review and improve the current inventory matching logic.
 
@@ -253,3 +455,6 @@ and the customer order file
 input.csv
 
 Finally, explain what changes were made and why they improve the accuracy and usefulness of the matching process.
+
+
+

@@ -4,12 +4,15 @@ import { ToastProvider } from "./context/ToastContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
-import { VendorsPage } from "./pages/VendorsPage";
 import { VendorInventoryPage } from "./pages/VendorInventoryPage";
 import { CustomerOrdersPage } from "./pages/CustomerOrdersPage";
 import { VendorComparisonPage } from "./pages/VendorComparisonPage";
+import { DocumentInboxPage } from "./pages/DocumentInboxPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { ComingSoonPage } from "./pages/ComingSoonPage";
+import { IntegrationStatusPage } from "./pages/IntegrationStatusPage";
+import { DeliveryTrackingPage } from "./pages/DeliveryTrackingPage";
+import { VendorPerformancePage } from "./pages/VendorPerformancePage";
+import { VendorPerformanceDetailPage } from "./pages/VendorPerformanceDetailPage";
 
 function App() {
   return (
@@ -23,14 +26,6 @@ function App() {
               element={
                 <ProtectedRoute>
                   <DashboardPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/vendors"
-              element={
-                <ProtectedRoute>
-                  <VendorsPage />
                 </ProtectedRoute>
               }
             />
@@ -59,24 +54,10 @@ function App() {
               }
             />
             <Route
-              path="/purchase-orders"
+              path="/delivery-tracking"
               element={
                 <ProtectedRoute>
-                  <ComingSoonPage
-                    title="Purchase Orders"
-                    description="Once the purchase team selects vendors from the comparison report, purchase orders will be generated here automatically."
-                  />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/delivery-upload"
-              element={
-                <ProtectedRoute>
-                  <ComingSoonPage
-                    title="Delivery Upload"
-                    description="Vendor delivery files will be uploaded here to track ordered vs. delivered quantities."
-                  />
+                  <DeliveryTrackingPage />
                 </ProtectedRoute>
               }
             />
@@ -84,10 +65,23 @@ function App() {
               path="/vendor-performance"
               element={
                 <ProtectedRoute>
-                  <ComingSoonPage
-                    title="Vendor Performance"
-                    description="Vendor reliability (delivered vs. ordered accuracy) will be tracked here once deliveries are recorded."
-                  />
+                  <VendorPerformancePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/vendor-performance/:vendorId"
+              element={
+                <ProtectedRoute>
+                  <VendorPerformanceDetailPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/document-inbox"
+              element={
+                <ProtectedRoute>
+                  <DocumentInboxPage />
                 </ProtectedRoute>
               }
             />
@@ -96,6 +90,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <SettingsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/settings/integrations"
+              element={
+                <ProtectedRoute>
+                  <IntegrationStatusPage />
                 </ProtectedRoute>
               }
             />

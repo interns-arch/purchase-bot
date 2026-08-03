@@ -1,29 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Layout } from "../components/Layout";
-import { StatusPill } from "../components/StatusPill";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
 import { listCustomerOrders } from "../api/customerOrders";
-import { downloadVendorComparisonExport, getVendorComparison } from "../api/vendorComparison";
+import { getVendorComparison } from "../api/vendorComparison";
+import { downloadSelectedVendorsExport, listVendorSelections, selectVendor } from "../api/vendorSelection";
 
-const STOCK_STATUS_OPTIONS = ["Available", "Partial", "Out of Stock", "Not Found"];
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 const COLUMNS = [
   { key: "customer_part_number", label: "Customer Part Number" },
-  { key: "requested_quantity", label: "Requested Qty", numeric: true },
+  { key: "requested_quantity", label: "Requested Quantity", numeric: true },
   { key: "vendor_name", label: "Vendor Name" },
   { key: "vendor_part_number", label: "Vendor Part Number" },
-  { key: "part_description", label: "Part Description" },
-  { key: "brand", label: "Brand" },
-  { key: "vendor_available_quantity", label: "Available Qty", numeric: true },
-  { key: "mrp", label: "MRP", numeric: true },
-  { key: "sale_price", label: "Sale Price", numeric: true },
-  { key: "discount", label: "Discount" },
-  { key: "stock_status", label: "Status" },
-  { key: "inventory_file", label: "Inventory File" },
+  { key: "vendor_available_quantity", label: "Available Quantity", numeric: true },
 ];
 
 function StatCard({ label, value }) {
@@ -43,12 +35,13 @@ export function VendorComparisonPage() {
   const [comparison, setComparison] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
   const [sortKey, setSortKey] = useState("customer_part_number");
   const [sortDir, setSortDir] = useState("asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [isExporting, setIsExporting] = useState(false);
+  const [selections, setSelections] = useState([]);
+  const [selectingKey, setSelectingKey] = useState(null);
 
   useEffect(() => {
     listCustomerOrders()
@@ -73,8 +66,29 @@ export function VendorComparisonPage() {
   }, [orderId]);
 
   useEffect(() => {
+    if (!orderId) {
+      setSelections([]);
+      return;
+    }
+    listVendorSelections(orderId)
+      .then(setSelections)
+      .catch((error) => toast.error(extractErrorMessage(error, "Could not load vendor selections.")));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId]);
+
+  useEffect(() => {
     setPage(1);
-  }, [search, statusFilter, orderId]);
+  }, [search, orderId]);
+
+  // Each customer part (order_item_id) holds its own independent selection --
+  // selecting a vendor for one part never affects any other part's selection.
+  const selectionsByItem = useMemo(() => {
+    const map = {};
+    for (const selection of selections) {
+      map[selection.customer_order_item_id] = selection;
+    }
+    return map;
+  }, [selections]);
 
   function toggleSort(key) {
     if (sortKey === key) {
@@ -98,9 +112,6 @@ export function VendorComparisonPage() {
           (row.vendor_part_number || "").toLowerCase().includes(query)
       );
     }
-    if (statusFilter) {
-      rows = rows.filter((row) => row.stock_status === statusFilter);
-    }
 
     const column = COLUMNS.find((c) => c.key === sortKey);
     const sorted = [...rows].sort((a, b) => {
@@ -114,16 +125,37 @@ export function VendorComparisonPage() {
     });
     if (sortDir === "desc") sorted.reverse();
     return sorted;
-  }, [comparison, search, statusFilter, sortKey, sortDir]);
+  }, [comparison, search, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const pageRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
 
-  async function handleExport() {
+  async function handleSelect(row) {
+    const key = `${row.order_item_id}-${row.vendor_id}`;
+    const quantity = Math.min(row.requested_quantity, row.vendor_available_quantity);
+    setSelectingKey(key);
+    try {
+      const selection = await selectVendor(orderId, row.order_item_id, {
+        vendorId: row.vendor_id,
+        quantitySelected: quantity,
+      });
+      setSelections((prev) => [
+        ...prev.filter((s) => s.customer_order_item_id !== row.order_item_id),
+        selection,
+      ]);
+      toast.success(`Selected ${row.vendor_name} for ${row.customer_part_number}.`);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not save vendor selection."));
+    } finally {
+      setSelectingKey(null);
+    }
+  }
+
+  async function handleExportSelected() {
     if (!orderId) return;
     setIsExporting(true);
     try {
-      await downloadVendorComparisonExport(orderId, `vendor_comparison_order_${orderId}.xlsx`);
+      await downloadSelectedVendorsExport(orderId, `selected_vendors_order_${orderId}.xlsx`);
       toast.success("Export downloaded.");
     } catch (error) {
       toast.error(extractErrorMessage(error, "Export failed."));
@@ -131,6 +163,8 @@ export function VendorComparisonPage() {
       setIsExporting(false);
     }
   }
+
+  const hasSelections = selections.length > 0;
 
   return (
     <Layout title="Vendor Comparison">
@@ -160,10 +194,10 @@ export function VendorComparisonPage() {
             <button
               type="button"
               className="btn btn--primary"
-              onClick={handleExport}
-              disabled={isExporting || !comparison}
+              onClick={handleExportSelected}
+              disabled={isExporting || !hasSelections}
             >
-              {isExporting ? "Exporting…" : "Export to Excel"}
+              {isExporting ? "Exporting…" : "Export Selected Vendors"}
             </button>
           </div>
         )}
@@ -177,7 +211,6 @@ export function VendorComparisonPage() {
             <StatCard label="Customer Order Items" value={comparison.summary.customer_order_items} />
             <StatCard label="Parts Matched" value={comparison.summary.matched_items} />
             <StatCard label="Parts Not Found" value={comparison.summary.not_found_items} />
-            <StatCard label="Matching Vendor Rows" value={comparison.summary.matching_vendors_found} />
           </div>
 
           <section className="panel">
@@ -193,19 +226,6 @@ export function VendorComparisonPage() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
-              <select
-                className="field__input"
-                style={{ maxWidth: 200 }}
-                value={statusFilter}
-                onChange={(event) => setStatusFilter(event.target.value)}
-              >
-                <option value="">All statuses</option>
-                {STOCK_STATUS_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
               <select
                 className="field__input"
                 style={{ maxWidth: 160 }}
@@ -224,7 +244,7 @@ export function VendorComparisonPage() {
             </div>
 
             {filteredRows.length === 0 ? (
-              <EmptyState title="No matching rows" description="Try a different search or filter." />
+              <EmptyState title="No matching rows" description="Try a different search." />
             ) : (
               <>
                 <div className="table-scroll">
@@ -244,27 +264,41 @@ export function VendorComparisonPage() {
                             </button>
                           </th>
                         ))}
+                        <th>Select Vendor</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {pageRows.map((row, index) => (
-                        <tr key={`${row.customer_part_number}-${row.vendor_name}-${index}`}>
-                          <td>{row.customer_part_number}</td>
-                          <td>{row.requested_quantity}</td>
-                          <td>{row.vendor_name || "-"}</td>
-                          <td>{row.vendor_part_number || "-"}</td>
-                          <td>{row.part_description || "—"}</td>
-                          <td>{row.brand || "—"}</td>
-                          <td>{row.vendor_available_quantity ?? "—"}</td>
-                          <td>{row.mrp ?? "—"}</td>
-                          <td>{row.sale_price ?? "—"}</td>
-                          <td>{row.discount || "—"}</td>
-                          <td>
-                            <StatusPill status={row.stock_status} />
-                          </td>
-                          <td>{row.inventory_file || "-"}</td>
-                        </tr>
-                      ))}
+                      {pageRows.map((row, index) => {
+                        const key = `${row.order_item_id}-${row.vendor_id}`;
+                        const itemSelection = selectionsByItem[row.order_item_id];
+                        const isThisRowSelected = itemSelection?.vendor_id === row.vendor_id;
+
+                        return (
+                          <tr key={`${row.customer_part_number}-${row.vendor_name}-${index}`}>
+                            <td>{row.customer_part_number}</td>
+                            <td>{row.requested_quantity}</td>
+                            <td>{row.vendor_name || "—"}</td>
+                            <td>{row.vendor_part_number || "—"}</td>
+                            <td>{row.vendor_available_quantity ?? "—"}</td>
+                            <td>
+                              {row.vendor_id != null && (
+                                <button
+                                  type="button"
+                                  className={"btn " + (isThisRowSelected ? "btn--secondary" : "btn--ghost")}
+                                  disabled={selectingKey === key}
+                                  onClick={() => handleSelect(row)}
+                                >
+                                  {selectingKey === key
+                                    ? "Saving…"
+                                    : isThisRowSelected
+                                      ? "Selected ✓"
+                                      : "Select"}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

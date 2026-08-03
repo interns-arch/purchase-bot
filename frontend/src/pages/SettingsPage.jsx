@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
@@ -61,6 +62,19 @@ export function SettingsPage() {
           Additional users and roles (Purchase Team, Warehouse, Manager) will be manageable
           from here in a later phase.
         </p>
+      </section>
+
+      <section className="panel" style={{ maxWidth: 480 }}>
+        <div className="panel__header">
+          <h2>Integrations</h2>
+        </div>
+        <p style={{ color: "var(--color-text-muted)", fontSize: "0.9rem", marginBottom: 12 }}>
+          Check WhatsApp Business connection health, webhook verification, and recent
+          message/attachment activity.
+        </p>
+        <Link to="/settings/integrations" className="btn btn--secondary">
+          View Integration Status
+        </Link>
       </section>
 
       <section className="panel" style={{ maxWidth: 480 }}>

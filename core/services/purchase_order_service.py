@@ -9,7 +9,9 @@ rows to compare deliveries against, so this service turns each vendor's
 MATCHED/PARTIAL lines from that CSV into one `PurchaseOrder` per vendor.
 
 Pure business logic -- no `print()`/`input()` here; see `po_generator.py`
-for the CLI layer.
+for the CLI layer. The web application no longer has a Purchase Order
+concept (see `vendor_selection_service.py`'s "Export Selected Vendors"
+instead) -- this module is kept only for the pre-existing CLI pipeline.
 """
 
 from __future__ import annotations

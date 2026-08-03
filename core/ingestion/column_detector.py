@@ -59,6 +59,17 @@ DELIVERED_QUANTITY_HEADERS = {
     "deliveryquantity",
 }
 
+# Optional -- not every vendor delivery file includes a date; when absent,
+# callers fall back to the import timestamp (see `VendorDeliveryItem`).
+DELIVERY_DATE_HEADERS = {
+    "deliverydate",
+    "date",
+    "shippeddate",
+    "shipdate",
+    "dispatchdate",
+    "invoicedate",
+}
+
 # Optional columns: not every vendor file provides these, so callers treat a
 # missing column as "no data" rather than raising (see find_required_columns
 # for the required-column equivalent).
@@ -280,3 +291,56 @@ def find_delivery_columns(
         )
 
     return vendor_column, po_number_column, part_number_column, delivered_quantity_column
+
+
+def find_vendor_delivery_columns(
+    headers: list[str],
+    file_name: str,
+) -> tuple[str, str, str, str | None]:
+    """
+    Find the vendor, part-number, delivered-quantity, and (optional)
+    delivery-date columns from a web-app vendor delivery file's header
+    row -- no PO Number column, unlike `find_delivery_columns` above (the
+    web app has no Purchase Order concept; deliveries are matched by
+    vendor + part directly).
+
+    Returns (vendor_column, part_number_column, delivered_quantity_column,
+    delivery_date_column | None).
+    """
+    header_lookup = {
+        normalise_header(header): header
+        for header in headers
+        if header is not None
+    }
+
+    def _find(candidate_headers: set[str]) -> str | None:
+        return next(
+            (
+                original_header
+                for normalised, original_header in header_lookup.items()
+                if normalised in candidate_headers
+            ),
+            None,
+        )
+
+    vendor_column = _find(VENDOR_NAME_HEADERS)
+    part_number_column = _find(PART_NUMBER_HEADERS)
+    delivered_quantity_column = _find(DELIVERED_QUANTITY_HEADERS)
+    delivery_date_column = _find(DELIVERY_DATE_HEADERS)
+
+    missing = [
+        label
+        for label, column in (
+            ("vendor", vendor_column),
+            ("part number", part_number_column),
+            ("delivered quantity", delivered_quantity_column),
+        )
+        if column is None
+    ]
+
+    if missing:
+        raise ValueError(
+            f"Column(s) {missing} not found in '{file_name}'. Headers found: {headers}"
+        )
+
+    return vendor_column, part_number_column, delivered_quantity_column, delivery_date_column

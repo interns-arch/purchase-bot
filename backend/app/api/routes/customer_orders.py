@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from backend.app.auth.dependencies import get_current_user
+from backend.app.auth.models import User
 from backend.app.database.session import get_db
 from backend.app.schemas.customer_order import (
     CustomerOrderErrorOut,
@@ -25,14 +26,16 @@ router = APIRouter(
 
 @router.post("", response_model=list[CustomerOrderImportResultOut])
 def upload_customer_orders(
-    files: list[UploadFile], db: Session = Depends(get_db)
+    files: list[UploadFile],
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[CustomerOrderImportResultOut]:
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="No files were uploaded."
         )
 
-    outcomes = process_customer_order_uploads(files, db)
+    outcomes = process_customer_order_uploads(files, db, sender=current_user.username)
 
     return [
         CustomerOrderImportResultOut(

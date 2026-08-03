@@ -17,9 +17,15 @@ from sqlalchemy import func, select
 
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
+from backend.app.api.routes.deliveries import router as deliveries_router
+from backend.app.api.routes.delivery_tracking import router as delivery_tracking_router
+from backend.app.api.routes.documents import router as documents_router
+from backend.app.api.routes.integration_status import router as integration_status_router
 from backend.app.api.routes.inventory import router as inventory_router
 from backend.app.api.routes.vendor_comparison import router as vendor_comparison_router
-from backend.app.api.routes.vendors import router as vendors_router
+from backend.app.api.routes.vendor_performance import router as vendor_performance_router
+from backend.app.api.routes.vendor_selection import router as vendor_selection_router
+from backend.app.api.routes.whatsapp import router as whatsapp_router
 from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
@@ -80,10 +86,16 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)
-app.include_router(vendors_router)
 app.include_router(inventory_router)
+app.include_router(deliveries_router)
+app.include_router(delivery_tracking_router)
+app.include_router(documents_router)
+app.include_router(integration_status_router)
 app.include_router(customer_orders_router)
 app.include_router(vendor_comparison_router)
+app.include_router(vendor_selection_router)
+app.include_router(vendor_performance_router)
+app.include_router(whatsapp_router)
 
 
 @app.get("/api/health", tags=["health"])
