@@ -36,6 +36,19 @@ Covers:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env BEFORE importing core.db (below), so a standalone run of
+# this script targets the SAME database the web app does -- the app loads this
+# file via backend.app.core.config, but this script doesn't import config, so
+# without this line core.db would find no DATABASE_URL in the environment and
+# silently fall back to the local SQLite dev database. Real OS environment
+# variables (e.g. Render's DATABASE_URL) still take precedence -- load_dotenv
+# never overrides an already-set variable -- so this changes nothing about how
+# the script behaves on Render.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from sqlalchemy import inspect, select, text
 
@@ -257,7 +270,29 @@ def _migrate_vendors_columns() -> None:
         session.commit()
 
 
+def _require_expected_database(*, allow_sqlite: bool) -> None:
+    """Print the resolved target database (password hidden) and refuse to run
+    against local SQLite unless explicitly allowed. This is the safety net for
+    the exact footgun that shipped the automation columns to the local SQLite
+    dev database instead of the production Postgres/Neon one: a standalone run
+    with no DATABASE_URL silently falls back to SQLite. Pass `--allow-sqlite`
+    to intentionally migrate a local SQLite dev database."""
+    url = engine.url
+    print(f"Target database: {url.render_as_string(hide_password=True)}")
+
+    if url.get_backend_name() == "sqlite" and not allow_sqlite:
+        print(
+            "ABORTING: resolved to a local SQLite database, not PostgreSQL/Neon.\n"
+            "  DATABASE_URL is not set in the environment or backend/.env.\n"
+            "  Set DATABASE_URL to your Neon connection string and re-run, or pass\n"
+            "  --allow-sqlite if you really mean to migrate the local SQLite dev DB.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main() -> int:
+    _require_expected_database(allow_sqlite="--allow-sqlite" in sys.argv)
     _migrate_vendor_selections_multi_vendor()
     _migrate_vendor_delivery_imports_source_column()
     _migrate_incoming_documents_columns()
