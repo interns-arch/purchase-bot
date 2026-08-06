@@ -465,20 +465,30 @@ Status:
 | Alternative Vendor Search | Completed |
 | Vendor Performance Dashboard | Completed |
 | Fulfillment Summary Report | Completed |
-| **Web Application** (Login, Dashboard, Vendor Management, Vendor Inventory, Customer Orders, Vendor Comparison, Settings) | **Completed** -- see [Web Application](#web-application) below |
+| **Web Application** (Login, Dashboard, Vendor Inventory, Customer Orders, Vendor Comparison, Vendor Selection (manual + automatic), Vendor Invoice Verification, Delivery Tracking, Vendor Performance, WhatsApp receive, Gmail automation, Google Sheets sync, Settings) | **Completed** -- see [Web Application](#web-application) below |
 
 ---
 
 # Web Application
 
-**Added 2026-08-01, redesigned around the real workflow 2026-08-01.** The
+**Added 2026-08-01, redesigned around the real workflow 2026-08-01, module
+table/architecture updated 2026-08-03 to match the current codebase.** The
 CLI tool above (`core/`, the module scripts) is being wrapped in a web
 application -- FastAPI backend + React frontend -- one module at a time,
 per the migration plan. **No business logic was rewritten**: the web app
 calls the exact same `core/services/*` functions the CLI scripts call,
-against the exact same SQLite database (`database/app.db`). Uploading a
-file through the browser and running `python inventory_import.py` are two
-different front doors to the same back room.
+against the exact same database (SQLite locally, PostgreSQL in production
+-- see `DEPLOYMENT.md`). Uploading a file through the browser and running
+`python inventory_import.py` are two different front doors to the same
+back room.
+
+Vendors are never managed through a manual CRUD screen -- there is no
+`vendors.py` route or `VendorsPage` (an earlier Phase 1 version had one;
+it was removed once vendor identification was fully automated). Every
+vendor is auto-created from its very first uploaded file, which also
+auto-generates its permanent **Vendor Code** (see "Vendor Code" below) --
+identification no longer depends on a WhatsApp sender number, since every
+vendor messages the same shared WhatsApp Business number.
 
 The application is not just "manage vendor inventory" -- its purpose is to
 help the purchase team find which vendors can supply the parts a customer
@@ -486,18 +496,34 @@ ordered. The UI is organized around that workflow, not around database
 tables:
 
 ```
-Upload Vendor Inventory  ->  Upload Customer Order  ->  Vendor Comparison
-                                                              |
-                                     (purchase team reviews, selects vendors)
-                                                              |
-                              Purchase Orders (later phase) -> Delivery Upload
-                              (later phase) -> Vendor Performance (later phase)
+Upload Vendor Inventory -> Upload Customer Order -> Vendor Comparison
+                                                          |
+                        (purchase team reviews and selects vendors manually,
+                         OR runs the automatic vendor-selection rule engine --
+                         Own Stock is always tried first, then either can
+                         split the remainder across several external
+                         vendors when no single vendor covers the full qty)
+                                                          |
+        Vendor Selection -> Export Selected Vendors (Excel), and if this was
+        an AUTOMATIC selection: emails the same Excel to
+        ALLOCATION_REPORT_EMAIL, then generates one Purchase Order per
+        selected vendor (saved + downloadable, optionally emailed to
+        PURCHASE_TEAM_EMAIL for internal review -- never sent to a vendor)
+                                                          |
+                   Vendor sends an invoice/delivery for what they supplied
+                                                          |
+   Upload Delivery File, OR Vendor Invoice PDF (auto-extracted + verified
+   against the Vendor Selection above for short/extra/missing/unexpected
+   supply) -> Delivery Tracking -> Vendor Performance
 ```
 
-Vendor Selection, Purchase Order Generation, Delivery Upload, Gap Analysis,
-Vendor Performance, and WhatsApp Integration will wrap the remaining
-`core/services/*` modules the same way, in later passes -- their sidebar
-entries already exist today, labeled "Coming Soon."
+Purchase Orders in the web app (`VendorPurchaseOrder`/`VendorPurchaseOrderItem`)
+are a distinct, newer concept from the legacy CLI's PO-based matching
+pipeline (`core.services.purchase_order_service`, untouched) -- these are
+keyed off `VendorSelection`, generated automatically, and never sent to a
+vendor (vendor-direct delivery is a deferred future phase). See
+[Automation Flow](#automation-flow) below for how WhatsApp, Gmail, and
+Vendor Invoice PDFs feed into this same pipeline automatically.
 
 ## Modules implemented so far
 
@@ -505,12 +531,217 @@ entries already exist today, labeled "Coming Soon."
 |---|---|---|---|
 | Login | Username/password, JWT-based session | `POST /api/auth/login`, `/logout`, `/me`, `/change-password` | `LoginPage` |
 | Dashboard | Active vendors, files imported, customer orders uploaded, parts matched/not found (from the latest order's comparison), last import time, recent activity | `GET /api/dashboard` | `DashboardPage` |
-| Vendor Management | Add / Edit / Disable / View vendor | `GET/POST /api/vendors`, `GET/PATCH /api/vendors/{id}`, `POST /api/vendors/{id}/disable` | `VendorsPage` |
-| Vendor Inventory | Upload one or many CSV/Excel files, progress, validation errors, import history, vendor-wise inventory viewer | `POST /api/inventory/imports`, `GET /api/inventory/imports`, `GET /api/inventory/imports/{id}/errors`, `POST .../confirm`, `POST .../cancel`, `GET /api/inventory/vendors/{id}/items` | `VendorInventoryPage` |
+| Vendor Inventory | Upload one or many CSV/Excel files, progress, validation errors, import history (with each vendor's code), vendor-wise inventory viewer. Vendors are auto-created + auto-coded from their first file, never managed manually -- see "Vendor Code" below | `POST /api/inventory/imports`, `GET /api/inventory/imports`, `GET .../{id}/errors`, `POST .../confirm`, `POST .../cancel` | `VendorInventoryPage` |
 | Customer Orders | Upload the customer's order file, order history, view items/errors -- becomes the input to Vendor Comparison | `POST/GET /api/customer-orders`, `GET .../{id}/items`, `GET .../{id}/errors` | `CustomerOrdersPage` |
 | Vendor Comparison | **The heart of the app.** Pick a customer order, see every vendor that can supply each part (search/filter/sort/paginate), export to Excel | `GET /api/vendor-comparison/{order_id}`, `GET .../export` | `VendorComparisonPage` |
+| Vendor Selection (manual + automatic) | Purchase team picks one or more vendors per order line from the comparison results (splitting a line across vendors when one alone can't cover it), or runs the rule engine (`highest_quantity`, `minimum_vendors`, `combination`) to select automatically -- **Own Stock is always tried first** regardless of strategy, with only the shortfall handed to the chosen strategy; exports the final allocation, and on automatic runs also emails the allocation report + generates Purchase Orders (see below) | `GET /api/vendor-selection/{order_id}`, `PUT/DELETE .../items/{item_id}/vendors/{vendor_id}`, `POST .../auto-select`, `GET .../export` | (reached from `VendorComparisonPage`) |
+| Purchase Orders | One Purchase Order generated automatically per vendor after Automatic Vendor Selection, grouped from that vendor's `VendorSelection` rows; always saved + downloadable, optionally emailed to an internal purchase-team address (`PURCHASE_TEAM_EMAIL`) -- **never sent to a vendor** (vendor-direct delivery is a deferred future phase) | `GET /api/purchase-orders`, `GET .../{id}/export`, `GET .../{id}/lines` | `PurchaseOrdersPage` |
+| Vendor Invoice Verification | Upload a vendor's invoice PDF (or receive one automatically); extracts vendor name/part numbers/quantities (`pdfplumber`), compares against that vendor's current Vendor Selection allocations, classifies each line (matched / short / extra / missing / unexpected supply), and mirrors matched/short/extra lines into the same delivery data Delivery Tracking and Vendor Performance already consume -- no changes needed to either | `POST/GET /api/vendor-invoices/imports`, `GET .../{id}/lines` | `VendorInvoicesPage` |
+| Delivery Tracking | Upload what a vendor actually delivered; ordered vs. delivered vs. short, computed from Vendor Selection + these uploads (or from Vendor Invoice Verification, above) | `POST/GET /api/deliveries/imports`, `GET .../{id}/errors`, `GET /api/delivery-tracking` | `DeliveryTrackingPage` |
+| Vendor Performance | Fulfillment %, delivery accuracy, ranking per vendor, computed from the same delivery data | `GET /api/vendor-performance`, `GET .../{vendor_id}` | `VendorPerformancePage` / `VendorPerformanceDetailPage` |
+| WhatsApp Integration | Receives inventory/order/delivery files sent as WhatsApp attachments and imports them through the same pipeline as a manual upload. **Receive-only today -- the app cannot send WhatsApp replies.** Connection status/test only, no message composer | `GET/POST /api/whatsapp/webhook` (Meta-facing), `GET /api/integrations/whatsapp/status`, `POST .../test-connection` | `IntegrationStatusPage` (via Settings) |
+| Gmail Automation | Polls a dedicated mailbox for unread mail (IMAP or OAuth), downloads Excel attachments (dropping the trailing two when more than two are attached), and imports them as Customer Orders through the same pipeline manual upload uses | `GET /api/integrations/gmail/status`, `POST .../test-connection` | `IntegrationStatusPage` (via Settings) |
+| Google Sheets Sync | Pushes a vendor's active inventory to its own worksheet in a shared Google Sheet automatically after every inventory import (manual or WhatsApp) | `GET /api/integrations/google-sheets/status`, `POST .../test-connection` | `IntegrationStatusPage` (via Settings) |
 | Settings | Account info, change password | (reuses `/api/auth/*`) | `SettingsPage` |
-| Purchase Orders / Delivery Upload / Vendor Performance | Sidebar placeholders ("Coming Soon") for later phases | -- | `ComingSoonPage` |
+
+A "Document Inbox" page/route existed at one point (a read-only list of
+every uploaded file's processing status) but was removed in a 2026-08-03
+cleanup pass as unused -- nothing else in the app called it, and no
+sidebar item pointed anywhere near a page that doesn't exist. The
+underlying tracking it displayed (`backend/app/documents/`) is untouched
+and still records every upload's lifecycle internally; only the standalone
+viewing page is gone.
+
+## Vendor Code
+
+Every vendor's *permanent* identifier throughout this app is its **Vendor
+Code**, not a WhatsApp sender number -- all vendors message the same shared
+WhatsApp Business number, so a sender's phone number can never tell them
+apart (see `core/services/vendor_code_service.py`).
+
+**Format:** the first two letters of the vendor's name, uppercased, plus
+`_CT`. Colliding names get a numeric suffix.
+
+| Vendor name | Code |
+|---|---|
+| Arvind Auto Parts | `AR_CT` |
+| North End | `NO_CT` |
+| Lumax | `LU_CT` |
+| (a second vendor also starting "AR...") | `AR_CT_2`, `AR_CT_3`, ... |
+
+**Onboarding flow:**
+1. A vendor's *very first* file may still be named with their real company
+   name (e.g. `Arvind Auto Parts.xlsx`) -- the system auto-creates the
+   vendor and auto-generates + permanently stores its code. The generated
+   code is shown in the upload result message (and in the Vendor Inventory
+   import history's "Vendor Code" column) so your team can hand it to the
+   vendor.
+2. From the **second** upload onward, the vendor must prefix their filename
+   with that code, e.g. `AR_CT_Inventory.xlsx`. The system reads the code
+   from the filename to identify the vendor -- no need to select one
+   manually, and this works identically for a manual upload or a WhatsApp
+   attachment.
+3. A file whose name carries a code-shaped prefix that doesn't match any
+   vendor (typo, or a code that was never assigned) is **rejected** with a
+   clear error, rather than being silently imported under the wrong vendor
+   or misclassified as a customer order.
+
+`Vendor.whatsapp_number` still exists as informational contact metadata,
+but is no longer used to identify which vendor sent a file.
+
+### Own Stock priority (Bijvasan)
+
+The company's own stock is represented by a vendor named **`Bijvasan`**. Any
+vendor whose name matches that is automatically treated as own stock the
+moment its inventory is uploaded -- **no database flag, no special UI, no
+extra step**. Just upload an inventory file for a vendor named `Bijvasan` and
+it becomes the priority source.
+
+Matching is tolerant so a slight rename doesn't silently switch off own-stock
+priority: it's **case-insensitive** and matches the configured name as a
+**whole word**, so `Bijvasan`, `BIJVASAN`, `bijvasan`, `Bijvasan Warehouse`,
+`Bijvasan Hub` and `Main Bijvasan Depot` all count as own stock -- while an
+unrelated name that merely contains the letters (e.g. `Bijvasannual Traders`)
+does not.
+
+During **Automatic Vendor Selection**, own stock is **always allocated first**,
+regardless of which strategy (`highest_quantity` / `minimum_vendors` /
+`combination`) is chosen. Only the remaining shortfall (if any) is then handed
+to the chosen strategy, which only ever sees the external (non-own-stock)
+vendors -- the existing strategies are **not modified**, they simply run on
+whatever quantity is left after Bijvasan.
+
+Example -- customer needs **100 pcs**, available: `Bijvasan` 40, `Vendor A` 35,
+`Vendor B` 50:
+
+```
+Bijvasan -> 40   (own stock, taken first)
+remaining 60 handed to the chosen strategy across Vendor A + Vendor B
+```
+
+If Bijvasan alone covers the whole request (e.g. Bijvasan 120, customer 100),
+the result is simply `Bijvasan -> 100` and **no external vendor is used**.
+
+The name is configurable via the `OWN_STOCK_VENDOR_NAME` environment variable
+(default `Bijvasan`); set it blank to disable name-based detection. The
+original `Vendor.is_own_stock` database flag still works too -- a vendor is
+own stock if EITHER its name matches OR that flag is set. See
+[`core/services/own_stock.py`](core/services/own_stock.py).
+
+### After Automatic Vendor Selection: Allocation Report email + Purchase Orders
+
+Running **Automatic** Vendor Selection (the `Auto-select` action, i.e.
+`POST /api/vendor-selection/{order_id}/auto-select`) triggers two follow-up
+steps automatically. **Manual** vendor selection does neither -- it only ever
+saves the allocation you can export yourself. Both steps are best-effort: an
+email failure is logged and **never** fails the API call, so vendor selection
+always completes.
+
+**1. Automatic Allocation Report email.** The same Vendor Allocation Excel you
+can export from the UI is generated and emailed to `ALLOCATION_REPORT_EMAIL`
+(internal only -- never to a vendor). Skipped entirely, with no error, if that
+variable is unset.
+
+- **Subject:** `Vendor Allocation Report - Customer Order <Order Number>`
+- **Body:** Customer Order Number, Order File, Date, Total Vendors Selected,
+  Total Parts, and a per-vendor allocation summary.
+- **Attachment:** the Vendor Allocation `.xlsx`.
+
+**2. Purchase Order generation.** One Purchase Order (`.xlsx`) is generated per
+selected vendor, grouped from that vendor's allocations, **stored in the
+database**, and always downloadable from the **Purchase Orders** page
+(`GET /api/purchase-orders`, `GET /api/purchase-orders/{id}/export`) --
+regardless of any email setting. Each PO includes: Company Name / Address /
+Phone / Email, Vendor Name, Vendor Code, Customer Order Number, and per line
+the Part Number, Vendor Part Number and Quantity, plus the PO Number and Date.
+
+Purchase Orders are **never sent to vendors**. If `ENABLE_PO_EMAIL=true` and
+`PURCHASE_TEAM_EMAIL` is set, each PO is *also* emailed to that internal
+address for review. Each PO tracks **its own** email status independently, so
+if some emails succeed and others fail, only the failed ones are marked
+`EMAIL_FAILED` (and PO generation still succeeds and stays downloadable).
+
+If a send fails (e.g. a transient SMTP outage), the purchase team can retry
+per-PO with the **Resend Email** button on the Purchase Orders page
+(`POST /api/purchase-orders/{id}/resend-email`) once the mail issue is
+resolved -- no need to re-run vendor selection. Resend targets
+`PURCHASE_TEAM_EMAIL` only (never a vendor) and works even when
+`ENABLE_PO_EMAIL` is `false`, since clicking it is an explicit request; it
+just needs `PURCHASE_TEAM_EMAIL` configured.
+
+Both steps reuse the already-configured Gmail integration (§7 of
+`DEPLOYMENT.md`), so they work in **either** IMAP/App-Password SMTP **or**
+OAuth Gmail API mode with no extra credentials.
+
+### Environment variables for these features
+
+All configurable, all documented in
+[`backend/.env.example`](backend/.env.example). With every one left unset the
+app runs fully in manual mode -- selection and PO download work, only the
+automatic emails are skipped.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `OWN_STOCK_VENDOR_NAME` | Vendor name treated as own stock (allocated first). Blank disables name-based detection. | `Bijvasan` |
+| `ALLOCATION_REPORT_EMAIL` | Internal address the Allocation Report is emailed to after automatic selection. Unset = email skipped. | *(unset)* |
+| `ENABLE_PO_EMAIL` | `true` to also email each generated PO to `PURCHASE_TEAM_EMAIL`. POs are generated + downloadable either way. | `false` |
+| `PURCHASE_TEAM_EMAIL` | Internal address generated POs are emailed to (when `ENABLE_PO_EMAIL=true`). Never a vendor. | *(unset)* |
+| `COMPANY_NAME` | Printed on every generated Purchase Order. | *(unset)* |
+| `COMPANY_ADDRESS` | Printed on every generated Purchase Order. | *(unset)* |
+| `COMPANY_PHONE` | Printed on every generated Purchase Order. | *(unset)* |
+| `COMPANY_EMAIL` | Printed on every generated Purchase Order. | *(unset)* |
+
+See `DEPLOYMENT.md` §4 for the full environment-variable reference and §9 for
+the email setup walkthrough.
+
+## Automation Flow
+
+Three end-to-end automated paths, each landing in the same manual-upload
+pipeline (`backend/app/services/document_processor/`) so automation and a
+human clicking "Upload" are indistinguishable to every service downstream:
+
+```
+Vendor -> WhatsApp Business -> Document Processing Engine -> Inventory Import
+                                                                     |
+                                                          Google Sheets Sync
+                                                    (that vendor's worksheet)
+
+Customer -> Gmail -> Document Processing Engine -> Customer Orders
+                                                          |
+                                                Vendor Comparison
+                                                          |
+                          Own Stock tried first, then Automatic Vendor
+                          Selection (rule engine) or manual selection --
+                          either way, the same VendorSelection rows
+                                                          |
+                              (automatic runs only, beyond this point)
+                                                          |
+                    Vendor Allocation Report emailed to
+                    ALLOCATION_REPORT_EMAIL, and one Purchase Order
+                    generated per vendor -- saved + downloadable, optionally
+                    emailed to PURCHASE_TEAM_EMAIL for internal review
+                    (never sent to a vendor)
+
+Vendor Invoice (PDF, via WhatsApp/email or manual upload)
+        -> PDF Extraction (pdfplumber)
+        -> Verification against that vendor's current Vendor Selection
+        -> Delivery Tracking + Vendor Performance (updated automatically --
+           mirrored into the same VendorDeliveryItem rows a delivery file
+           upload would produce, so neither service needed to change)
+```
+
+Every automation is opt-in via an `_ENABLED` env var (`WHATSAPP_ENABLED`,
+`GMAIL_ENABLED`/`ENABLE_EMAIL_AUTOMATION`, `ENABLE_GOOGLE_SHEETS_SYNC`,
+`ENABLE_PO_EMAIL`) -- with all left unset/false, the app behaves exactly as
+it does with manual uploads only. The Vendor Allocation Report email
+(`ALLOCATION_REPORT_EMAIL`) and Purchase Order generation itself have no
+separate on/off switch -- they run automatically whenever Automatic Vendor
+Selection is used (PO generation always saves + makes them downloadable;
+only the internal PO email is gated by `ENABLE_PO_EMAIL`). See
+`backend/.env.example` for every variable and `DEPLOYMENT.md` for the full
+WhatsApp/Gmail/Google Sheets setup walkthrough and production deployment
+notes (including how the Gmail poll runs as an in-process background job,
+not a separate worker process).
 
 Vendor Comparison reuses the existing matching engine
 (`core.services.vendor_comparison_service.compare_vendors`) completely
@@ -542,41 +773,106 @@ backend/
                       scoped commit/rollback.
     schemas/          Pydantic request/response models (API layer only;
                       never imported by core/services).
-    api/routes/       Thin FastAPI routers (vendors, inventory,
-                      customer_orders, vendor_comparison, dashboard) --
-                      validate input, call core/services, shape output.
-                      No business rules live here.
+    api/routes/       Thin FastAPI routers (auth, dashboard, inventory,
+                      customer_orders, vendor_comparison, vendor_selection,
+                      vendor_invoices, deliveries, delivery_tracking,
+                      vendor_performance, integration_status,
+                      gmail_integration, google_sheets_integration,
+                      whatsapp) -- validate input, call core/services, shape
+                      output. No business rules live here. No `vendors.py`
+                      -- vendors are auto-created from imported inventory
+                      files, never managed via a dedicated CRUD route.
+    documents/        `IncomingDocument` model + lifecycle service --
+                      internal bookkeeping shared by every upload path
+                      (manual, WhatsApp, and Gmail). Not exposed by any
+                      listing route today (see the Document Inbox removal
+                      note above).
+    integrations/     whatsapp/ (Cloud API client, webhook handler, config
+                      -- receive-only, cannot send messages), gmail/ (IMAP +
+                      OAuth clients behind one interface, config, status),
+                      google_sheets/ (sync service + config, called from the
+                      inventory dispatch path, not polled).
+    workers/          `document_worker.py` -- the WhatsApp receive path's
+                      background handler, run via FastAPI `BackgroundTasks`.
+                      `email_worker.py` -- Gmail poll, called periodically
+                      by `scheduler.py`'s in-process APScheduler job
+                      (started/stopped from FastAPI's `lifespan`; no
+                      separate worker process/queue to deploy).
     services/         Framework-specific glue only (e.g. saving an
                       uploaded file to disk before handing the path to
                       `core.services.inventory_import_service.run_import`
                       or `customer_order_service.run_customer_order_import`).
   scripts/
-    create_admin.py   One-time CLI to create/reset the admin account --
-                      deliberately not an API endpoint in Phase 1.
+    create_admin.py            One-time CLI to create/reset the admin
+                                account -- deliberately not an API endpoint.
+    migrate_schema_updates.py  One-time schema migration for databases that
+                                pre-date the automation changes (see
+                                DEPLOYMENT.md §12) -- `create_all` alone
+                                can't alter an existing table.
+core/
+  services/
+    rules/                          Automatic Vendor Selection strategies
+                                     (`highest_quantity`, `minimum_vendors`,
+                                     `combination`) behind one interface --
+                                     `engine.py` applies a chosen strategy's
+                                     allocations via the same
+                                     `vendor_selection_service.upsert_selection`
+                                     manual selection uses.
+    invoice_extraction_service.py   Vendor Invoice PDF text/table extraction
+                                     (`pdfplumber`), separate from the
+                                     verification logic below so an OCR
+                                     fallback can be added later without
+                                     touching it.
+    vendor_invoice_verification_service.py
+                                     Resolves each extracted line against
+                                     `VendorSelection`, classifies the
+                                     discrepancy, and mirrors matched/short/
+                                     extra lines into `VendorDeliveryItem` so
+                                     Delivery Tracking / Vendor Performance
+                                     update with zero changes to either.
 frontend/
   src/
-    api/              axios client + one file per resource (auth, vendors,
+    api/              axios client + one file per resource (auth,
                       inventory, customerOrders, vendorComparison,
-                      dashboard) -- the UI never talks to the database
-                      directly, only this layer.
+                      vendorSelection, vendorInvoices, deliveries,
+                      deliveryTracking, vendorPerformance,
+                      integrationStatus, dashboard) -- the UI never talks to
+                      the database directly, only this layer. No
+                      `vendors.js` -- no vendor CRUD UI.
     context/           AuthContext (JWT in localStorage) + ToastContext
                        (success/error notifications).
     components/        Layout (workflow-ordered sidebar nav + logout),
-                       Modal, StatusPill, EmptyState, ProtectedRoute.
-    pages/              LoginPage, DashboardPage, VendorsPage,
-                        VendorInventoryPage, CustomerOrdersPage,
-                        VendorComparisonPage, SettingsPage, ComingSoonPage.
+                       Modal, StatusPill, EmptyState, ProtectedRoute,
+                       DashboardFilterBar.
+    pages/              LoginPage, DashboardPage, VendorInventoryPage,
+                        CustomerOrdersPage, VendorComparisonPage,
+                        VendorInvoicesPage, DeliveryTrackingPage,
+                        VendorPerformancePage, VendorPerformanceDetailPage,
+                        IntegrationStatusPage, SettingsPage.
 ```
 
-Future WhatsApp automation is designed to slot in without any UI change:
-today a human uploads a file through the browser; later, a background
-worker (not built yet) would download a WhatsApp attachment, detect the
-sender, classify it as Vendor Inventory / Customer Order / Delivery, and
-call the exact same `core.services.*` import functions the upload
-endpoints call today (`inventory_import_service.run_import`,
-`customer_order_service.run_customer_order_import`, and a future delivery
+WhatsApp automation is implemented and receive-only: a human uploading a
+file through the browser and a vendor sending one over WhatsApp both land
+in the same place -- `backend/app/workers/document_worker.py` downloads
+the WhatsApp attachment, classifies it, and calls the exact same
+`core.services.*` import functions the manual upload endpoints call
+(`inventory_import_service.run_import`,
+`customer_order_service.run_customer_order_import`, and the delivery
 equivalent). Only *how a file arrives* changes -- the endpoints, services,
-and UI stay the same either way.
+and UI stay the same either way. The app cannot send a WhatsApp message
+back; see `DEPLOYMENT.md` for what's required to enable receiving in
+production.
+
+Gmail automation follows the identical shape, just polled instead of
+webhook-driven: `backend/app/workers/email_worker.py` (run periodically by
+`backend/app/workers/scheduler.py`'s in-process APScheduler job) downloads
+each unread message's Excel attachments and calls
+`process_document(..., document_type_hint=CUSTOMER_ORDER)` -- the same
+Document Processing Engine entry point every other upload path uses, which
+in turn calls the same `customer_order_service.run_customer_order_import`.
+A new vendor's first WhatsApp inventory message also links their WhatsApp
+number to the auto-created vendor record, so subsequent messages from that
+number are recognized without needing a caption keyword every time.
 
 A `repositories/` layer (per the original suggested structure) was
 deliberately not added: `core/services/*` already combines the repository
@@ -677,8 +973,22 @@ pythonscript/
 │       ├── gap_analysis_service.py
 │       ├── alternative_vendor_service.py
 │       ├── vendor_performance_service.py
-│       └── dashboard_service.py      new -- read-only aggregation for the
-│                                     web Dashboard
+│       ├── dashboard_service.py      new -- read-only aggregation for the
+│       │                            web Dashboard
+│       ├── vendor_selection_service.py   web app only -- multi-vendor
+│       │                                 allocation per order line
+│       ├── rules/                        Automatic Vendor Selection
+│       │                                 strategies (highest_quantity,
+│       │                                 minimum_vendors, combination)
+│       ├── vendor_delivery_service.py    web app's vendor+part delivery
+│       │                                 upload (no PO concept)
+│       ├── vendor_performance_tracking_service.py  web app's delivery-
+│       │                                           tracking-based version
+│       ├── invoice_extraction_service.py           Vendor Invoice PDF
+│       │                                           extraction (pdfplumber)
+│       └── vendor_invoice_verification_service.py  compares extracted
+│                                                    invoice lines against
+│                                                    VendorSelection
 │
 ├── tests/                      Unit tests (pytest) + fixtures
 ├── raw_files/                  Vendor inventory files (Module 1 input)
@@ -690,28 +1000,49 @@ pythonscript/
 │
 ├── backend/                    FastAPI web app (see "Web Application")
 │   ├── requirements.txt
-│   ├── scripts/create_admin.py
+│   ├── scripts/create_admin.py, migrate_schema_updates.py
 │   └── app/
 │       ├── main.py
 │       ├── auth/               JWT auth -- independent of core/services
 │       ├── core/config.py
 │       ├── database/session.py
+│       ├── documents/          IncomingDocument model + lifecycle service
+│       │                       (internal upload-status bookkeeping)
+│       ├── integrations/       whatsapp/ (receive-only Cloud API client),
+│       │                       gmail/ (IMAP + OAuth clients), google_sheets/
+│       │                       (sync service, called from inventory import)
+│       ├── workers/             document_worker.py (WhatsApp receive path),
+│       │                       email_worker.py (Gmail poll), scheduler.py
+│       │                       (in-process APScheduler, no separate worker)
 │       ├── schemas/
-│       ├── api/routes/         vendors.py, inventory.py, customer_orders.py,
-│       │                       vendor_comparison.py, dashboard.py
-│       └── services/           inventory_service.py, customer_order_service.py
-│                                (upload-handling glue, not business logic)
+│       ├── api/routes/         auth.py, dashboard.py, inventory.py,
+│       │                       customer_orders.py, vendor_comparison.py,
+│       │                       vendor_selection.py, vendor_invoices.py,
+│       │                       deliveries.py, delivery_tracking.py,
+│       │                       vendor_performance.py, integration_status.py,
+│       │                       gmail_integration.py,
+│       │                       google_sheets_integration.py, whatsapp.py
+│       │                       (no vendors.py -- see note above)
+│       └── services/           inventory_service.py, customer_order_service.py,
+│                                delivery_service.py, invoice_service.py,
+│                                document_processor/ (upload-handling glue,
+│                                not business logic)
 │
 └── frontend/                   React (Vite) web app (see "Web Application")
     └── src/
-        ├── api/                auth, vendors, inventory, customerOrders,
-        │                       vendorComparison, dashboard, client
+        ├── api/                auth, inventory, customerOrders,
+        │                       vendorComparison, vendorSelection,
+        │                       vendorInvoices, deliveries, deliveryTracking,
+        │                       vendorPerformance, integrationStatus,
+        │                       dashboard, client
         ├── context/
         ├── components/
-        └── pages/               LoginPage, DashboardPage, VendorsPage,
-                                  VendorInventoryPage, CustomerOrdersPage,
-                                  VendorComparisonPage, SettingsPage,
-                                  ComingSoonPage
+        └── pages/               LoginPage, DashboardPage, VendorInventoryPage,
+                                  CustomerOrdersPage, VendorComparisonPage,
+                                  VendorInvoicesPage, DeliveryTrackingPage,
+                                  VendorPerformancePage,
+                                  VendorPerformanceDetailPage,
+                                  IntegrationStatusPage, SettingsPage
 ```
 
 ---

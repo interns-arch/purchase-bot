@@ -21,6 +21,7 @@ class ImportHistoryOut(BaseModel):
     id: int
     vendor_id: int
     vendor_name: str
+    vendor_code: str | None = None
     file_name: str
     status: str
     is_active: bool

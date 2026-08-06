@@ -47,6 +47,7 @@ class ProcessingResult:
     inventory_import_id: int | None = None
     customer_order_id: int | None = None
     delivery_import_id: int | None = None
+    invoice_verification_id: int | None = None
     is_duplicate: bool = False
     core_status: str | None = None
 
@@ -70,7 +71,8 @@ def process_document(
         metadata.original_filename or file_path.name,
         session,
         sender=metadata.sender,
-        whatsapp_message_id=metadata.external_message_id,
+        whatsapp_message_id=metadata.external_message_id if source == DocumentSource.WHATSAPP else None,
+        email_message_id=metadata.external_message_id if source == DocumentSource.EMAIL else None,
     )
 
     # A redelivered WhatsApp message: `record_received` returned the
@@ -141,6 +143,7 @@ def process_document(
             vendor_id=result.vendor_id,
             vendor_name=result.vendor_name,
             inventory_import_id=result.inventory_import_id,
+            invoice_verification_id=result.invoice_verification_id,
             is_duplicate=True,
             core_status=result.core_status,
         )
@@ -148,11 +151,17 @@ def process_document(
     # The underlying core service can itself report FAILED via a normal
     # return (e.g. zero valid rows) rather than an exception -- treat that
     # the same as any other failure for the Document Inbox's own status,
-    # even though nothing was raised here.
+    # even though nothing was raised here. NEEDS_REVIEW (Vendor Invoice
+    # Verification only, e.g. unreadable PDF or unresolved vendor) gets its
+    # own status too, rather than being silently reported as a clean
+    # PROCESSED with zero errors.
     if result.core_status == "FAILED":
         documents_service.mark_failed(
             document, result.message or "Import failed -- no valid rows.", session
         )
+        staging.mark_failed_location(file_path)
+    elif result.core_status == "NEEDS_REVIEW":
+        documents_service.mark_needs_review(document, session, result.message)
         staging.mark_failed_location(file_path)
     else:
         documents_service.mark_processed(
@@ -162,6 +171,7 @@ def process_document(
             inventory_import_id=result.inventory_import_id,
             customer_order_id=result.customer_order_id,
             delivery_import_id=result.delivery_import_id,
+            invoice_verification_id=result.invoice_verification_id,
         )
         staging.mark_processed_location(file_path)
 
@@ -178,5 +188,6 @@ def process_document(
         inventory_import_id=result.inventory_import_id,
         customer_order_id=result.customer_order_id,
         delivery_import_id=result.delivery_import_id,
+        invoice_verification_id=result.invoice_verification_id,
         core_status=result.core_status,
     )

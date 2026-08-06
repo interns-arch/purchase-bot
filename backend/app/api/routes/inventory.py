@@ -80,6 +80,7 @@ def list_imports(
             id=row.id,
             vendor_id=row.vendor_id,
             vendor_name=row.vendor.name,
+            vendor_code=row.vendor.vendor_code,
             file_name=row.file_name,
             status=row.status.value,
             is_active=row.is_active,

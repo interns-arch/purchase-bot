@@ -28,6 +28,12 @@ def find_by_whatsapp_message_id(message_id: str, session: Session) -> IncomingDo
     ).scalar_one_or_none()
 
 
+def find_by_email_message_id(message_id: str, session: Session) -> IncomingDocument | None:
+    return session.execute(
+        select(IncomingDocument).where(IncomingDocument.email_message_id == message_id)
+    ).scalar_one_or_none()
+
+
 def record_received(
     source: DocumentSource,
     filename: str,
@@ -35,13 +41,20 @@ def record_received(
     *,
     sender: str | None = None,
     whatsapp_message_id: str | None = None,
+    email_message_id: str | None = None,
 ) -> IncomingDocument:
-    """Creates the initial `RECEIVED` row. If `whatsapp_message_id` is given
-    and already recorded, returns the existing row instead of creating a
-    duplicate -- Meta's webhook delivery is at-least-once, so a retried POST
-    must be a safe no-op rather than reprocessing the same message."""
+    """Creates the initial `RECEIVED` row. If `whatsapp_message_id` (or
+    `email_message_id`) is given and already recorded, returns the existing
+    row instead of creating a duplicate -- both Meta's webhook delivery and
+    a Gmail poll can redeliver/re-see the same message, so a retry must be a
+    safe no-op rather than reprocessing it."""
     if whatsapp_message_id:
         existing = find_by_whatsapp_message_id(whatsapp_message_id, session)
+        if existing is not None:
+            return existing
+
+    if email_message_id:
+        existing = find_by_email_message_id(email_message_id, session)
         if existing is not None:
             return existing
 
@@ -50,6 +63,7 @@ def record_received(
         filename=filename,
         sender=sender,
         whatsapp_message_id=whatsapp_message_id,
+        email_message_id=email_message_id,
         status=IncomingDocumentStatus.RECEIVED,
     )
     session.add(document)
@@ -72,6 +86,7 @@ def mark_processed(
     inventory_import_id: int | None = None,
     customer_order_id: int | None = None,
     delivery_import_id: int | None = None,
+    invoice_verification_id: int | None = None,
 ) -> IncomingDocument:
     document.status = (
         IncomingDocumentStatus.PROCESSED_WITH_ERRORS
@@ -81,6 +96,7 @@ def mark_processed(
     document.inventory_import_id = inventory_import_id
     document.customer_order_id = customer_order_id
     document.delivery_import_id = delivery_import_id
+    document.invoice_verification_id = invoice_verification_id
     document.processed_at = _utcnow()
     session.flush()
     return document
@@ -119,10 +135,12 @@ def mark_skipped_duplicate(
     return document
 
 
-def mark_needs_review(document: IncomingDocument, session: Session) -> IncomingDocument:
+def mark_needs_review(
+    document: IncomingDocument, session: Session, message: str | None = None
+) -> IncomingDocument:
     document.status = IncomingDocumentStatus.NEEDS_REVIEW
     document.error_message = (
-        "Could not determine document type automatically -- needs manual review."
+        message or "Could not determine document type automatically -- needs manual review."
     )
     document.processed_at = _utcnow()
     session.flush()

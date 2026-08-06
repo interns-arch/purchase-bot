@@ -4,7 +4,6 @@ from pydantic import BaseModel
 
 
 class VendorSelectionIn(BaseModel):
-    vendor_id: int
     quantity_selected: float
 
 

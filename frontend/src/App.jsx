@@ -18,9 +18,6 @@ const CustomerOrdersPage = lazy(() =>
 const VendorComparisonPage = lazy(() =>
   import("./pages/VendorComparisonPage").then((m) => ({ default: m.VendorComparisonPage }))
 );
-const DocumentInboxPage = lazy(() =>
-  import("./pages/DocumentInboxPage").then((m) => ({ default: m.DocumentInboxPage }))
-);
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage }))
 );
@@ -29,6 +26,12 @@ const IntegrationStatusPage = lazy(() =>
 );
 const DeliveryTrackingPage = lazy(() =>
   import("./pages/DeliveryTrackingPage").then((m) => ({ default: m.DeliveryTrackingPage }))
+);
+const VendorInvoicesPage = lazy(() =>
+  import("./pages/VendorInvoicesPage").then((m) => ({ default: m.VendorInvoicesPage }))
+);
+const PurchaseOrdersPage = lazy(() =>
+  import("./pages/PurchaseOrdersPage").then((m) => ({ default: m.PurchaseOrdersPage }))
 );
 const VendorPerformancePage = lazy(() =>
   import("./pages/VendorPerformancePage").then((m) => ({ default: m.VendorPerformancePage }))
@@ -88,6 +91,22 @@ function App() {
               }
             />
             <Route
+              path="/vendor-invoices"
+              element={
+                <ProtectedRoute>
+                  <VendorInvoicesPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/purchase-orders"
+              element={
+                <ProtectedRoute>
+                  <PurchaseOrdersPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
               path="/vendor-performance"
               element={
                 <ProtectedRoute>
@@ -100,14 +119,6 @@ function App() {
               element={
                 <ProtectedRoute>
                   <VendorPerformanceDetailPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/document-inbox"
-              element={
-                <ProtectedRoute>
-                  <DocumentInboxPage />
                 </ProtectedRoute>
               }
             />

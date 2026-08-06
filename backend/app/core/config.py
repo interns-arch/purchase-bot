@@ -59,6 +59,11 @@ class Settings:
     temp_upload_dir: str = os.environ.get("TEMP_UPLOAD_DIR", "uploads/incoming")
     archive_upload_dir: str = os.environ.get("ARCHIVE_UPLOAD_DIR", "uploads/archive")
     failed_upload_dir: str = os.environ.get("FAILED_UPLOAD_DIR", "uploads/failed")
+    # Rejects an upload once it exceeds this size, checked while streaming to
+    # disk (not just after) so an oversized file can't fill the disk before
+    # being rejected. Generous enough for the CSV/Excel/PDF files this app
+    # handles; raise via env var if a legitimate file ever needs more.
+    max_upload_size_bytes: int = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "25")) * 1024 * 1024
 
     # Optional one-time admin bootstrap (see main.py's startup hook). Both
     # must be set for it to do anything; otherwise use
@@ -66,6 +71,22 @@ class Settings:
     # existing account -- only creates one if zero users exist yet.
     admin_username: str | None = os.environ.get("ADMIN_USERNAME")
     admin_password: str | None = os.environ.get("ADMIN_PASSWORD")
+
+    # Internal-only destinations for the automatic Vendor Allocation Report
+    # (sent after every automatic vendor selection) and Purchase Order
+    # emails (sent after PO generation) -- see
+    # `backend/app/api/routes/vendor_selection.py` and
+    # `core/services/purchase_order_generation_service.py`. Neither is ever
+    # sent to a vendor. Both no-op (logged, not an error) if left unset.
+    allocation_report_email: str | None = os.environ.get("ALLOCATION_REPORT_EMAIL") or None
+    purchase_team_email: str | None = os.environ.get("PURCHASE_TEAM_EMAIL") or None
+    enable_po_email: bool = os.environ.get("ENABLE_PO_EMAIL", "false").strip().lower() == "true"
+
+    # Company details printed on generated Purchase Orders.
+    company_name: str = os.environ.get("COMPANY_NAME", "")
+    company_address: str = os.environ.get("COMPANY_ADDRESS", "")
+    company_phone: str = os.environ.get("COMPANY_PHONE", "")
+    company_email: str = os.environ.get("COMPANY_EMAIL", "")
 
 
 settings = Settings()

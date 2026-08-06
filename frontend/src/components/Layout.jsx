@@ -11,9 +11,10 @@ const NAV_ITEMS = [
   { to: "/vendor-inventory", label: "Vendor Inventory" },
   { to: "/customer-orders", label: "Customer Orders" },
   { to: "/vendor-comparison", label: "Vendor Comparison" },
-  { to: "/delivery-tracking", label: "Vendor Invoices" },
+  { to: "/delivery-tracking", label: "Delivery Tracking" },
+  { to: "/vendor-invoices", label: "Vendor Invoices" },
+  { to: "/purchase-orders", label: "Purchase Orders" },
   { to: "/vendor-performance", label: "Vendor Performance" },
-  { to: "/document-inbox", label: "Document Inbox" },
   { to: "/settings", label: "Settings" },
 ];
 
@@ -45,7 +46,6 @@ export function Layout({ children, title }) {
               className={({ isActive }) => "sidebar__link" + (isActive ? " sidebar__link--active" : "")}
             >
               <span>{item.label}</span>
-              {item.comingSoon && <span className="sidebar__badge">Soon</span>}
             </NavLink>
           ))}
         </nav>

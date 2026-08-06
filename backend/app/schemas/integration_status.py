@@ -31,3 +31,27 @@ class WhatsAppIntegrationStatusOut(BaseModel):
     last_downloaded_attachment: LastWhatsAppEventOut | None
     media_download_status: str  # NO_ATTEMPTS_YET | SUCCESS | FAILED
     media_download_message: str | None
+
+
+class GmailIntegrationStatusOut(BaseModel):
+    checked_at: datetime
+    enabled: bool
+    auth_mode: str  # imap | oauth
+    configured: bool
+
+    poll_status: str  # NOT_CONFIGURED | UNTESTED | CONNECTED | FAILED
+    poll_message: str | None
+    last_poll_at: datetime | None
+    last_message_processed_at: datetime | None
+    poll_interval_seconds: int
+
+
+class GoogleSheetsIntegrationStatusOut(BaseModel):
+    checked_at: datetime
+    enabled: bool
+    configured: bool
+
+    sync_status: str  # NOT_CONFIGURED | UNTESTED | CONNECTED | FAILED
+    sync_message: str | None
+    last_sync_at: datetime | None
+    last_synced_vendor_name: str | None

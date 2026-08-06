@@ -19,6 +19,7 @@ from core.models import Base
 class DocumentSource(str, enum.Enum):
     MANUAL = "MANUAL"
     WHATSAPP = "WHATSAPP"
+    EMAIL = "EMAIL"
 
 
 class IncomingDocumentType(str, enum.Enum):
@@ -55,6 +56,10 @@ class IncomingDocument(Base):
     filename: Mapped[str] = mapped_column(nullable=False)
     sender: Mapped[str | None] = mapped_column(default=None)
     whatsapp_message_id: Mapped[str | None] = mapped_column(default=None)
+    # Separate from `whatsapp_message_id` rather than a shared generic
+    # column -- keeps each source's own dedupe key unambiguous (Gmail's
+    # Message-ID header has different format/semantics than WhatsApp's).
+    email_message_id: Mapped[str | None] = mapped_column(default=None)
     status: Mapped[IncomingDocumentStatus] = mapped_column(
         Enum(IncomingDocumentStatus, name="incoming_document_status"),
         default=IncomingDocumentStatus.RECEIVED,
@@ -73,6 +78,9 @@ class IncomingDocument(Base):
     delivery_import_id: Mapped[int | None] = mapped_column(
         ForeignKey("delivery_imports.id", ondelete="SET NULL"), default=None
     )
+    invoice_verification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vendor_invoice_imports.id", ondelete="SET NULL"), default=None
+    )
 
     __table_args__ = (
         Index(
@@ -81,6 +89,13 @@ class IncomingDocument(Base):
             unique=True,
             sqlite_where=text("whatsapp_message_id IS NOT NULL"),
             postgresql_where=text("whatsapp_message_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_incoming_documents_email_message_id",
+            email_message_id,
+            unique=True,
+            sqlite_where=text("email_message_id IS NOT NULL"),
+            postgresql_where=text("email_message_id IS NOT NULL"),
         ),
         Index("ix_incoming_documents_received_at", "received_at"),
     )

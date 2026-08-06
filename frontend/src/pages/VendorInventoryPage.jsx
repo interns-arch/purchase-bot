@@ -140,7 +140,9 @@ export function VendorInventoryPage() {
           <h2>Upload Vendor Inventory Files</h2>
         </div>
         <p style={{ color: "var(--color-text-muted)", fontSize: "0.9rem", marginBottom: 12 }}>
-          The vendor is identified automatically from the file name -- no need to select one.
+          A vendor's first upload can be named with their real company name (e.g. "Arvind Auto
+          Parts.xlsx") -- a Vendor Code is generated automatically and shown in the message below.
+          Every upload after that must be prefixed with that code (e.g. "AR_CT_Inventory.xlsx").
         </p>
 
         <div
@@ -257,6 +259,7 @@ export function VendorInventoryPage() {
               <thead>
                 <tr>
                   <th>Vendor</th>
+                  <th>Vendor Code</th>
                   <th>File</th>
                   <th>Rows</th>
                   <th>Errors</th>
@@ -269,6 +272,7 @@ export function VendorInventoryPage() {
                 {filteredHistory.map((row) => (
                   <tr key={row.id}>
                     <td>{row.vendor_name}</td>
+                    <td>{row.vendor_code || "—"}</td>
                     <td>{row.file_name}</td>
                     <td>{row.row_count}</td>
                     <td>

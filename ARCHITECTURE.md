@@ -1,9 +1,16 @@
 # Vendor Inventory & Order Fulfillment — Architecture & Roadmap
 
-This document analyzes the current implementation (Module 2: Order Matching
-Engine) against the full business workflow described in `Readme.md`, and lays
-out the plan for the remaining modules. No code has been written from this
-plan yet — see `Readme.md` for the business context and module list.
+**Historical design document — describes the state before the web app
+existed.** This document analyzes the original CLI-only implementation
+(Module 2: Order Matching Engine) against the full business workflow, and
+lays out the plan that the FastAPI/React web app (built afterward) was
+based on. Its "no code has been written yet" framing below and the
+`vendors`/`users`/etc. schema sketch in §4 describe that starting point,
+not the current state — see `Readme.md`'s "Web Application" section for
+what was actually built, and `DEPLOYMENT.md` for current deployment
+details. Kept as-is for the design rationale (why single-vendor-per-line
+allocation was chosen, why Postgres over SQLite eventually, etc.), most of
+which is still accurate.
 
 ---
 

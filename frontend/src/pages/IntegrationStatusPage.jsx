@@ -4,7 +4,14 @@ import { Layout } from "../components/Layout";
 import { StatusPill } from "../components/StatusPill";
 import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
-import { getWhatsAppIntegrationStatus, testWhatsAppConnection } from "../api/integrationStatus";
+import {
+  getGmailIntegrationStatus,
+  getGoogleSheetsIntegrationStatus,
+  getWhatsAppIntegrationStatus,
+  testGmailConnection,
+  testGoogleSheetsConnection,
+  testWhatsAppConnection,
+} from "../api/integrationStatus";
 
 function StatusCard({ label, status, hint }) {
   return (
@@ -27,6 +34,12 @@ export function IntegrationStatusPage() {
   const [status, setStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isTesting, setIsTesting] = useState(false);
+  const [gmailStatus, setGmailStatus] = useState(null);
+  const [isGmailLoading, setIsGmailLoading] = useState(true);
+  const [isTestingGmail, setIsTestingGmail] = useState(false);
+  const [sheetsStatus, setSheetsStatus] = useState(null);
+  const [isSheetsLoading, setIsSheetsLoading] = useState(true);
+  const [isTestingSheets, setIsTestingSheets] = useState(false);
 
   async function load() {
     setIsLoading(true);
@@ -40,8 +53,34 @@ export function IntegrationStatusPage() {
     }
   }
 
+  async function loadGmail() {
+    setIsGmailLoading(true);
+    try {
+      const data = await getGmailIntegrationStatus();
+      setGmailStatus(data);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not load Gmail integration status."));
+    } finally {
+      setIsGmailLoading(false);
+    }
+  }
+
+  async function loadSheets() {
+    setIsSheetsLoading(true);
+    try {
+      const data = await getGoogleSheetsIntegrationStatus();
+      setSheetsStatus(data);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not load Google Sheets integration status."));
+    } finally {
+      setIsSheetsLoading(false);
+    }
+  }
+
   useEffect(() => {
     load();
+    loadGmail();
+    loadSheets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -59,6 +98,40 @@ export function IntegrationStatusPage() {
       toast.error(extractErrorMessage(error, "Could not test the connection."));
     } finally {
       setIsTesting(false);
+    }
+  }
+
+  async function handleTestGmailConnection() {
+    setIsTestingGmail(true);
+    try {
+      const data = await testGmailConnection();
+      setGmailStatus(data);
+      if (data.poll_status === "CONNECTED") {
+        toast.success(data.poll_message || "Connected.");
+      } else {
+        toast.error(data.poll_message || "Connection test failed.");
+      }
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not test the Gmail connection."));
+    } finally {
+      setIsTestingGmail(false);
+    }
+  }
+
+  async function handleTestSheetsConnection() {
+    setIsTestingSheets(true);
+    try {
+      const data = await testGoogleSheetsConnection();
+      setSheetsStatus(data);
+      if (data.sync_status === "CONNECTED") {
+        toast.success(data.sync_message || "Connected.");
+      } else {
+        toast.error(data.sync_message || "Connection test failed.");
+      }
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not test the Google Sheets connection."));
+    } finally {
+      setIsTestingSheets(false);
     }
   }
 
@@ -169,6 +242,125 @@ export function IntegrationStatusPage() {
           </dl>
         </section>
       )}
+
+      <section className="panel">
+        <div className="panel__header">
+          <h2>Gmail Customer Order Automation</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn btn--ghost" onClick={loadGmail} disabled={isGmailLoading}>
+              Refresh
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={handleTestGmailConnection}
+              disabled={isTestingGmail}
+            >
+              {isTestingGmail ? "Testing…" : "Test Connection"}
+            </button>
+          </div>
+        </div>
+
+        {isGmailLoading || !gmailStatus ? (
+          <div className="page-loading">Loading Gmail integration status…</div>
+        ) : (
+          <>
+            <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", marginBottom: 16 }}>
+              As of {formatWhen(gmailStatus.checked_at)}. Once Gmail credentials are added to{" "}
+              <code>backend/.env</code>, this page reflects the real integration state without any
+              code changes -- just refresh or test the connection again.
+            </p>
+
+            <div className="stat-grid">
+              <StatusCard
+                label="Mailbox Connection"
+                status={gmailStatus.poll_status}
+                hint={gmailStatus.poll_message}
+              />
+              <StatusCard
+                label="Auth Mode"
+                status={gmailStatus.auth_mode.toUpperCase()}
+                hint="Set via GMAIL_AUTH_MODE (imap or oauth)."
+              />
+              <StatusCard
+                label="Integration Enabled"
+                status={gmailStatus.enabled ? "SUCCESS" : "DISABLED"}
+                hint={
+                  gmailStatus.enabled
+                    ? `Polling every ${gmailStatus.poll_interval_seconds}s.`
+                    : "ENABLE_EMAIL_AUTOMATION / GMAIL_ENABLED is false."
+                }
+              />
+            </div>
+
+            <dl className="detail-list" style={{ marginTop: 16 }}>
+              <div>
+                <dt>Last Poll</dt>
+                <dd>{formatWhen(gmailStatus.last_poll_at)}</dd>
+              </div>
+              <div>
+                <dt>Last Message Processed</dt>
+                <dd>{formatWhen(gmailStatus.last_message_processed_at)}</dd>
+              </div>
+            </dl>
+          </>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel__header">
+          <h2>Google Sheets Sync</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn btn--ghost" onClick={loadSheets} disabled={isSheetsLoading}>
+              Refresh
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={handleTestSheetsConnection}
+              disabled={isTestingSheets}
+            >
+              {isTestingSheets ? "Testing…" : "Test Connection"}
+            </button>
+          </div>
+        </div>
+
+        {isSheetsLoading || !sheetsStatus ? (
+          <div className="page-loading">Loading Google Sheets integration status…</div>
+        ) : (
+          <>
+            <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", marginBottom: 16 }}>
+              As of {formatWhen(sheetsStatus.checked_at)}. Every vendor inventory import (manual or
+              WhatsApp) pushes that vendor's active inventory to its own worksheet automatically once
+              this is configured in <code>backend/.env</code>.
+            </p>
+
+            <div className="stat-grid">
+              <StatusCard
+                label="Sheets Connection"
+                status={sheetsStatus.sync_status}
+                hint={sheetsStatus.sync_message}
+              />
+              <StatusCard
+                label="Sync Enabled"
+                status={sheetsStatus.enabled ? "SUCCESS" : "DISABLED"}
+                hint={sheetsStatus.enabled ? undefined : "ENABLE_GOOGLE_SHEETS_SYNC is false."}
+              />
+            </div>
+
+            <dl className="detail-list" style={{ marginTop: 16 }}>
+              <div>
+                <dt>Last Sync</dt>
+                <dd>{formatWhen(sheetsStatus.last_sync_at)}</dd>
+              </div>
+              <div>
+                <dt>Last Synced Vendor</dt>
+                <dd>{sheetsStatus.last_synced_vendor_name || "None yet"}</dd>
+              </div>
+            </dl>
+          </>
+        )}
+      </section>
     </Layout>
   );
 }

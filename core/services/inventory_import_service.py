@@ -39,6 +39,7 @@ from core.models import (
     Vendor,
     VendorInventory,
 )
+from core.services.own_stock import is_own_stock_vendor
 from core.services.part_resolution_service import resolve_part
 
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
@@ -100,6 +101,9 @@ class MasterInventoryVendorEntry:
     mrp: Decimal | None
     raw_data: dict
     inventory_file: str
+    # True for the company's own warehouse/dark-store vendor rows -- see
+    # core.services.rules.engine, which always tries these offers first.
+    is_own_stock: bool = False
 
 
 @dataclass
@@ -505,6 +509,7 @@ def get_master_inventory(session: Session) -> list[MasterInventoryRow]:
                 mrp=inventory_row.mrp,
                 raw_data=inventory_row.raw_data,
                 inventory_file=inventory_import.file_name,
+                is_own_stock=is_own_stock_vendor(vendor.name, flag=vendor.is_own_stock),
             )
         )
 

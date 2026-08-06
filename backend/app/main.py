@@ -21,10 +21,13 @@ from backend.app.api.routes.customer_orders import router as customer_orders_rou
 from backend.app.api.routes.dashboard import router as dashboard_router
 from backend.app.api.routes.deliveries import router as deliveries_router
 from backend.app.api.routes.delivery_tracking import router as delivery_tracking_router
-from backend.app.api.routes.documents import router as documents_router
+from backend.app.api.routes.gmail_integration import router as gmail_integration_router
+from backend.app.api.routes.google_sheets_integration import router as google_sheets_integration_router
 from backend.app.api.routes.integration_status import router as integration_status_router
 from backend.app.api.routes.inventory import router as inventory_router
+from backend.app.api.routes.purchase_orders import router as purchase_orders_router
 from backend.app.api.routes.vendor_comparison import router as vendor_comparison_router
+from backend.app.api.routes.vendor_invoices import router as vendor_invoices_router
 from backend.app.api.routes.vendor_performance import router as vendor_performance_router
 from backend.app.api.routes.vendor_selection import router as vendor_selection_router
 from backend.app.api.routes.whatsapp import router as whatsapp_router
@@ -32,6 +35,7 @@ from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
 from backend.app.core.config import settings
+from backend.app.workers.scheduler import start_scheduler, stop_scheduler
 from core.db import get_session
 from core.logging_setup import get_logger
 
@@ -65,7 +69,9 @@ def _bootstrap_admin_if_configured() -> None:
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     logger.info("API starting up (cors_origins=%s)", settings.cors_origins)
     _bootstrap_admin_if_configured()
+    start_scheduler()
     yield
+    stop_scheduler()
 
 
 app = FastAPI(
@@ -124,12 +130,15 @@ app.include_router(dashboard_router)
 app.include_router(inventory_router)
 app.include_router(deliveries_router)
 app.include_router(delivery_tracking_router)
-app.include_router(documents_router)
 app.include_router(integration_status_router)
+app.include_router(gmail_integration_router)
+app.include_router(google_sheets_integration_router)
 app.include_router(customer_orders_router)
 app.include_router(vendor_comparison_router)
 app.include_router(vendor_selection_router)
 app.include_router(vendor_performance_router)
+app.include_router(vendor_invoices_router)
+app.include_router(purchase_orders_router)
 app.include_router(whatsapp_router)
 
 

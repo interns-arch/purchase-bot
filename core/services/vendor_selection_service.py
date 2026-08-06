@@ -1,13 +1,16 @@
-"""Vendor Selection: lets the user pick exactly one vendor + quantity per
+"""Vendor Selection: lets the user (or the automatic rule engine, see
+`core.services.rules.engine`) pick one or more vendors + quantities per
 `CustomerOrderItem` from the Vendor Comparison report
 (`vendor_comparison_service.py`, which deliberately never picks one itself).
 
-A `VendorSelection` row is created or replaced per order line -- each
-customer part has its own independent selection, keyed by
-`customer_order_item_id` (unique), so selecting a vendor for one part never
-touches another part's selection. Selections persist until the comparison
-report is regenerated (i.e. a new customer order is uploaded); there is no
-further lifecycle beyond that -- no Purchase Order concept, no locking.
+A `VendorSelection` row is created or replaced per (order line, vendor)
+pair -- each customer part can be split across several vendors when no
+single vendor can cover the full requested quantity, but selecting/removing
+one vendor's allocation never touches another vendor's allocation for the
+same line, or another line's selections. Selections persist until the
+comparison report is regenerated (i.e. a new customer order is uploaded);
+there is no further lifecycle beyond that -- no Purchase Order concept, no
+locking.
 
 Pure business logic -- no FastAPI/print()/input() here.
 """
@@ -46,17 +49,38 @@ def _find_active_vendor_offer(
     ).scalar_one_or_none()
 
 
+def _selections_for_item(
+    order_item_id: int, session: Session, *, exclude_vendor_id: int | None = None
+) -> list[VendorSelection]:
+    statement = select(VendorSelection).where(
+        VendorSelection.customer_order_item_id == order_item_id
+    )
+    if exclude_vendor_id is not None:
+        statement = statement.where(VendorSelection.vendor_id != exclude_vendor_id)
+    return list(session.execute(statement).scalars())
+
+
+def list_selections_for_item(order_item_id: int, session: Session) -> list[VendorSelection]:
+    """All of one order line's current vendor allocations (there can be
+    several when a line is split across vendors)."""
+    return _selections_for_item(order_item_id, session)
+
+
 def upsert_selection(
     order_item_id: int, vendor_id: int, quantity_selected: Decimal, session: Session
 ) -> VendorSelection:
-    """Create or replace the vendor selection for one order line. Always
-    freely replaceable -- selecting a different vendor for this part simply
-    overwrites the previous selection for that same part; it never affects
-    any other part's selection.
+    """Create or replace this vendor's allocation for one order line. An
+    order line may have allocations from several vendors at once (e.g. when
+    no single vendor can cover the full requested quantity) -- re-selecting
+    the SAME vendor for the SAME line overwrites just that vendor's own
+    allocation; it never touches any other vendor's allocation for the same
+    line, or any other line's selections.
 
     Raises `LookupError` if the order item or vendor doesn't exist, and
-    `ValueError` if the vendor doesn't currently stock the part or
-    `quantity_selected` exceeds what that vendor has available.
+    `ValueError` if the vendor doesn't currently stock the part,
+    `quantity_selected` exceeds what that vendor has available, or the sum
+    of all vendors' allocations for this line would exceed the requested
+    quantity.
     """
     order_item = session.get(CustomerOrderItem, order_item_id)
     if order_item is None:
@@ -91,23 +115,66 @@ def upsert_selection(
             "that vendor's inventory before selecting it."
         )
 
+    other_selections = _selections_for_item(
+        order_item_id, session, exclude_vendor_id=vendor_id
+    )
+    already_allocated = sum(
+        (other.quantity_selected for other in other_selections), Decimal(0)
+    )
+    if already_allocated + quantity_selected > order_item.quantity_requested:
+        raise ValueError(
+            f"Allocating {quantity_selected} to '{vendor.name}' would bring the total "
+            f"selected for {order_item.part_number_raw!r} to "
+            f"{already_allocated + quantity_selected}, exceeding the requested quantity "
+            f"of {order_item.quantity_requested}."
+        )
+
     selection = session.execute(
         select(VendorSelection).where(
-            VendorSelection.customer_order_item_id == order_item_id
+            VendorSelection.customer_order_item_id == order_item_id,
+            VendorSelection.vendor_id == vendor_id,
         )
     ).scalar_one_or_none()
 
     if selection is None:
-        selection = VendorSelection(customer_order_item_id=order_item_id)
+        selection = VendorSelection(
+            customer_order_item_id=order_item_id, vendor_id=vendor_id
+        )
         session.add(selection)
 
-    selection.vendor_id = vendor_id
     selection.part_id = offer.part_id
     selection.vendor_part_number = offer.vendor_part_number
     selection.quantity_selected = quantity_selected
 
     session.flush()
     return selection
+
+
+def clear_selections_for_item(order_item_id: int, session: Session) -> None:
+    """Remove every vendor's allocation for one order line. Used by the
+    automatic rule engine before applying a fresh set of allocations, so
+    re-running (or switching strategies) replaces the previous automatic
+    picks instead of leaving stale vendors from an earlier run alongside the
+    new ones."""
+    for selection in _selections_for_item(order_item_id, session):
+        session.delete(selection)
+    session.flush()
+
+
+def remove_selection(order_item_id: int, vendor_id: int, session: Session) -> None:
+    """Remove one vendor's allocation from an order line, leaving any other
+    vendors' allocations for that same line untouched. A no-op if that
+    vendor had no allocation for this line."""
+    selection = session.execute(
+        select(VendorSelection).where(
+            VendorSelection.customer_order_item_id == order_item_id,
+            VendorSelection.vendor_id == vendor_id,
+        )
+    ).scalar_one_or_none()
+    if selection is None:
+        return
+    session.delete(selection)
+    session.flush()
 
 
 def list_selections_for_order(order_id: int, session: Session) -> list[VendorSelection]:

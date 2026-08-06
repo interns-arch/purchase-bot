@@ -6,9 +6,21 @@ import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
 import { listCustomerOrders } from "../api/customerOrders";
 import { getVendorComparison } from "../api/vendorComparison";
-import { downloadSelectedVendorsExport, listVendorSelections, selectVendor } from "../api/vendorSelection";
+import {
+  autoSelectVendors,
+  downloadSelectedVendorsExport,
+  listVendorSelections,
+  removeVendorSelection,
+  selectVendor,
+} from "../api/vendorSelection";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
+const STRATEGIES = [
+  { value: "combination", label: "Combination of Vendors" },
+  { value: "highest_quantity", label: "Highest Available Quantity" },
+  { value: "minimum_vendors", label: "Minimum Number of Vendors" },
+];
 
 const COLUMNS = [
   { key: "customer_part_number", label: "Customer Part Number" },
@@ -42,6 +54,9 @@ export function VendorComparisonPage() {
   const [isExporting, setIsExporting] = useState(false);
   const [selections, setSelections] = useState([]);
   const [selectingKey, setSelectingKey] = useState(null);
+  const [quantityDrafts, setQuantityDrafts] = useState({});
+  const [strategy, setStrategy] = useState(STRATEGIES[0].value);
+  const [isAutoSelecting, setIsAutoSelecting] = useState(false);
 
   useEffect(() => {
     listCustomerOrders()
@@ -80,12 +95,15 @@ export function VendorComparisonPage() {
     setPage(1);
   }, [search, orderId]);
 
-  // Each customer part (order_item_id) holds its own independent selection --
-  // selecting a vendor for one part never affects any other part's selection.
+  // Each customer part (order_item_id) can have allocations from several
+  // vendors at once -- selecting/removing one vendor never affects another
+  // vendor's allocation for the same part, or any other part's selections.
   const selectionsByItem = useMemo(() => {
     const map = {};
     for (const selection of selections) {
-      map[selection.customer_order_item_id] = selection;
+      const list = map[selection.customer_order_item_id] || [];
+      list.push(selection);
+      map[selection.customer_order_item_id] = list;
     }
     return map;
   }, [selections]);
@@ -130,24 +148,78 @@ export function VendorComparisonPage() {
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const pageRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
 
-  async function handleSelect(row) {
+  function allocatedForItem(orderItemId, excludeVendorId) {
+    const list = selectionsByItem[orderItemId] || [];
+    return list
+      .filter((s) => s.vendor_id !== excludeVendorId)
+      .reduce((sum, s) => sum + s.quantity_selected, 0);
+  }
+
+  function defaultQuantityFor(row) {
+    const remaining = Math.max(
+      0,
+      row.requested_quantity - allocatedForItem(row.order_item_id, row.vendor_id)
+    );
+    return Math.min(remaining, row.vendor_available_quantity ?? 0);
+  }
+
+  async function handleAllocate(row) {
     const key = `${row.order_item_id}-${row.vendor_id}`;
-    const quantity = Math.min(row.requested_quantity, row.vendor_available_quantity);
+    const draft = quantityDrafts[key];
+    const quantity = draft != null && draft !== "" ? Number(draft) : defaultQuantityFor(row);
+    if (!quantity || quantity <= 0) {
+      toast.error("Enter a quantity greater than 0.");
+      return;
+    }
     setSelectingKey(key);
     try {
-      const selection = await selectVendor(orderId, row.order_item_id, {
-        vendorId: row.vendor_id,
+      const selection = await selectVendor(orderId, row.order_item_id, row.vendor_id, {
         quantitySelected: quantity,
       });
       setSelections((prev) => [
-        ...prev.filter((s) => s.customer_order_item_id !== row.order_item_id),
+        ...prev.filter(
+          (s) => !(s.customer_order_item_id === row.order_item_id && s.vendor_id === row.vendor_id)
+        ),
         selection,
       ]);
-      toast.success(`Selected ${row.vendor_name} for ${row.customer_part_number}.`);
+      toast.success(`Allocated ${quantity} of ${row.customer_part_number} to ${row.vendor_name}.`);
     } catch (error) {
       toast.error(extractErrorMessage(error, "Could not save vendor selection."));
     } finally {
       setSelectingKey(null);
+    }
+  }
+
+  async function handleRemove(row) {
+    const key = `${row.order_item_id}-${row.vendor_id}`;
+    setSelectingKey(key);
+    try {
+      await removeVendorSelection(orderId, row.order_item_id, row.vendor_id);
+      setSelections((prev) =>
+        prev.filter(
+          (s) => !(s.customer_order_item_id === row.order_item_id && s.vendor_id === row.vendor_id)
+        )
+      );
+      toast.success(`Removed ${row.vendor_name} from ${row.customer_part_number}.`);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not remove vendor selection."));
+    } finally {
+      setSelectingKey(null);
+    }
+  }
+
+  async function handleAutoSelect() {
+    if (!orderId) return;
+    setIsAutoSelecting(true);
+    try {
+      await autoSelectVendors(orderId, strategy);
+      const refreshed = await listVendorSelections(orderId);
+      setSelections(refreshed);
+      toast.success("Vendors selected automatically.");
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Automatic vendor selection failed."));
+    } finally {
+      setIsAutoSelecting(false);
     }
   }
 
@@ -191,6 +263,26 @@ export function VendorComparisonPage() {
                 </option>
               ))}
             </select>
+            <select
+              className="field__input"
+              style={{ maxWidth: 220 }}
+              value={strategy}
+              onChange={(event) => setStrategy(event.target.value)}
+            >
+              {STRATEGIES.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={handleAutoSelect}
+              disabled={isAutoSelecting || !orderId}
+            >
+              {isAutoSelecting ? "Selecting…" : "Auto-Select Vendors"}
+            </button>
             <button
               type="button"
               className="btn btn--primary"
@@ -264,14 +356,19 @@ export function VendorComparisonPage() {
                             </button>
                           </th>
                         ))}
+                        <th>Allocated</th>
                         <th>Select Vendor</th>
                       </tr>
                     </thead>
                     <tbody>
                       {pageRows.map((row, index) => {
                         const key = `${row.order_item_id}-${row.vendor_id}`;
-                        const itemSelection = selectionsByItem[row.order_item_id];
-                        const isThisRowSelected = itemSelection?.vendor_id === row.vendor_id;
+                        const rowSelection = (selectionsByItem[row.order_item_id] || []).find(
+                          (s) => s.vendor_id === row.vendor_id
+                        );
+                        const totalAllocated = allocatedForItem(row.order_item_id, null);
+                        const draftValue =
+                          quantityDrafts[key] ?? (rowSelection ? rowSelection.quantity_selected : defaultQuantityFor(row));
 
                         return (
                           <tr key={`${row.customer_part_number}-${row.vendor_name}-${index}`}>
@@ -281,19 +378,47 @@ export function VendorComparisonPage() {
                             <td>{row.vendor_part_number || "—"}</td>
                             <td>{row.vendor_available_quantity ?? "—"}</td>
                             <td>
+                              {row.vendor_id != null
+                                ? `${totalAllocated} / ${row.requested_quantity}`
+                                : "—"}
+                            </td>
+                            <td>
                               {row.vendor_id != null && (
-                                <button
-                                  type="button"
-                                  className={"btn " + (isThisRowSelected ? "btn--secondary" : "btn--ghost")}
-                                  disabled={selectingKey === key}
-                                  onClick={() => handleSelect(row)}
-                                >
-                                  {selectingKey === key
-                                    ? "Saving…"
-                                    : isThisRowSelected
-                                      ? "Selected ✓"
-                                      : "Select"}
-                                </button>
+                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                  <input
+                                    type="number"
+                                    className="field__input"
+                                    style={{ width: 90 }}
+                                    min="0"
+                                    step="any"
+                                    value={draftValue}
+                                    onChange={(event) =>
+                                      setQuantityDrafts((prev) => ({ ...prev, [key]: event.target.value }))
+                                    }
+                                  />
+                                  <button
+                                    type="button"
+                                    className={"btn " + (rowSelection ? "btn--secondary" : "btn--ghost")}
+                                    disabled={selectingKey === key}
+                                    onClick={() => handleAllocate(row)}
+                                  >
+                                    {selectingKey === key
+                                      ? "Saving…"
+                                      : rowSelection
+                                        ? "Selected ✓"
+                                        : "Select"}
+                                  </button>
+                                  {rowSelection && (
+                                    <button
+                                      type="button"
+                                      className="btn btn--ghost"
+                                      disabled={selectingKey === key}
+                                      onClick={() => handleRemove(row)}
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </div>
                               )}
                             </td>
                           </tr>

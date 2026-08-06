@@ -112,6 +112,7 @@ class VendorComparisonRow:
     inventory_file: str | None
     order_item_id: int | None = None
     vendor_id: int | None = None
+    is_own_stock: bool = False
 
 
 @dataclass
@@ -232,6 +233,7 @@ def compare_vendors(
                     ),
                     inventory_file=offer.inventory_file,
                     order_item_id=order_item_id,
+                    is_own_stock=offer.is_own_stock,
                 )
             )
             result.summary.matching_vendors_found += 1

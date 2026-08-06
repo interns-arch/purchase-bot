@@ -30,6 +30,10 @@ for _root in (INCOMING_ROOT, PROCESSED_ROOT, FAILED_ROOT, ARCHIVE_ROOT):
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+class UploadTooLargeError(Exception):
+    """Raised when an upload exceeds `settings.max_upload_size_bytes`."""
+
+
 def _safe_component(text: str) -> str:
     return _UNSAFE_CHARS.sub("_", text).strip("_") or "file"
 
@@ -48,14 +52,30 @@ def save_incoming_upload(upload: UploadFile, source: DocumentSource) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / _safe_component(upload.filename or "upload")
 
-    with dest_path.open("wb") as out_file:
-        while chunk := upload.file.read(1024 * 1024):
-            out_file.write(chunk)
+    written = 0
+    try:
+        with dest_path.open("wb") as out_file:
+            while chunk := upload.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > settings.max_upload_size_bytes:
+                    raise UploadTooLargeError(
+                        f"'{upload.filename}' exceeds the "
+                        f"{settings.max_upload_size_bytes // (1024 * 1024)}MB upload limit."
+                    )
+                out_file.write(chunk)
+    except UploadTooLargeError:
+        dest_path.unlink(missing_ok=True)
+        raise
 
     return dest_path
 
 
 def save_incoming_bytes(data: bytes, filename: str, source: DocumentSource) -> Path:
+    if len(data) > settings.max_upload_size_bytes:
+        raise UploadTooLargeError(
+            f"'{filename}' exceeds the "
+            f"{settings.max_upload_size_bytes // (1024 * 1024)}MB upload limit."
+        )
     dest_dir = INCOMING_ROOT / _relative_dest_dir(source)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / _safe_component(filename or "upload")

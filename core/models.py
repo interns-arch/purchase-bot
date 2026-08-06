@@ -59,13 +59,53 @@ class VendorSelectionStatus(str, enum.Enum):
     ORDERED = "ORDERED"
 
 
+class VendorDeliveryImportSource(str, enum.Enum):
+    FILE_UPLOAD = "FILE_UPLOAD"
+    VENDOR_INVOICE_PDF = "VENDOR_INVOICE_PDF"
+
+
+class InvoiceVerificationStatus(str, enum.Enum):
+    COMPLETED = "COMPLETED"
+    COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    FAILED = "FAILED"
+
+
+class InvoiceLineDiscrepancyType(str, enum.Enum):
+    MATCHED = "MATCHED"
+    SHORT_SUPPLY = "SHORT_SUPPLY"
+    EXTRA_SUPPLY = "EXTRA_SUPPLY"
+    MISSING_PART = "MISSING_PART"
+    UNEXPECTED_PART = "UNEXPECTED_PART"
+
+
+class VendorPurchaseOrderStatus(str, enum.Enum):
+    GENERATED = "GENERATED"
+    EMAILED = "EMAILED"
+    EMAIL_FAILED = "EMAIL_FAILED"
+
+
 class Vendor(Base):
     __tablename__ = "vendors"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(nullable=False)
+    # Permanent identifier used throughout the app for inventory imports
+    # (see core.services.vendor_code_service) -- <first two letters of
+    # name>_CT, e.g. "AR_CT", with a numeric suffix on collision. NOT the
+    # same thing as `whatsapp_number` below: multiple vendors share a single
+    # WhatsApp Business number, so the sender's phone number can never
+    # identify which vendor a file came from -- only the vendor code
+    # embedded in the filename can.
+    vendor_code: Mapped[str | None] = mapped_column(default=None)
+    # True for the company's own warehouse/dark-store "vendor" rows (e.g.
+    # Brijwasan / Company Warehouse) -- see core.services.rules.engine,
+    # which always tries these offers before any external vendor.
+    is_own_stock: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     contact_info: Mapped[str | None] = mapped_column(default=None)
     payment_terms: Mapped[str | None] = mapped_column(default=None)
+    # No longer used to identify which vendor sent an inbound file (see
+    # `vendor_code` above) -- kept only as informational contact metadata.
     whatsapp_number: Mapped[str | None] = mapped_column(default=None)
     active: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
@@ -81,6 +121,13 @@ class Vendor(Base):
             unique=True,
             sqlite_where=text("whatsapp_number IS NOT NULL"),
             postgresql_where=text("whatsapp_number IS NOT NULL"),
+        ),
+        Index(
+            "ux_vendors_vendor_code",
+            vendor_code,
+            unique=True,
+            sqlite_where=text("vendor_code IS NOT NULL"),
+            postgresql_where=text("vendor_code IS NOT NULL"),
         ),
     )
 
@@ -285,12 +332,18 @@ class PurchaseOrderItem(Base):
 
 
 class VendorSelection(Base):
-    """The purchase team's choice of vendor + quantity for one
-    `CustomerOrderItem` (Module 2.5 -- Vendor Selection). At most one
-    selection per order line (single-vendor-per-line allocation, per
-    ARCHITECTURE.md's locked decision). `status` starts `SELECTED` and
-    flips to `ORDERED` -- with `purchase_order_item_id` set -- once
-    `purchase_order_service.generate_purchase_orders_from_selections`
+    """The purchase team's (or rule engine's) choice of vendor + quantity for
+    one `CustomerOrderItem` (Module 2.5 -- Vendor Selection). An order line
+    can now have MULTIPLE selections -- one per vendor -- so a requested
+    quantity that no single vendor can cover can be split across several
+    (unique on `(customer_order_item_id, vendor_id)`, not on
+    `customer_order_item_id` alone; this superseded the original
+    single-vendor-per-line decision in ARCHITECTURE.md once the business
+    confirmed combination-of-vendors fulfillment is the real workflow --
+    see `backend/scripts/migrate_vendor_selection_multi_vendor.py` for the
+    migration off the old single-column-unique schema). `status` starts
+    `SELECTED` and flips to `ORDERED` -- with `purchase_order_item_id` set --
+    once `purchase_order_service.generate_purchase_orders_from_selections`
     turns it into a real PO line; selections are immutable after that."""
 
     __tablename__ = "vendor_selections"
@@ -299,7 +352,6 @@ class VendorSelection(Base):
     customer_order_item_id: Mapped[int] = mapped_column(
         ForeignKey("customer_order_items.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
     )
     vendor_id: Mapped[int] = mapped_column(
         ForeignKey("vendors.id", ondelete="RESTRICT"), nullable=False
@@ -327,8 +379,12 @@ class VendorSelection(Base):
 
     __table_args__ = (
         CheckConstraint("quantity_selected > 0", name="ck_vendor_selections_qty_positive"),
+        UniqueConstraint(
+            "customer_order_item_id", "vendor_id", name="uq_vendor_selection_item_vendor"
+        ),
         Index("ix_vendor_selections_vendor_id", "vendor_id"),
         Index("ix_vendor_selections_part_id", "part_id"),
+        Index("ix_vendor_selections_order_item_id", "customer_order_item_id"),
     )
 
 
@@ -456,6 +512,18 @@ class VendorDeliveryImport(Base):
     status: Mapped[DeliveryImportStatus] = mapped_column(
         Enum(DeliveryImportStatus, name="vendor_delivery_import_status"), nullable=False
     )
+    # Distinguishes deliveries that arrived as an uploaded delivery file
+    # (FILE_UPLOAD, the original/default) from ones written automatically by
+    # Vendor Invoice Verification when an invoice PDF's line items are
+    # matched/short/extra against `VendorSelection` -- see
+    # `core/services/vendor_invoice_verification_service.py`. Existing rows
+    # default to FILE_UPLOAD, so nothing about pre-existing data changes.
+    source: Mapped[VendorDeliveryImportSource] = mapped_column(
+        Enum(VendorDeliveryImportSource, name="vendor_delivery_import_source"),
+        default=VendorDeliveryImportSource.FILE_UPLOAD,
+        server_default=text("'FILE_UPLOAD'"),
+        nullable=False,
+    )
     row_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     error_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
@@ -515,6 +583,82 @@ class VendorDeliveryItem(Base):
         Index("ix_vendor_delivery_items_part_id", "part_id"),
         Index("ix_vendor_delivery_items_delivery_date", "delivery_date"),
     )
+
+
+class VendorInvoiceImport(Base):
+    """Import-history + result header for one Vendor Invoice PDF processed
+    by `core/services/vendor_invoice_verification_service.py`. `vendor_id`
+    is nullable because extraction can fail to resolve a vendor at all (an
+    unreadable/unrecognized invoice is still recorded, for visibility, with
+    `status=NEEDS_REVIEW`)."""
+
+    __tablename__ = "vendor_invoice_imports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    file_name: Mapped[str] = mapped_column(nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(nullable=False)
+    content_hash: Mapped[str] = mapped_column(nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vendors.id", ondelete="SET NULL"), default=None
+    )
+    vendor_name_extracted: Mapped[str | None] = mapped_column(default=None)
+    status: Mapped[InvoiceVerificationStatus] = mapped_column(
+        Enum(InvoiceVerificationStatus, name="invoice_verification_status"), nullable=False
+    )
+    row_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    error_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    error_message: Mapped[str | None] = mapped_column(default=None)
+    # Set once matched/short/extra lines have been mirrored into a
+    # `VendorDeliveryItem` batch (source=VENDOR_INVOICE_PDF), so Delivery
+    # Tracking / Vendor Performance pick this invoice up automatically.
+    vendor_delivery_import_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vendor_delivery_imports.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    vendor: Mapped[Vendor | None] = relationship()
+
+    __table_args__ = (
+        Index(
+            "ux_vendor_invoice_imports_file_hash",
+            "file_name",
+            "content_hash",
+            unique=True,
+            sqlite_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
+            postgresql_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
+        ),
+        Index("ix_vendor_invoice_imports_content_hash", "content_hash"),
+    )
+
+
+class VendorInvoiceLineResult(Base):
+    """One extracted line item from a Vendor Invoice PDF, with the
+    discrepancy classification against the vendor's current
+    `VendorSelection` allocations."""
+
+    __tablename__ = "vendor_invoice_line_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_import_id: Mapped[int] = mapped_column(
+        ForeignKey("vendor_invoice_imports.id", ondelete="CASCADE"), nullable=False
+    )
+    part_number_raw: Mapped[str] = mapped_column(nullable=False)
+    part_id: Mapped[int | None] = mapped_column(
+        ForeignKey("parts.id", ondelete="SET NULL"), default=None
+    )
+    quantity_invoiced: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    expected_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), default=None)
+    discrepancy_type: Mapped[InvoiceLineDiscrepancyType] = mapped_column(
+        Enum(InvoiceLineDiscrepancyType, name="invoice_line_discrepancy_type"), nullable=False
+    )
+    raw_text: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    invoice_import: Mapped[VendorInvoiceImport] = relationship()
+    part: Mapped[Part | None] = relationship()
+
+    __table_args__ = (Index("ix_vendor_invoice_line_results_import_id", "invoice_import_id"),)
 
 
 class VendorDeliveryImportError(Base):
@@ -617,4 +761,69 @@ class CustomerOrderImportError(Base):
 
     __table_args__ = (
         Index("ix_customer_order_import_errors_order_id", "customer_order_id"),
+    )
+
+
+class VendorPurchaseOrder(Base):
+    """One Purchase Order for one vendor, generated automatically after
+    Automatic (or manual) Vendor Selection groups a customer order's
+    `VendorSelection` rows by vendor (see
+    `core.services.purchase_order_generation_service`). Distinct from the
+    legacy CLI's `PurchaseOrder`/`PurchaseOrderItem` above, which stays
+    untouched -- those are keyed off the old PO-based matching pipeline,
+    not `VendorSelection`.
+
+    Never sent to the vendor -- `status`/`emailed_at` track delivery of the
+    generated document to the internal purchase team only (see
+    `PURCHASE_TEAM_EMAIL`)."""
+
+    __tablename__ = "vendor_purchase_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    po_number: Mapped[str] = mapped_column(nullable=False, unique=True)
+    vendor_id: Mapped[int] = mapped_column(
+        ForeignKey("vendors.id", ondelete="RESTRICT"), nullable=False
+    )
+    customer_order_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_orders.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[VendorPurchaseOrderStatus] = mapped_column(
+        Enum(VendorPurchaseOrderStatus, name="vendor_purchase_order_status"),
+        default=VendorPurchaseOrderStatus.GENERATED,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    emailed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    vendor: Mapped[Vendor] = relationship()
+
+    __table_args__ = (
+        Index("ix_vendor_purchase_orders_vendor_id", "vendor_id"),
+        Index("ix_vendor_purchase_orders_customer_order_id", "customer_order_id"),
+    )
+
+
+class VendorPurchaseOrderItem(Base):
+    """One ordered part on a `VendorPurchaseOrder`."""
+
+    __tablename__ = "vendor_purchase_order_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purchase_order_id: Mapped[int] = mapped_column(
+        ForeignKey("vendor_purchase_orders.id", ondelete="CASCADE"), nullable=False
+    )
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("parts.id", ondelete="RESTRICT"), nullable=False
+    )
+    vendor_part_number: Mapped[str] = mapped_column(nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    customer_order_item_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_order_items.id", ondelete="CASCADE"), nullable=False
+    )
+
+    part: Mapped[Part] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="ck_vendor_po_items_qty_positive"),
+        Index("ix_vendor_po_items_purchase_order_id", "purchase_order_id"),
     )

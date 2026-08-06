@@ -116,10 +116,23 @@ never commit it). In production, set these in the Render dashboard instead.
 | `FAILED_UPLOAD_DIR` | Failed / needs-review files | `uploads/failed` |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | One-time admin bootstrap -- only takes effect while zero user accounts exist | *(unset)* |
 | `LOG_LEVEL` | Minimum log level | `INFO` |
-| `WHATSAPP_ENABLED` | `true`/`false` -- see §6 | `false` |
+| `WHATSAPP_ENABLED` / `ENABLE_WHATSAPP_AUTOMATION` | `true`/`false` -- see §6 | `false` |
 | `WHATSAPP_GRAPH_API_VERSION` | Meta Graph API version | `v23.0` |
-| `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_APP_ID`, `WHATSAPP_APP_SECRET` | Meta Business App credentials -- see §6 | *(unset)* |
+| `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_BUSINESS_ACCOUNT_ID`/`META_BUSINESS_ID`, `WHATSAPP_APP_ID`/`META_APP_ID`, `WHATSAPP_APP_SECRET`/`META_APP_SECRET`/`WHATSAPP_WEBHOOK_SECRET` | Meta Business App credentials -- see §6 | *(unset)* |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` / `WHATSAPP_VERIFY_TOKEN` | Webhook handshake token. Second name is a fallback alias | *(unset)* |
+| `VENDOR_SELECTION_DEFAULT_STRATEGY` | Default Automatic Vendor Selection strategy: `highest_quantity` \| `minimum_vendors` \| `combination` | `combination` |
+| `OWN_STOCK_VENDOR_NAME` | Vendor name (case-insensitive) treated as the company's own stock and always allocated first, before any external vendor. Blank disables name-based detection (the `Vendor.is_own_stock` DB flag still applies). See README "Own Stock priority (Bijvasan)". | `Bijvasan` |
+| `GMAIL_ENABLED` / `ENABLE_EMAIL_AUTOMATION` | `true`/`false` -- see §7 | `false` |
+| `GMAIL_AUTH_MODE` | `imap` or `oauth` -- see §7 | `imap` |
+| `GMAIL_EMAIL`, `GMAIL_APP_PASSWORD`, `GMAIL_IMAP_SERVER`, `GMAIL_IMAP_PORT` | IMAP mode credentials -- see §7 | *(unset except server/port)* |
+| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | OAuth mode credentials -- see §7 | *(unset)* |
+| `GMAIL_POLL_INTERVAL_SECONDS` | How often the scheduler polls the mailbox | `300` |
+| `ENABLE_GOOGLE_SHEETS_SYNC` | `true`/`false` -- see §8 | `false` |
+| `GOOGLE_SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_PROJECT_ID` | Google Sheets credentials -- see §8 | *(unset)* |
+| `ALLOCATION_REPORT_EMAIL` | Internal address the Vendor Allocation Report is emailed to after every **automatic** vendor selection (not manual) -- see §9 | *(unset -- email skipped)* |
+| `ENABLE_PO_EMAIL` / `PURCHASE_TEAM_EMAIL` | Whether to also email each generated Purchase Order to this internal address -- see §9. POs are always generated + saved + downloadable regardless of this setting | `false` / *(unset)* |
+| `ENABLE_PO_WHATSAPP` | Reserved for a future phase -- sending POs to **vendors** over WhatsApp isn't implemented yet; this app never emails or messages a vendor directly | `false`, unused |
+| `COMPANY_NAME`, `COMPANY_ADDRESS`, `COMPANY_PHONE`, `COMPANY_EMAIL` | Printed on every generated Purchase Order | *(unset)* |
 
 For the frontend, only one variable: `VITE_API_BASE_URL` (see §2).
 
@@ -185,9 +198,170 @@ to go live**, only configuration:
 unsigned, which is fine for local testing but must be set before exposing
 the webhook publicly.
 
+All vendors message this **same** WhatsApp Business number, so identifying
+which vendor sent an inventory file is done via a **Vendor Code** embedded
+in the filename (e.g. `AR_CT_Inventory.xlsx`), not the sender's phone
+number -- see the README's "Vendor Code" section for the naming convention
+and onboarding flow.
+
 ---
 
-## 7. CORS
+## 7. Enabling Gmail Customer Order Automation
+
+The integration (`backend/app/integrations/gmail/`) is fully
+environment-driven, same pattern as WhatsApp: with `GMAIL_ENABLED=false`
+(the default), no background polling job is scheduled at all -- **no code
+changes are needed to go live**, only configuration. `GMAIL_AUTH_MODE`
+picks which of the two setups below is used; you only need to complete one.
+
+### Option A -- IMAP + App Password (simplest)
+
+1. Use (or create) a dedicated Gmail mailbox for incoming customer orders --
+   don't point this at a personal inbox.
+2. Turn on 2-Step Verification on that account (required for App Passwords):
+   Google Account -> Security -> 2-Step Verification.
+3. Create an App Password: Google Account -> Security -> App Passwords ->
+   choose "Mail" -> generate. This is a 16-character password used only by
+   this app -- **not** the account's real login password.
+4. Set in `backend/.env` (or the Render dashboard):
+   ```
+   GMAIL_ENABLED=true
+   GMAIL_AUTH_MODE=imap
+   GMAIL_EMAIL=orders@yourdomain.com
+   GMAIL_APP_PASSWORD=<the 16-character app password>
+   ```
+5. Redeploy/restart. The scheduler polls every `GMAIL_POLL_INTERVAL_SECONDS`
+   (default 300s) -- check progress on Settings -> Integration Status.
+
+### Option B -- OAuth 2.0 (Gmail API)
+
+1. Create a project at https://console.cloud.google.com/ (or reuse the one
+   from Google Sheets setup, §8) and enable the **Gmail API**
+   (APIs & Services -> Library -> search "Gmail API" -> Enable).
+2. Configure the OAuth consent screen (APIs & Services -> OAuth consent
+   screen) -- "Internal" if using Google Workspace, "External" otherwise
+   (add the mailbox as a test user if the app stays in "Testing" mode).
+3. Create credentials: APIs & Services -> Credentials -> Create Credentials
+   -> OAuth client ID -> Application type **Desktop app**. Download the
+   client ID and client secret.
+4. Run a one-time consent flow to mint a refresh token (any short local
+   script using `google-auth-oauthlib`'s `InstalledAppFlow` with scope
+   `https://www.googleapis.com/auth/gmail.modify` works -- this only needs
+   to be done once per mailbox; the refresh token doesn't expire unless
+   revoked).
+5. Set in `backend/.env` (or the Render dashboard):
+   ```
+   GMAIL_ENABLED=true
+   GMAIL_AUTH_MODE=oauth
+   GMAIL_CLIENT_ID=<...>
+   GMAIL_CLIENT_SECRET=<...>
+   GMAIL_REFRESH_TOKEN=<...>
+   ```
+6. Redeploy/restart.
+
+Either mode: only Excel attachments (`.xlsx`/`.xls`) are considered, and
+when a message has more than two attachments the trailing two are ignored
+(typically signature images/letterhead, not the order sheet). Each
+processed message is deduplicated by its Gmail Message-ID, so a redelivered
+or re-synced message is never imported twice.
+
+---
+
+## 8. Enabling Google Sheets Sync
+
+Every vendor inventory import (manual or WhatsApp) pushes that vendor's
+active inventory to its own worksheet in a shared Google Sheet, once this
+is configured. Disabled (no sync attempted) by default.
+
+1. In the same (or a new) Google Cloud project, enable the **Google Sheets
+   API** (APIs & Services -> Library -> search "Google Sheets API" -> Enable).
+2. Create a service account: APIs & Services -> Credentials -> Create
+   Credentials -> Service Account -> give it any name -> Done.
+3. Create a key for it: open the service account -> Keys -> Add Key ->
+   Create new key -> JSON. This downloads a JSON key file -- treat it like a
+   password.
+4. Create (or reuse) the target Google Sheet, then **share it** with the
+   service account's email address (looks like
+   `something@your-project.iam.gserviceaccount.com`, found in the key file
+   or the service account's details page) with **Editor** access -- without
+   this share step, every sync attempt fails with a permission error.
+5. Copy the spreadsheet's ID from its URL:
+   `https://docs.google.com/spreadsheets/d/<THIS_PART>/edit`.
+6. Set in `backend/.env` (or the Render dashboard):
+   ```
+   ENABLE_GOOGLE_SHEETS_SYNC=true
+   GOOGLE_SHEET_ID=<the spreadsheet id from step 5>
+   GOOGLE_SERVICE_ACCOUNT_JSON=<paste the entire key file's JSON on one line>
+   ```
+   `GOOGLE_SERVICE_ACCOUNT_JSON` also accepts a file path instead of inline
+   JSON (e.g. `./credentials/google-service-account.json`) if you'd rather
+   mount the key file directly -- either form works with no code change.
+7. Redeploy/restart, then upload (or wait for) an inventory import and check
+   Settings -> Integration Status -> Google Sheets Sync.
+
+A Sheets outage or misconfiguration never fails the inventory import itself
+-- it's logged and recorded on the integration status row only.
+
+---
+
+## 9. Vendor Allocation Report & Purchase Order email
+
+Both reuse the same Gmail account already configured in §7 (IMAP or OAuth,
+whichever `GMAIL_AUTH_MODE` is set to) -- no separate credentials needed,
+just the destination addresses below. **Neither is ever sent to a
+vendor** -- both are for internal review only.
+
+1. After every **automatic** vendor selection (not manual), the resulting
+   Vendor Allocation Excel is emailed to `ALLOCATION_REPORT_EMAIL`. Leave it
+   unset to skip this email entirely (manual export from the UI always
+   continues to work regardless).
+2. After every automatic vendor selection, one Purchase Order is generated
+   per selected vendor -- this always happens and is always saved +
+   downloadable from the Purchase Orders page, **regardless of any email
+   setting**. Set `ENABLE_PO_EMAIL=true` and `PURCHASE_TEAM_EMAIL=<address>`
+   to also email each generated PO's Excel to that internal address.
+3. Set in `backend/.env` (or the Render dashboard):
+   ```
+   ALLOCATION_REPORT_EMAIL=purchasing@yourcompany.example
+   ENABLE_PO_EMAIL=true
+   PURCHASE_TEAM_EMAIL=purchasing@yourcompany.example
+   COMPANY_NAME=Your Company Pvt Ltd
+   COMPANY_ADDRESS=Your company address
+   COMPANY_PHONE=+91-...
+   COMPANY_EMAIL=contact@yourcompany.example
+   ```
+4. Redeploy/restart, then run Automatic Vendor Selection on an order and
+   check the configured inbox, plus the Purchase Orders page.
+
+A mail failure (Gmail down, bad address) is logged and recorded on that
+Purchase Order's status (`EMAIL_FAILED`) but never fails vendor selection
+or PO generation itself.
+
+`ENABLE_PO_WHATSAPP` exists in `.env.example` as a reserved placeholder
+only -- sending Purchase Orders to **vendors** (over WhatsApp or email) is
+a deferred future phase, not implemented today.
+
+---
+
+## 10. Background workers
+
+WhatsApp is webhook-driven (Meta pushes to your app; nothing to poll).
+Gmail polling and the admin-bootstrap check run as an **in-process
+APScheduler job** (`backend/app/workers/scheduler.py`), started/stopped
+from FastAPI's `lifespan` in `backend/app/main.py` -- there is no separate
+worker process, dyno, or queue to deploy. This means:
+
+- A single Render Web Service is sufficient for every automation in this
+  app, including Gmail polling.
+- The Gmail poll only actually runs while the process is up -- on Render's
+  free plan, a service that's spun down due to inactivity won't poll until
+  the next request wakes it (see the cold-start note in §14).
+- Google Sheets sync is event-triggered (runs synchronously right after an
+  inventory import), not on its own schedule, so it isn't affected by this.
+
+---
+
+## 11. CORS
 
 `CORS_ORIGINS` is a comma-separated allowlist read by
 `backend/app/core/config.py` and applied via FastAPI's `CORSMiddleware`.
@@ -202,7 +376,7 @@ don't use a wildcard in production.
 
 ---
 
-## 8. Logging, error handling, and health checks
+## 12. Logging, error handling, and health checks
 
 - **Logging:** every request is logged (`method path -> status (duration)`),
   along with startup, import status, document processing, and webhook events
@@ -219,7 +393,38 @@ don't use a wildcard in production.
 
 ---
 
-## 9. Common deployment issues
+## 13. Upgrading an existing database (schema migrations)
+
+There is no Alembic in this project -- `core/db.py` only ever calls
+`Base.metadata.create_all`, which creates tables that don't exist yet but
+never alters an existing one. The automation changes (multi-vendor Vendor
+Selection, Vendor Invoice Verification, Gmail's `email_message_id` dedupe
+column, Vendor Codes/`is_own_stock`) need a couple of changes to a
+*pre-existing* database that `create_all` can't make on its own. A
+brand-new database needs none of this -- `create_all` already creates every
+table correctly the first time.
+
+The Vendor Code step in particular **backfills a generated code for every
+existing vendor row** that doesn't have one yet (same generator new vendors
+get), so an existing deployment never ends up with an unidentifiable vendor
+once WhatsApp-sender-based identification is removed.
+
+If you're upgrading a database that was already running before these
+changes, run once, from the repository root, against whichever database
+`DATABASE_URL` (or its absence, for local SQLite) currently points at:
+
+```bash
+python -m backend.scripts.migrate_schema_updates
+```
+
+It's idempotent (safe to run more than once) and prints what it did or
+skipped. **Back up a production database before running any schema
+change against it.** See the script's own docstring
+(`backend/scripts/migrate_schema_updates.py`) for exactly what it does.
+
+---
+
+## 14. Common deployment issues
 
 - **CORS errors in the browser console:** `CORS_ORIGINS` on the backend
   doesn't include your Vercel URL, or you forgot to redeploy the backend
@@ -249,3 +454,15 @@ don't use a wildcard in production.
   run from the repository root (`uvicorn backend.app.main:app`), not from
   inside `backend/` -- this is already how `render.yaml`'s `startCommand`
   invokes it.
+- **Gmail never picks up new mail:** confirm `GMAIL_ENABLED`/
+  `ENABLE_EMAIL_AUTOMATION` is `true` and check Settings -> Integration
+  Status -> Gmail for the last poll's error message. On Render's free plan,
+  a spun-down service doesn't poll until a request wakes it (see the
+  cold-start note above) -- if the mailbox needs near-real-time processing,
+  use a paid plan or an uptime-ping service to keep it warm.
+- **Google Sheets sync fails with a permission error:** the target sheet
+  wasn't shared with the service account's email address (see §8 step 4) --
+  sharing the sheet with your own Google account doesn't count.
+- **`GOOGLE_SERVICE_ACCOUNT_JSON` / Gmail OAuth credentials rejected:** check
+  for accidental line breaks or trailing whitespace when pasting a
+  multi-line JSON key or token into a single-line env var field.
