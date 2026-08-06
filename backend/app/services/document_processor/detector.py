@@ -1,21 +1,26 @@
-"""Classifies an incoming file into an `IncomingDocumentType`. Manual
-uploads always carry an explicit `document_type_hint` (the endpoint the
-user clicked already says which one it is) and skip straight past every
-*document-type* heuristic below -- but a manual Vendor Inventory upload's
-*vendor* still needs to be resolved from its filename's Vendor Code, exactly
-like a WhatsApp upload, so that check runs either way (see
-`_classify_inventory`). WhatsApp uploads have no hint at all, so document
-type itself also falls back to: vendor-code-shaped filename prefix ->
-caption keyword override -> default-to-customer-order -> UNKNOWN (human
-review) if nothing resolves.
+"""Classifies an incoming file into an `IncomingDocumentType`.
+
+The channel a document arrived on is authoritative (business workflow), so
+`classify()` routes by `source` first and only MANUAL uploads reach the
+heuristic classifier:
+
+- WHATSAPP -> ALWAYS Vendor Inventory. The vendor is still resolved from the
+  filename's Vendor Code (see `_classify_inventory`) so the AR_CT.xlsx /
+  BI_CT.xlsx onboarding workflow is unchanged; an unregistered code is still
+  rejected downstream rather than silently misrouted.
+- EMAIL (dedicated Gmail inbox) -> Customer Order for spreadsheets, Vendor
+  Invoice for PDF purchase bills -- decided purely by file format.
+- MANUAL -> `_classify_manual`: the explicit `document_type_hint` from the
+  endpoint the user clicked (a manual Vendor Inventory upload's *vendor* is
+  still resolved from its filename's Vendor Code, exactly like WhatsApp).
 
 Vendor Inventory and Customer Order files are NOT distinguishable by column
 headers alone (both only require Part Number + Quantity per
-`core.ingestion.column_detector.find_required_columns`) -- that's exactly
-why the vendor code, not file structure, is the primary signal here.
-Sender identity is deliberately NEVER used to identify a vendor: every
-vendor messages the same shared WhatsApp Business number, so a sender's
-phone number cannot tell them apart (see `core.services.vendor_code_service`).
+`core.ingestion.column_detector.find_required_columns`) -- which is why
+source, not file structure, is the primary signal. Sender identity is
+deliberately NEVER used to identify a vendor: every vendor messages the same
+shared WhatsApp Business number, so a sender's phone number cannot tell them
+apart (see `core.services.vendor_code_service`).
 """
 
 from __future__ import annotations
@@ -25,10 +30,13 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from backend.app.documents.models import IncomingDocumentType
+from backend.app.documents.models import DocumentSource, IncomingDocumentType
 from backend.app.services.document_processor.metadata import DocumentMetadata
 from backend.app.services.document_processor.validator import INVOICE_EXTENSIONS
+from core.logging_setup import get_logger
 from core.services import vendor_code_service
+
+logger = get_logger(__name__)
 
 _CAPTION_KEYWORDS: dict[str, IncomingDocumentType] = {
     "inventory": IncomingDocumentType.VENDOR_INVENTORY,
@@ -78,7 +86,57 @@ def _classify_inventory(file_path: Path, session: Session) -> Classification:
     )
 
 
-def classify(file_path: Path, metadata: DocumentMetadata, session: Session) -> Classification:
+def classify(
+    file_path: Path, metadata: DocumentMetadata, session: Session, *, source: DocumentSource
+) -> Classification:
+    """Decide a document's type. The channel it arrived on is authoritative
+    per the business workflow, so WhatsApp and Gmail bypass the heuristic
+    classifier entirely -- only MANUAL uploads are classified:
+
+    - WHATSAPP -> ALWAYS Vendor Inventory. The vendor is still resolved from
+      the filename's Vendor Code (AR_CT.xlsx / BI_CT.xlsx ...) so the
+      vendor-code onboarding workflow is unaffected.
+    - EMAIL (dedicated Gmail inbox) -> Customer Order for spreadsheets, or
+      Vendor Invoice for PDF purchase bills, decided purely by file format.
+    - MANUAL -> the hint/heuristic classifier below (`_classify_manual`)."""
+    if source == DocumentSource.WHATSAPP:
+        # Force Vendor Inventory, but keep the filename Vendor-Code lookup so a
+        # returning vendor is still identified (and an unknown code is still
+        # rejected downstream) exactly as before.
+        classification = _classify_inventory(file_path, session)
+        logger.info(
+            "Forcing document_type=VENDOR_INVENTORY for WHATSAPP document '%s' "
+            "(vendor_code=%s, vendor_id=%s) -- classifier bypassed by source rule.",
+            file_path.name,
+            classification.vendor_code,
+            classification.vendor_id,
+        )
+        return classification
+
+    if source == DocumentSource.EMAIL:
+        if file_path.suffix.lower() in INVOICE_EXTENSIONS:
+            logger.info(
+                "Forcing document_type=VENDOR_INVOICE for EMAIL PDF '%s' "
+                "-- classifier bypassed by source rule.",
+                file_path.name,
+            )
+            return Classification(IncomingDocumentType.VENDOR_INVOICE)
+        logger.info(
+            "Forcing document_type=CUSTOMER_ORDER for EMAIL spreadsheet '%s' "
+            "-- classifier bypassed by source rule.",
+            file_path.name,
+        )
+        return Classification(IncomingDocumentType.CUSTOMER_ORDER)
+
+    return _classify_manual(file_path, metadata, session)
+
+
+def _classify_manual(
+    file_path: Path, metadata: DocumentMetadata, session: Session
+) -> Classification:
+    """Classifier for MANUAL uploads only. A manual upload always carries an
+    explicit `document_type_hint` (the endpoint the user clicked), so the
+    heuristic fallbacks below are effectively just defensive."""
     if file_path.suffix.lower() in INVOICE_EXTENSIONS:
         return Classification(IncomingDocumentType.VENDOR_INVOICE)
 

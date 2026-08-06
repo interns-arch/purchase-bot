@@ -1,8 +1,9 @@
-"""Gmail Customer Order Automation: polls the configured mailbox for unread
-messages, downloads Excel attachments, and hands each off to the same
-Document Processing Engine the manual Customer Orders upload uses --
-`process_document(..., document_type_hint=CUSTOMER_ORDER)` -- so this
-worker never reimplements `core.services.customer_order_service`.
+"""Gmail inbox automation: polls the configured mailbox for unread messages,
+downloads the usable attachments (Excel customer orders + PDF purchase
+bills), and hands each off to the same Document Processing Engine every
+other upload path uses. The document type is forced by source in
+`detector.classify` (EMAIL spreadsheet -> Customer Order, EMAIL PDF -> Vendor
+Invoice), so this worker never reimplements `core.services.*`.
 
 Scheduled periodically by `backend/app/workers/scheduler.py`; opens its own
 DB session via `core.db.get_session()` rather than the request-scoped
@@ -15,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.app.documents import service as documents_service
-from backend.app.documents.models import DocumentSource, IncomingDocumentType
+from backend.app.documents.models import DocumentSource
 from backend.app.integrations.gmail import status_service
 from backend.app.integrations.gmail.client import (
     GmailNotConfiguredError,
@@ -32,28 +33,40 @@ from core.logging_setup import get_logger
 logger = get_logger(__name__)
 
 _EXCEL_EXTENSIONS = {".xlsx", ".xls"}
+_PDF_EXTENSIONS = {".pdf"}
 
 
-def _excel_attachments(message: IncomingEmailMessage) -> list:
+def _usable_attachments(message: IncomingEmailMessage) -> list:
+    """Excel attachments (customer orders) and PDF attachments (vendor
+    purchase bills). Only the Excel set is subject to the trailing-attachment
+    trim rule -- that heuristic (signature images/letterhead follow the order
+    sheet) is specific to order emails and is left exactly as it was; PDF
+    purchase bills are taken as-is."""
     excel_only = [
         attachment
         for attachment in message.attachments
         if Path(attachment.filename).suffix.lower() in _EXCEL_EXTENSIONS
     ]
+    pdf_only = [
+        attachment
+        for attachment in message.attachments
+        if Path(attachment.filename).suffix.lower() in _PDF_EXTENSIONS
+    ]
 
-    # Business rule: when multiple attachments are present, the trailing
+    # Business rule: when multiple Excel attachments are present, the trailing
     # ones are typically signature images/letterhead, not the order sheet
     # itself -- drop the last two.
     if len(excel_only) > gmail_settings.max_attachments_before_trim:
-        return excel_only[: -gmail_settings.max_attachments_before_trim]
-    return excel_only
+        excel_only = excel_only[: -gmail_settings.max_attachments_before_trim]
+
+    return excel_only + pdf_only
 
 
 def _process_message(message: IncomingEmailMessage) -> None:
-    attachments = _excel_attachments(message)
+    attachments = _usable_attachments(message)
     if not attachments:
         logger.info(
-            "Gmail message from %s (%s) has no usable Excel attachment after filtering -- skipping.",
+            "Gmail message from %s (%s) has no usable Excel/PDF attachment after filtering -- skipping.",
             message.sender,
             message.subject,
         )
@@ -69,9 +82,12 @@ def _process_message(message: IncomingEmailMessage) -> None:
             attachment.content, attachment.filename, DocumentSource.EMAIL
         )
         with get_session() as session:
+            # No document_type_hint: EMAIL documents are routed by source +
+            # file format in detector.classify (spreadsheet -> Customer Order,
+            # PDF -> Vendor Invoice), so a hint here would be ignored and
+            # misleading.
             metadata = DocumentMetadata(
                 sender=message.sender,
-                document_type_hint=IncomingDocumentType.CUSTOMER_ORDER,
                 external_message_id=message.message_id,
                 original_filename=attachment.filename,
             )

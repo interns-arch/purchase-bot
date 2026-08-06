@@ -89,13 +89,14 @@ def process_document(
         staging.mark_failed_location(file_path)
         return _early_result(document, str(exc))
 
-    # Step 7: before document classification.
+    # Step 7: before document classification. WhatsApp/Email are routed by
+    # source inside classify() (classifier bypassed); only MANUAL is classified.
     logger.info(
         "process_document step 7: classifying document '%s' (source=%s)",
         file_path.name,
         source.value,
     )
-    classification = classify(file_path, metadata, session)
+    classification = classify(file_path, metadata, session, source=source)
     # Step 8: after classification.
     logger.info(
         "process_document step 8: classified '%s' as %s",
