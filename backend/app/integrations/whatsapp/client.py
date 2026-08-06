@@ -64,8 +64,18 @@ class WhatsAppClient:
 
         def _call() -> dict[str, Any]:
             with httpx.Client(timeout=self._timeout) as client:
+                logger.info(
+                    "HTTP GET media metadata (media_id=%s, timeout=%ss) -- awaiting Graph API...",
+                    media_id,
+                    self._timeout,
+                )
                 response = client.get(
                     url, headers={"Authorization": f"Bearer {access_token}"}
+                )
+                logger.info(
+                    "HTTP GET media metadata returned status %s (media_id=%s)",
+                    response.status_code,
+                    media_id,
                 )
                 response.raise_for_status()
                 return response.json()
@@ -79,8 +89,16 @@ class WhatsAppClient:
 
         def _call() -> bytes:
             with httpx.Client(timeout=self._timeout) as client:
+                logger.info(
+                    "HTTP GET media bytes (timeout=%ss) -- awaiting download...", self._timeout
+                )
                 response = client.get(
                     media_url, headers={"Authorization": f"Bearer {access_token}"}
+                )
+                logger.info(
+                    "HTTP GET media bytes returned status %s (%s bytes)",
+                    response.status_code,
+                    response.headers.get("content-length", "unknown"),
                 )
                 response.raise_for_status()
                 return response.content

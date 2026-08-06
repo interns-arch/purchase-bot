@@ -89,7 +89,19 @@ def process_document(
         staging.mark_failed_location(file_path)
         return _early_result(document, str(exc))
 
+    # Step 7: before document classification.
+    logger.info(
+        "process_document step 7: classifying document '%s' (source=%s)",
+        file_path.name,
+        source.value,
+    )
     classification = classify(file_path, metadata, session)
+    # Step 8: after classification.
+    logger.info(
+        "process_document step 8: classified '%s' as %s",
+        file_path.name,
+        classification.document_type.value,
+    )
     documents_service.set_document_type(document, classification.document_type, session)
 
     if classification.document_type == IncomingDocumentType.UNKNOWN:
@@ -98,8 +110,26 @@ def process_document(
         return _early_result(document)
 
     try:
+        # Step 9: before dispatching to the type-specific importer (e.g.
+        # inventory import) -- this is the DB-heavy business-logic step.
+        logger.info(
+            "process_document step 9: dispatching '%s' to %s import...",
+            file_path.name,
+            classification.document_type.value,
+        )
         with session.begin_nested():
             result = dispatch(file_path, classification, session)
+        # Step 10: after processing returned successfully.
+        logger.info(
+            "process_document step 10: %s import finished for '%s' "
+            "(rows=%s, errors=%s, duplicate=%s, core_status=%s)",
+            classification.document_type.value,
+            file_path.name,
+            result.row_count,
+            result.error_count,
+            result.is_duplicate,
+            result.core_status,
+        )
     except DocumentAlreadyProcessedError as exc:
         documents_service.mark_skipped_duplicate(document, str(exc), session)
         staging.mark_processed_location(file_path)
