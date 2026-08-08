@@ -33,8 +33,11 @@ _COMMANDS: dict[str, WhatsAppCommand] = {
     for command in (
         WhatsAppCommand("vendor", "Vendor", IncomingDocumentType.VENDOR_INVENTORY),
         WhatsAppCommand("customer", "Customer", IncomingDocumentType.CUSTOMER_ORDER),
-        # Future, no other code changes required, e.g.:
-        # WhatsAppCommand("invoice", "Invoice", IncomingDocumentType.VENDOR_INVOICE),
+        # Routes the next (PDF) file to the existing Vendor Invoice importer
+        # (detector.classify honours this hint for WhatsApp; dispatcher sends it
+        # to vendor_invoice_verification_service). "invoice"/"Invoice"/"INVOICE"
+        # all match -- parse_command lowercases the incoming text.
+        WhatsAppCommand("invoice", "Invoice", IncomingDocumentType.VENDOR_INVOICE),
     )
 }
 

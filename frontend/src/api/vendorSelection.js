@@ -17,10 +17,9 @@ export async function removeVendorSelection(orderId, orderItemId, vendorId) {
   await apiClient.delete(`/api/vendor-selection/${orderId}/items/${orderItemId}/vendors/${vendorId}`);
 }
 
-export async function autoSelectVendors(orderId, strategy) {
-  const response = await apiClient.post(`/api/vendor-selection/${orderId}/auto-select`, null, {
-    params: { strategy },
-  });
+export async function autoSelectVendors(orderId) {
+  // One automatic action -- the backend decides single vs combined vendors.
+  const response = await apiClient.post(`/api/vendor-selection/${orderId}/auto-select`);
   return response.data;
 }
 

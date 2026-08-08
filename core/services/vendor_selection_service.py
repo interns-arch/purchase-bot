@@ -17,6 +17,7 @@ Pure business logic -- no FastAPI/print()/input() here.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -33,6 +34,7 @@ from core.models import (
     VendorInventory,
     VendorSelection,
 )
+from core.services.vendor_comparison_service import compare_vendors_for_order
 
 
 def _find_active_vendor_offer(
@@ -198,40 +200,107 @@ class SelectionExportRow:
     vendor_name: str
     vendor_part_number: str
     available_quantity: Decimal | None
+    selected_quantity: Decimal | None
+    status: str
+    reason: str = ""
 
 
 def list_selections_for_export(order_id: int, session: Session) -> list[SelectionExportRow]:
-    """One row per part that currently has a vendor selected -- parts with
-    no selection yet are simply omitted (only export what the user actually
-    chose)."""
-    selections = list_selections_for_order(order_id, session)
+    """The vendor-allocation report. For each order line it emits either:
+
+    - one row PER selected vendor (showing that vendor's available and the
+      quantity taken from it, Status = Fulfilled / Partial), or
+    - a single "Cannot Fulfill" row when the total available across ALL
+      matching vendors is less than requested (showing total available and the
+      shortage) -- never a partial allocation, or
+    - a single "Not Selected" row if a line has stock but no selection yet.
+
+    Availability comes from the Vendor Comparison (the DB is the source of
+    truth); selections provide the per-vendor allocated quantities."""
+    comparison = compare_vendors_for_order(order_id, session)
+
+    item_order: list[int] = []
+    part_by_item: dict[int, str] = {}
+    requested_by_item: dict[int, Decimal] = {}
+    total_available_by_item: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    vendor_available_by_item: dict[int, dict[int, Decimal]] = defaultdict(dict)
+    for row in comparison.rows:
+        if row.order_item_id is None:
+            continue
+        if row.order_item_id not in part_by_item:
+            item_order.append(row.order_item_id)
+            part_by_item[row.order_item_id] = row.customer_part_number
+            requested_by_item[row.order_item_id] = row.requested_quantity
+        if row.vendor_id is not None and row.vendor_available_quantity:
+            total_available_by_item[row.order_item_id] += row.vendor_available_quantity
+            vendor_available_by_item[row.order_item_id][row.vendor_id] = row.vendor_available_quantity
+
+    selections_by_item: dict[int, list[VendorSelection]] = defaultdict(list)
+    for selection in list_selections_for_order(order_id, session):
+        selections_by_item[selection.customer_order_item_id].append(selection)
 
     rows: list[SelectionExportRow] = []
-    for selection in selections:
-        order_item = session.get(CustomerOrderItem, selection.customer_order_item_id)
-        vendor = session.get(Vendor, selection.vendor_id)
-        normalized = normalise_part_number(order_item.part_number_raw)
-        offer = _find_active_vendor_offer(selection.vendor_id, normalized, session)
+    for order_item_id in item_order:
+        part = part_by_item[order_item_id]
+        requested = requested_by_item[order_item_id]
+        total_available = total_available_by_item.get(order_item_id, Decimal(0))
+        selections = selections_by_item.get(order_item_id, [])
 
-        rows.append(
-            SelectionExportRow(
-                customer_part_number=order_item.part_number_raw,
-                requested_quantity=order_item.quantity_requested,
-                vendor_name=vendor.name,
-                vendor_part_number=selection.vendor_part_number,
-                available_quantity=offer.quantity_available if offer is not None else None,
+        if selections:
+            selected_total = sum((s.quantity_selected for s in selections), Decimal(0))
+            status = "Fulfilled" if selected_total >= requested else "Partial"
+            for selection in selections:
+                vendor = session.get(Vendor, selection.vendor_id)
+                rows.append(
+                    SelectionExportRow(
+                        customer_part_number=part,
+                        requested_quantity=requested,
+                        vendor_name=vendor.name if vendor else str(selection.vendor_id),
+                        vendor_part_number=selection.vendor_part_number,
+                        available_quantity=vendor_available_by_item[order_item_id].get(selection.vendor_id),
+                        selected_quantity=selection.quantity_selected,
+                        status=status,
+                    )
+                )
+        elif total_available < requested:
+            shortage = requested - total_available
+            rows.append(
+                SelectionExportRow(
+                    customer_part_number=part,
+                    requested_quantity=requested,
+                    vendor_name="-",
+                    vendor_part_number="-",
+                    available_quantity=total_available,
+                    selected_quantity=None,
+                    status="Cannot Fulfill",
+                    reason=f"Insufficient vendor stock (short {decimal_to_string(shortage)})",
+                )
             )
-        )
+        else:
+            rows.append(
+                SelectionExportRow(
+                    customer_part_number=part,
+                    requested_quantity=requested,
+                    vendor_name="-",
+                    vendor_part_number="-",
+                    available_quantity=total_available,
+                    selected_quantity=None,
+                    status="Not Selected",
+                )
+            )
 
     return rows
 
 
 EXPORT_HEADERS = [
     "Customer Part Number",
-    "Requested Quantity",
-    "Selected Vendor",
+    "Requested Qty",
+    "Vendor",
     "Vendor Part Number",
-    "Available Quantity",
+    "Available Qty",
+    "Selected Qty",
+    "Status",
+    "Reason",
 ]
 
 
@@ -242,6 +311,9 @@ def _export_row_cells(row: SelectionExportRow) -> list[str]:
         row.vendor_name,
         row.vendor_part_number,
         decimal_to_string(row.available_quantity) if row.available_quantity is not None else "",
+        decimal_to_string(row.selected_quantity) if row.selected_quantity is not None else "",
+        row.status,
+        row.reason,
     ]
 
 

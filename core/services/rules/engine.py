@@ -1,17 +1,23 @@
-"""Automatic Vendor Selection: runs the Vendor Comparison report for a
-customer order through a chosen strategy, then applies the resulting
-allocations via the SAME `vendor_selection_service.upsert_selection` manual
-selection already uses -- so automatic and manual selection are always one
-underlying code path, and this module never needs to re-implement selection
-validation (quantity caps, part resolution, etc.).
+"""Automatic Vendor Selection: ONE automatic action, no strategy choice.
 
-Own Stock always gets first priority, regardless of which strategy is
-chosen: each line's own-stock offers (any vendor named "Bijvasan" -- see
-`core.services.own_stock` -- or one with its `Vendor.is_own_stock` flag set,
-i.e. the company's own warehouse/dark-store) are filled greedily first, and
-only the REMAINING requested quantity (if any) is handed to the chosen
-strategy, which then only ever sees the external (non-own-stock) offers. This
-is a pre-step in front of every strategy, not a strategy of its own.
+For each customer order line it applies allocations via the SAME
+`vendor_selection_service.upsert_selection` manual selection uses -- so
+automatic and manual selection stay one underlying code path, and this module
+never re-implements selection validation (quantity caps, part resolution).
+
+Allocation rules per line:
+- Own Stock first: own-stock offers (a vendor named "Bijvasan" -- see
+  `core.services.own_stock` -- or one with `Vendor.is_own_stock` set) are
+  filled greedily before anyone else.
+- The remaining quantity is then filled by the `combination` strategy, which
+  draws from the best-stocked external vendor first, then the next, splitting
+  across as many vendors as it takes. Drawing from the largest first means a
+  single vendor is used when one can cover the line, and otherwise the
+  practical minimum number of vendors is combined, higher-availability first.
+- All-or-nothing: if the TOTAL available across all matching vendors is less
+  than the requested quantity, NO allocation is made for that line (it is left
+  unselected and reported as "Cannot Fulfill") -- the system never creates a
+  partial allocation.
 """
 
 from __future__ import annotations
@@ -57,13 +63,16 @@ def _allocate_own_stock_first(
     return remaining, other_offers
 
 
-def run_automatic_vendor_selection(
-    order_id: int, strategy_name: str, session: Session
-) -> list[VendorSelection]:
+# The sole automatic strategy. The Founder no longer chooses one -- the
+# system always combines vendors as needed (single vendor when one suffices).
+_AUTOMATIC_STRATEGY = "combination"
+
+
+def run_automatic_vendor_selection(order_id: int, session: Session) -> list[VendorSelection]:
     if customer_order_service.get_customer_order(order_id, session) is None:
         raise LookupError(f"Customer order {order_id} not found.")
 
-    strategy = get_strategy(strategy_name)
+    strategy = get_strategy(_AUTOMATIC_STRATEGY)
     comparison = compare_vendors_for_order(order_id, session)
 
     offers_by_item: dict[int, list[VendorComparisonRow]] = defaultdict(list)
@@ -78,14 +87,22 @@ def run_automatic_vendor_selection(
     applied: list[VendorSelection] = []
     for order_item_id, requested_quantity in requested_by_item.items():
         offers = offers_by_item.get(order_item_id, [])
+
+        # Always start from a clean slate for this line (drop any prior manual
+        # or automatic picks) so a re-run never leaves stale vendors behind.
+        vendor_selection_service.clear_selections_for_item(order_item_id, session)
+
         if not offers:
             continue
 
-        # Replace whatever was previously selected for this line (manual or
-        # a prior automatic run) so switching strategies -- or re-running
-        # the same one -- never leaves stale vendors from an earlier
-        # allocation sitting alongside the new ones.
-        vendor_selection_service.clear_selections_for_item(order_item_id, session)
+        # All-or-nothing: if every matching vendor together still can't cover
+        # the requested quantity, make NO allocation -- the line stays
+        # unselected and is reported as "Cannot Fulfill". No partial fulfilment.
+        total_available = sum(
+            (offer.vendor_available_quantity or Decimal(0) for offer in offers), Decimal(0)
+        )
+        if total_available < requested_quantity:
+            continue
 
         remaining_quantity, external_offers = _allocate_own_stock_first(
             order_item_id, requested_quantity, offers, session

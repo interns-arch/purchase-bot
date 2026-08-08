@@ -12,7 +12,7 @@ import io
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,6 @@ from backend.app.schemas.vendor_selection import VendorSelectionIn, VendorSelect
 from core.logging_setup import get_logger
 from core.models import VendorSelection
 from core.services import customer_order_service, purchase_order_generation_service, vendor_selection_service
-from core.services.rules import DEFAULT_STRATEGY_NAME, STRATEGY_NAMES
 from core.services.rules.engine import run_automatic_vendor_selection
 
 logger = get_logger(__name__)
@@ -147,17 +146,13 @@ def _send_allocation_report_email(order_id: int, db: Session) -> None:
 @router.post("/{order_id}/auto-select", response_model=list[VendorSelectionOut])
 def auto_select_vendors(
     order_id: int,
-    strategy: str = Query(default=DEFAULT_STRATEGY_NAME),
     db: Session = Depends(get_db),
 ) -> list[VendorSelectionOut]:
-    if strategy not in STRATEGY_NAMES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown strategy '{strategy}'. Choose one of: {', '.join(STRATEGY_NAMES)}.",
-        )
-
+    """One automatic vendor-selection action -- the system decides whether to
+    use a single vendor or combine several to fully cover each line (see
+    `core.services.rules.engine`). No strategy choice is exposed."""
     try:
-        selections = run_automatic_vendor_selection(order_id, strategy, db)
+        selections = run_automatic_vendor_selection(order_id, db)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 

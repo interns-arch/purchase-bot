@@ -16,12 +16,6 @@ import {
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
-const STRATEGIES = [
-  { value: "combination", label: "Combination of Vendors" },
-  { value: "highest_quantity", label: "Highest Available Quantity" },
-  { value: "minimum_vendors", label: "Minimum Number of Vendors" },
-];
-
 const COLUMNS = [
   { key: "customer_part_number", label: "Customer Part Number" },
   { key: "requested_quantity", label: "Requested Quantity", numeric: true },
@@ -55,7 +49,6 @@ export function VendorComparisonPage() {
   const [selections, setSelections] = useState([]);
   const [selectingKey, setSelectingKey] = useState(null);
   const [quantityDrafts, setQuantityDrafts] = useState({});
-  const [strategy, setStrategy] = useState(STRATEGIES[0].value);
   const [isAutoSelecting, setIsAutoSelecting] = useState(false);
 
   useEffect(() => {
@@ -212,7 +205,7 @@ export function VendorComparisonPage() {
     if (!orderId) return;
     setIsAutoSelecting(true);
     try {
-      await autoSelectVendors(orderId, strategy);
+      await autoSelectVendors(orderId);
       const refreshed = await listVendorSelections(orderId);
       setSelections(refreshed);
       toast.success("Vendors selected automatically.");
@@ -260,18 +253,6 @@ export function VendorComparisonPage() {
               {orders.map((order) => (
                 <option key={order.id} value={order.id}>
                   {order.file_name} — {new Date(order.created_at).toLocaleString()}
-                </option>
-              ))}
-            </select>
-            <select
-              className="field__input"
-              style={{ maxWidth: 220 }}
-              value={strategy}
-              onChange={(event) => setStrategy(event.target.value)}
-            >
-              {STRATEGIES.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
                 </option>
               ))}
             </select>
