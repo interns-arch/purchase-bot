@@ -20,16 +20,18 @@ from sqlalchemy.orm import Session
 
 from core.hashing import sha256_of_file
 from core.ingestion.column_detector import (
+    INVENTORY_PART_NUMBER_HEADERS,
     MRP_HEADERS,
     PRICE_HEADERS,
+    detect_header_row,
+    find_inventory_columns,
     find_optional_column,
-    find_required_columns,
     is_parseable_quantity,
     normalise_part_number,
     parse_quantity,
 )
-from core.ingestion.csv_reader import read_csv_rows
-from core.ingestion.excel_reader import read_excel_rows
+from core.ingestion.csv_reader import read_csv_grid, read_csv_rows
+from core.ingestion.excel_reader import read_excel_grid, read_excel_rows
 from core.ingestion.types import ParsedFile
 from core.models import (
     RUNNING_IMPORT_STATUSES,
@@ -172,6 +174,43 @@ def _read_file(file_path: Path) -> ParsedFile:
     return read_excel_rows(file_path)
 
 
+def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Locate the real inventory line-item header row ANYWHERE in the file
+    (metadata rows above it are ignored) and return (headers, rows). Used only
+    when the ordinary row-1 parse doesn't contain a part-number header -- i.e.
+    a metadata-first vendor file (e.g. 'Part search Details' on row 1, the real
+    'Part Num | ... | Current St | ...' header on row 3). The item table ends
+    at the first fully-blank row."""
+    if file_path.suffix.lower() == ".csv":
+        grid = read_csv_grid(file_path)
+    else:
+        grid = read_excel_grid(file_path)
+
+    header_index = detect_header_row(grid, INVENTORY_PART_NUMBER_HEADERS)
+    if header_index is None:
+        raise ValueError(
+            f"Part-number column not found in '{file_path.name}'. "
+            f"No inventory header row was detected."
+        )
+
+    header_row = grid[header_index]
+    column_count = 0
+    for index, value in enumerate(header_row):
+        if str(value).strip():
+            column_count = index + 1
+    headers = [str(header_row[i]).strip() for i in range(column_count)]
+
+    rows: list[dict[str, str]] = []
+    for data_row in grid[header_index + 1 :]:
+        padded = list(data_row) + [""] * max(0, column_count - len(data_row))
+        cells = [str(padded[i]).strip() for i in range(column_count)]
+        if not any(cells):
+            break  # blank row -> end of the inventory section
+        rows.append({headers[i]: cells[i] for i in range(column_count)})
+
+    return headers, rows
+
+
 def _fail_import(
     import_row: InventoryImport, error: _ImportValidationError, session: Session
 ) -> ImportResult:
@@ -186,7 +225,9 @@ def _fail_import(
         )
     )
     session.flush()
-    return _to_result(import_row, is_duplicate=False)
+    # Propagate the real reason (not just into the error record) so the caller
+    # -- and the WhatsApp/UI toast -- shows it instead of "Unknown error".
+    return _to_result(import_row, is_duplicate=False, message=error.detail)
 
 
 def _activate(
@@ -293,25 +334,36 @@ def run_import(
     if parsed_file.sheet_name:
         import_row.sheet_name = parsed_file.sheet_name
 
+    # Normal case: the header is on row 1 (full metadata preserved above). If
+    # that row has no part-number column, the real inventory header is below a
+    # metadata block -- re-parse via header-row detection (grid scan).
+    headers = parsed_file.headers
+    rows = parsed_file.rows
+    if find_optional_column(headers, INVENTORY_PART_NUMBER_HEADERS) is None:
+        try:
+            headers, rows = _read_inventory_table(file_path)
+        except ValueError as exc:
+            return _fail_import(
+                import_row, _ImportValidationError("REQUIRED_COLUMNS_NOT_FOUND", str(exc)), session
+            )
+
     try:
-        part_column, quantity_column = find_required_columns(
-            parsed_file.headers, file_path.name
-        )
+        part_column, quantity_column = find_inventory_columns(headers, file_path.name)
     except ValueError as exc:
         return _fail_import(
             import_row, _ImportValidationError("REQUIRED_COLUMNS_NOT_FOUND", str(exc)), session
         )
 
     # Price/MRP are optional -- not every vendor file provides them.
-    price_column = find_optional_column(parsed_file.headers, PRICE_HEADERS)
-    mrp_column = find_optional_column(parsed_file.headers, MRP_HEADERS)
+    price_column = find_optional_column(headers, PRICE_HEADERS)
+    mrp_column = find_optional_column(headers, MRP_HEADERS)
 
-    if len(parsed_file.rows) > max_row_count:
+    if len(rows) > max_row_count:
         return _fail_import(
             import_row,
             _ImportValidationError(
                 "ROW_COUNT_EXCEEDS_LIMIT",
-                f"{len(parsed_file.rows)} rows exceeds the {max_row_count}-row limit.",
+                f"{len(rows)} rows exceeds the {max_row_count}-row limit.",
             ),
             session,
         )
@@ -319,7 +371,7 @@ def run_import(
     row_count = 0
     error_count = 0
 
-    for row_number, row in enumerate(parsed_file.rows, start=2):
+    for row_number, row in enumerate(rows, start=2):
         raw_part_number = row.get(part_column, "").strip()
         raw_quantity = row.get(quantity_column, "")
 

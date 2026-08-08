@@ -34,6 +34,38 @@ QUANTITY_HEADERS = {
     "orderedqty",
 }
 
+# --- Vendor Inventory-specific header aliases -------------------------------
+# Real-world vendor inventory files use many names for the same two required
+# columns. These supersets are used ONLY by the Vendor Inventory importer
+# (`find_inventory_columns`); the base PART_NUMBER_HEADERS / QUANTITY_HEADERS
+# above are left untouched so Customer Order / Delivery detection is unchanged.
+
+INVENTORY_PART_NUMBER_HEADERS = PART_NUMBER_HEADERS | {
+    "partnumber",  # Part Number / Part_Number
+    "partnum",     # Part Num
+    "partno",      # PartNo / Part No
+}
+
+# Explicit, curated quantity aliases -- NEVER derived from arbitrary numeric
+# columns. Deliberately EXCLUDES MRP, price, and "Float Stock" (floatstock):
+# only these named columns count as available quantity.
+INVENTORY_QUANTITY_HEADERS = {
+    "quantity",
+    "qty",
+    "availablequantity",   # Available Quantity
+    "availableqty",        # Available Qty
+    "availablestock",      # Available Stock
+    "stock",               # Stock
+    "stockquantity",
+    "stockqty",
+    "currentstock",        # Current Stock
+    "currentst",           # Current St (truncated display of Current Stock)
+    "currentstockqty",     # Current Stock Qty
+    "partquantity",        # "part Quantity" (e.g. DELHI.csv)
+    "partqty",
+}
+
+
 VENDOR_NAME_HEADERS = {
     "vendor",
     "vendorname",
@@ -246,6 +278,28 @@ def detect_header_row(
         if len(non_empty) >= 2 and any(value in required_headers for value in normalised):
             return index
     return None
+
+
+def find_inventory_columns(headers: list[str], file_name: str) -> tuple[str, str]:
+    """Find the part-number and available-quantity columns for a Vendor
+    Inventory file, using the tolerant inventory alias sets. Quantity is
+    matched ONLY against the curated `INVENTORY_QUANTITY_HEADERS` -- MRP,
+    price, and Float Stock are never treated as quantity. Raises `ValueError`
+    with a clear message if either required column is absent."""
+    part_number_column = find_optional_column(headers, INVENTORY_PART_NUMBER_HEADERS)
+    quantity_column = find_optional_column(headers, INVENTORY_QUANTITY_HEADERS)
+
+    if not part_number_column:
+        raise ValueError(
+            f"Part-number column not found in '{file_name}'. Headers found: {headers}"
+        )
+    if not quantity_column:
+        raise ValueError(
+            f"Available-quantity column not found in '{file_name}' (looked for e.g. "
+            f"Quantity / Available Qty / Current Stock / Stock). Headers found: {headers}"
+        )
+
+    return part_number_column, quantity_column
 
 
 def find_optional_column(headers: list[str], candidate_headers: set[str]) -> str | None:
