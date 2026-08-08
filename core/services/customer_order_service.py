@@ -21,13 +21,15 @@ from sqlalchemy.orm import Session
 
 from core.hashing import sha256_of_file
 from core.ingestion.column_detector import (
-    find_required_columns,
+    PART_NUMBER_HEADERS,
+    QUANTITY_HEADERS,
+    detect_header_row,
+    find_optional_column,
     is_parseable_quantity,
     parse_quantity,
 )
-from core.ingestion.csv_reader import read_csv_rows
-from core.ingestion.excel_reader import read_excel_rows
-from core.ingestion.types import ParsedFile
+from core.ingestion.csv_reader import read_csv_grid
+from core.ingestion.excel_reader import read_excel_grid
 from core.models import CustomerOrder, CustomerOrderImportError, CustomerOrderItem, CustomerOrderStatus
 
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
@@ -40,6 +42,21 @@ class DuplicateCustomerOrderFileError(Exception):
         self.existing_order_id = existing_order_id
         super().__init__(
             f"This file's content was already imported as customer order #{existing_order_id}."
+        )
+
+
+class CustomerOrderQuantityMissingError(Exception):
+    """The line-item table was located but has NO requested-quantity column.
+    We never invent a quantity from other fields (PO ID, totals, price, ...);
+    the caller reports this as NEEDS_REVIEW instead."""
+
+    def __init__(self, file_name: str, headers: list[str]):
+        self.file_name = file_name
+        self.headers = headers
+        super().__init__(
+            f"Requested quantity column is missing in '{file_name}'. Line-item headers "
+            f"found: {headers}. A requested-quantity column is required -- please add one "
+            "(the order was not imported to avoid inventing quantities)."
         )
 
 
@@ -57,10 +74,45 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _read_file(file_path: Path) -> ParsedFile:
+def _read_grid(file_path: Path) -> list[list[str]]:
     if file_path.suffix.lower() == ".csv":
-        return read_csv_rows(file_path)
-    return read_excel_rows(file_path)
+        return read_csv_grid(file_path)
+    return read_excel_grid(file_path)
+
+
+def _parse_line_items(file_path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Locate the line-item header row ANYWHERE in the worksheet (metadata
+    rows above it are ignored) and return (headers, item_rows).
+
+    Works for both a simple single-section order (header on row 1 -> detected
+    at index 0) and a multi-section order (metadata block, then the real
+    `... PART NUMBER ...` header, then the item rows). The item table ends at
+    the first fully-blank row (a section boundary)."""
+    grid = _read_grid(file_path)
+    header_index = detect_header_row(grid, PART_NUMBER_HEADERS)
+    if header_index is None:
+        raise ValueError(
+            f"Part-number column not found in '{file_path.name}'. "
+            f"No line-item header row was detected."
+        )
+
+    header_row = grid[header_index]
+    column_count = 0
+    for index, value in enumerate(header_row):
+        if str(value).strip():
+            column_count = index + 1
+    headers = [str(header_row[i]).strip() for i in range(column_count)]
+
+    item_rows: list[dict[str, str]] = []
+    for data_row in grid[header_index + 1 :]:
+        padded = list(data_row) + [""] * max(0, column_count - len(data_row))
+        cells = [str(padded[i]).strip() for i in range(column_count)]
+        if not any(cells):
+            break  # blank row -> end of the line-item section
+        row_dict = {headers[i]: cells[i] for i in range(column_count)}
+        item_rows.append(row_dict)
+
+    return headers, item_rows
 
 
 def run_customer_order_import(
@@ -102,8 +154,17 @@ def run_customer_order_import(
     if existing is not None:
         raise DuplicateCustomerOrderFileError(existing.id)
 
-    parsed_file = _read_file(file_path)
-    part_column, quantity_column = find_required_columns(parsed_file.headers, file_path.name)
+    headers, item_rows = _parse_line_items(file_path)
+    part_column = find_optional_column(headers, PART_NUMBER_HEADERS)
+    if part_column is None:
+        raise ValueError(
+            f"Part-number column not found in '{file_path.name}'. Headers found: {headers}"
+        )
+    # No quantity column -> do NOT invent one from PO ID / totals / price /
+    # etc. Signal NEEDS_REVIEW (the dispatcher maps this, no order is stored).
+    quantity_column = find_optional_column(headers, QUANTITY_HEADERS)
+    if quantity_column is None:
+        raise CustomerOrderQuantityMissingError(file_path.name, headers)
 
     customer_order = CustomerOrder(
         file_name=file_path.name,
@@ -135,7 +196,7 @@ def run_customer_order_import(
         error_count += 1
         error_messages.append(f"Row {row_number}: {reason} -- {detail}")
 
-    for row_number, row in enumerate(parsed_file.rows, start=2):
+    for row_number, row in enumerate(item_rows, start=2):
         raw_part_number = row.get(part_column, "").strip()
         raw_quantity = row.get(quantity_column, "")
 

@@ -47,6 +47,22 @@ def detect_csv_dialect(file_path: Path, encoding: str) -> csv.Dialect:
         return csv.excel
 
 
+def read_csv_grid(file_path: Path) -> list[list[str]]:
+    """Read a CSV as a raw grid (list of rows, each a list of cell strings)
+    with NO header assumption -- used by callers that must locate a header row
+    themselves (e.g. multi-section Customer Order files). Reuses the same
+    encoding/dialect detection as `read_csv_rows`."""
+    encoding = detect_encoding(file_path)
+    dialect = detect_csv_dialect(file_path, encoding)
+
+    with file_path.open("r", encoding=encoding, newline="") as file:
+        reader = csv.reader(file, dialect=dialect)
+        return [
+            [str(cell).strip() if cell is not None else "" for cell in row]
+            for row in reader
+        ]
+
+
 def read_csv_rows(file_path: Path) -> ParsedFile:
     """
     Read a CSV file and return its rows, headers, and encoding metadata.

@@ -123,3 +123,49 @@ def read_excel_rows(file_path: Path) -> ParsedFile:
         return read_xls_rows(file_path)
 
     raise ValueError(f"Unsupported Excel extension '{suffix}' for '{file_path.name}'.")
+
+
+def _primary_sheet_grid(sheets: list[RawSheet]) -> list[list[str]]:
+    """Raw grid (cleaned cell strings) of the first sheet with any non-blank
+    content -- the SAME sheet-selection rule the normal reader uses, but with
+    NO header assumption. Blank rows are preserved so callers can use them as
+    section boundaries."""
+    for _sheet_name, raw_rows in sheets:
+        if any(not _is_blank_row(row) for row in raw_rows):
+            return [[_clean_cell(value) for value in row] for row in raw_rows]
+    return []
+
+
+def read_excel_grid(file_path: Path) -> list[list[str]]:
+    """Read an Excel file as a raw grid (no header assumption), used by callers
+    that must locate the header row themselves (e.g. multi-section Customer
+    Order files)."""
+    suffix = file_path.suffix.lower()
+
+    if suffix in (".xlsx", ".xlsm"):
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        try:
+            sheets: list[RawSheet] = [
+                (sheet.title, list(sheet.iter_rows(values_only=True)))
+                for sheet in workbook.worksheets
+            ]
+        finally:
+            workbook.close()
+        return _primary_sheet_grid(sheets)
+
+    if suffix == ".xls":
+        import xlrd
+
+        workbook = xlrd.open_workbook(str(file_path))
+        sheets = [
+            (
+                sheet.name,
+                [tuple(sheet.row_values(row_index)) for row_index in range(sheet.nrows)],
+            )
+            for sheet in workbook.sheets()
+        ]
+        return _primary_sheet_grid(sheets)
+
+    raise ValueError(f"Unsupported Excel extension '{suffix}' for '{file_path.name}'.")

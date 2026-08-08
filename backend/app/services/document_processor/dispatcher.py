@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.documents.models import IncomingDocumentType
@@ -127,18 +128,49 @@ def _vendor_name_from_filename(filename: str) -> str:
     return Path(filename).stem.strip()
 
 
-def _onboard_new_vendor(name: str, session: Session) -> tuple["Vendor", str]:
-    """First-time onboarding: a vendor's very first file may still be named
-    with their real company name (no code prefix yet). Creates the vendor
-    and auto-generates + permanently stores its Vendor Code, returned
-    alongside the vendor so the caller can surface it (the team then hands
-    that code to the vendor for every subsequent upload)."""
-    vendor = vendor_service.create_vendor(name, session)
-    code = vendor_code_service.generate_vendor_code(name, session)
-    vendor.vendor_code = code
-    session.flush()
-    logger.info("New vendor onboarded: '%s' (id=%s, code=%s)", vendor.name, vendor.id, code)
-    return vendor, code
+def _resolve_or_onboard_vendor(name: str, session: Session) -> tuple["Vendor", str | None]:
+    """Reuse the existing vendor for this company NAME (the stable identity --
+    never the generated code), or onboard a brand-new one. Race-safe:
+
+    - Reuse is decided first by an exact (case-insensitive) name lookup. An
+      existing vendor is returned unchanged -- same vendor_id, same
+      vendor_code, no new code generated. Returns onboarding_message=None.
+    - Only a genuinely new name is onboarded (create vendor + generate ONE
+      code). If two files for the same new vendor are processed almost
+      simultaneously, the unique(lower(name)) constraint makes the second
+      INSERT fail; we recover inside a SAVEPOINT and reuse the vendor the
+      winning transaction created, so only ONE vendor / ONE code ever exists
+      and both imports share it -- never a spurious _2/_3 code.
+    """
+    existing = vendor_service.get_vendor_by_name(name, session)
+    if existing is not None:
+        return existing, None  # reuse existing vendor + code, unchanged
+
+    try:
+        with session.begin_nested():  # SAVEPOINT: undoable if the race is lost
+            vendor = vendor_service.create_vendor(name, session)
+            code = vendor_code_service.generate_vendor_code(name, session)
+            vendor.vendor_code = code
+            session.flush()
+    except (IntegrityError, ValueError):
+        # A concurrent onboarding of the SAME new vendor won the race (its
+        # unique name committed first). Reuse it instead of creating a
+        # duplicate / a _2 code. If the name genuinely still isn't there, the
+        # error was something else -- re-raise it.
+        existing = vendor_service.get_vendor_by_name(name, session)
+        if existing is None:
+            raise
+        logger.info(
+            "Concurrent vendor onboarding race for '%s' -- reusing existing vendor "
+            "(id=%s, code=%s); no duplicate created.",
+            name,
+            existing.id,
+            existing.vendor_code,
+        )
+        return existing, None
+
+    logger.info("New vendor onboarded: '%s' (id=%s, code=%s).", vendor.name, vendor.id, code)
+    return vendor, f"New vendor '{vendor.name}' onboarded with code {code}."
 
 
 def _dispatch_inventory(
@@ -155,14 +187,10 @@ def _dispatch_inventory(
         # any vendor -- reject rather than silently misrouting the file.
         raise UnknownVendorCodeError(classification.vendor_code)
     else:
-        # No code-shaped prefix at all -- first-time onboarding by real name.
+        # No code-shaped prefix at all -- reuse the existing vendor for this
+        # company name, or onboard a new one (race-safe: no duplicate/_2 code).
         name = _vendor_name_from_filename(file_path.name)
-        existing = vendor_service.get_vendor_by_name(name, session)
-        if existing is not None:
-            vendor = existing
-        else:
-            vendor, code = _onboard_new_vendor(name, session)
-            onboarding_message = f"New vendor '{vendor.name}' onboarded with code {code}."
+        vendor, onboarding_message = _resolve_or_onboard_vendor(name, session)
 
     result = import_service.run_import(vendor.id, file_path, session)
 
@@ -257,6 +285,15 @@ def _dispatch_customer_order(
         )
     except order_service.DuplicateCustomerOrderFileError as exc:
         raise DocumentAlreadyProcessedError(exc.existing_order_id, str(exc)) from exc
+    except order_service.CustomerOrderQuantityMissingError as exc:
+        # A real line-item table was found but has no quantity column -- do not
+        # invent one. Report NEEDS_REVIEW (no order persisted) rather than fail.
+        return DispatchResult(
+            message=str(exc),
+            customer_id=customer.id if customer is not None else None,
+            customer_name=customer.name if customer is not None else None,
+            core_status="NEEDS_REVIEW",
+        )
 
     return DispatchResult(
         row_count=result.row_count,

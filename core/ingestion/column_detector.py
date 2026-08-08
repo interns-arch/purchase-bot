@@ -221,6 +221,33 @@ def find_required_columns(
     return part_number_column, quantity_column
 
 
+def detect_header_row(
+    grid: list[list[str]],
+    required_headers: set[str] = PART_NUMBER_HEADERS,
+    *,
+    max_scan_rows: int = 100,
+) -> int | None:
+    """Locate the line-item header row in a raw grid that may have metadata
+    rows above the table (multi-section files). Returns the 0-based index of
+    the first row that both:
+
+      - contains a header matching `required_headers` (default: a part-number
+        header), and
+      - has at least two non-empty cells (i.e. looks like a table header, not
+        a single "Label: value" metadata line).
+
+    For a simple file whose header is on row 0 this returns 0, so the ordinary
+    single-section format keeps working. Returns None if no such row is found
+    within `max_scan_rows` (the caller treats that as "part-number column not
+    found")."""
+    for index, row in enumerate(grid[:max_scan_rows]):
+        normalised = [normalise_header(cell) for cell in row]
+        non_empty = [value for value in normalised if value]
+        if len(non_empty) >= 2 and any(value in required_headers for value in normalised):
+            return index
+    return None
+
+
 def find_optional_column(headers: list[str], candidate_headers: set[str]) -> str | None:
     """
     Find a column by normalized header name, returning None (never raising)
