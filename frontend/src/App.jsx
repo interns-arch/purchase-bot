@@ -3,6 +3,7 @@ import { Navigate, Route, BrowserRouter as Router, Routes } from "react-router-d
 import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider } from "./context/ToastContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { IntegrationNotifications } from "./components/IntegrationNotifications";
 
 // Lazy-loaded so each page is its own chunk instead of one large bundle.
 const LoginPage = lazy(() => import("./pages/LoginPage").then((m) => ({ default: m.LoginPage })));
@@ -47,6 +48,7 @@ function App() {
     <Router>
       <ToastProvider>
         <AuthProvider>
+          <IntegrationNotifications />
           <Suspense fallback={null}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />

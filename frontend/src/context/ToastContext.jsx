@@ -18,9 +18,9 @@ export function ToastProvider({ children }) {
   }, []);
 
   const notify = useCallback(
-    (message, { type = "success", duration = 4500 } = {}) => {
+    (message, { type = "success", duration = 4500, title = null } = {}) => {
       const id = nextId++;
-      setToasts((current) => [...current, { id, message, type }]);
+      setToasts((current) => [...current, { id, message, type, title }]);
       const timer = setTimeout(() => dismiss(id), duration);
       timers.current.set(id, timer);
       return id;
@@ -29,8 +29,10 @@ export function ToastProvider({ children }) {
   );
 
   const value = {
+    notify,
     success: (message, opts) => notify(message, { ...opts, type: "success" }),
     error: (message, opts) => notify(message, { ...opts, type: "error" }),
+    warning: (message, opts) => notify(message, { ...opts, type: "warning" }),
     info: (message, opts) => notify(message, { ...opts, type: "info" }),
   };
 
@@ -40,7 +42,10 @@ export function ToastProvider({ children }) {
       <div className="toast-stack" role="status" aria-live="polite">
         {toasts.map((toast) => (
           <div key={toast.id} className={`toast toast--${toast.type}`}>
-            <span>{toast.message}</span>
+            <div className="toast__content">
+              {toast.title && <strong className="toast__title">{toast.title}</strong>}
+              {toast.message && <span className="toast__body">{toast.message}</span>}
+            </div>
             <button
               type="button"
               className="toast__close"

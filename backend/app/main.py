@@ -30,6 +30,7 @@ from backend.app.api.routes.vendor_comparison import router as vendor_comparison
 from backend.app.api.routes.vendor_invoices import router as vendor_invoices_router
 from backend.app.api.routes.vendor_performance import router as vendor_performance_router
 from backend.app.api.routes.vendor_selection import router as vendor_selection_router
+from backend.app.api.routes.notifications import router as notifications_router
 from backend.app.api.routes.whatsapp import router as whatsapp_router
 from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
@@ -140,6 +141,7 @@ app.include_router(vendor_performance_router)
 app.include_router(vendor_invoices_router)
 app.include_router(purchase_orders_router)
 app.include_router(whatsapp_router)
+app.include_router(notifications_router)
 
 
 @app.get("/health", tags=["health"])

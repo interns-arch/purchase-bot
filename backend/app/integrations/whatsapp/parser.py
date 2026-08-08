@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _DOCUMENT_MESSAGE_TYPE = "document"
+_TEXT_MESSAGE_TYPE = "text"
 
 
 @dataclass
@@ -23,6 +24,16 @@ class IncomingWhatsAppMessage:
     media_id: str
     filename: str
     mime_type: str | None
+
+
+@dataclass
+class IncomingWhatsAppText:
+    """A plain text message -- used by the command-routing layer to decide
+    which import workflow the sender's next file should run through."""
+
+    sender: str
+    message_id: str
+    text: str
 
 
 def parse_webhook_payload(payload: dict) -> list[IncomingWhatsAppMessage]:
@@ -54,3 +65,32 @@ def parse_webhook_payload(payload: dict) -> list[IncomingWhatsAppMessage]:
                 )
 
     return messages
+
+
+def parse_text_messages(payload: dict) -> list[IncomingWhatsAppText]:
+    """Parse plain text messages out of the same webhook payload. Kept
+    separate from `parse_webhook_payload` (documents) so each caller loops
+    over exactly what it handles; the route schedules both."""
+    texts: list[IncomingWhatsAppText] = []
+
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for raw_message in value.get("messages", []):
+                if raw_message.get("type") != _TEXT_MESSAGE_TYPE:
+                    continue
+
+                sender = raw_message.get("from")
+                body = (raw_message.get("text") or {}).get("body")
+                if not sender or body is None:
+                    continue
+
+                texts.append(
+                    IncomingWhatsAppText(
+                        sender=sender,
+                        message_id=raw_message.get("id", ""),
+                        text=body,
+                    )
+                )
+
+    return texts

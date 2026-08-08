@@ -596,12 +596,32 @@ h1, h2, h3 {
   color: #fff;
 }
 
+.toast__content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toast__title {
+  font-weight: 600;
+}
+
+.toast__body {
+  white-space: pre-line;
+  opacity: 0.95;
+}
+
 .toast--success {
   background: var(--color-success);
 }
 
 .toast--error {
   background: var(--color-danger);
+}
+
+.toast--warning {
+  background: var(--color-warning);
 }
 
 .toast--info {

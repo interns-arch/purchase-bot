@@ -24,6 +24,7 @@ from backend.app.integrations.gmail.client import (
     get_gmail_client,
 )
 from backend.app.integrations.gmail.config import gmail_settings
+from backend.app.notifications import emitters as notifications
 from backend.app.services.document_processor import staging
 from backend.app.services.document_processor.metadata import DocumentMetadata
 from backend.app.services.document_processor.processor import process_document
@@ -91,7 +92,8 @@ def _process_message(message: IncomingEmailMessage) -> None:
                 external_message_id=message.message_id,
                 original_filename=attachment.filename,
             )
-            process_document(DocumentSource.EMAIL, file_path, metadata, session)
+            result = process_document(DocumentSource.EMAIL, file_path, metadata, session)
+            notifications.publish_document_result("Gmail", result)
 
 
 def poll_gmail_inbox() -> None:

@@ -128,7 +128,8 @@ never commit it). In production, set these in the Render dashboard instead.
 | `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | OAuth mode credentials -- see §7 | *(unset)* |
 | `GMAIL_POLL_INTERVAL_SECONDS` | How often the scheduler polls the mailbox | `300` |
 | `ENABLE_GOOGLE_SHEETS_SYNC` | `true`/`false` -- see §8 | `false` |
-| `GOOGLE_SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_PROJECT_ID` | Google Sheets credentials -- see §8 | *(unset)* |
+| `GOOGLE_SHEET_ID` | Target spreadsheet id -- see §8. **Auth reuses the Gmail OAuth creds (`GMAIL_CLIENT_ID`/`GMAIL_CLIENT_SECRET`/`GMAIL_REFRESH_TOKEN`); there is no service account.** | *(unset)* |
+| `GOOGLE_PROJECT_ID` | Informational only -- which Google Cloud project the OAuth client belongs to | *(unset)* |
 | `ALLOCATION_REPORT_EMAIL` | Internal address the Vendor Allocation Report is emailed to after every **automatic** vendor selection (not manual) -- see §9 | *(unset -- email skipped)* |
 | `ENABLE_PO_EMAIL` / `PURCHASE_TEAM_EMAIL` | Whether to also email each generated Purchase Order to this internal address -- see §9. POs are always generated + saved + downloadable regardless of this setting | `false` / *(unset)* |
 | `ENABLE_PO_WHATSAPP` | Reserved for a future phase -- sending POs to **vendors** over WhatsApp isn't implemented yet; this app never emails or messages a vendor directly | `false`, unused |
@@ -248,7 +249,11 @@ picks which of the two setups below is used; you only need to complete one.
    script using `google-auth-oauthlib`'s `InstalledAppFlow` with scope
    `https://www.googleapis.com/auth/gmail.modify` works -- this only needs
    to be done once per mailbox; the refresh token doesn't expire unless
-   revoked).
+   revoked). **If you also use Google Sheets Sync (§8), mint the token with
+   BOTH scopes in the same consent:**
+   `https://www.googleapis.com/auth/gmail.modify` **and**
+   `https://www.googleapis.com/auth/spreadsheets` -- the two integrations
+   share this one refresh token.
 5. Set in `backend/.env` (or the Render dashboard):
    ```
    GMAIL_ENABLED=true
@@ -273,30 +278,38 @@ Every vendor inventory import (manual or WhatsApp) pushes that vendor's
 active inventory to its own worksheet in a shared Google Sheet, once this
 is configured. Disabled (no sync attempted) by default.
 
-1. In the same (or a new) Google Cloud project, enable the **Google Sheets
-   API** (APIs & Services -> Library -> search "Google Sheets API" -> Enable).
-2. Create a service account: APIs & Services -> Credentials -> Create
-   Credentials -> Service Account -> give it any name -> Done.
-3. Create a key for it: open the service account -> Keys -> Add Key ->
-   Create new key -> JSON. This downloads a JSON key file -- treat it like a
-   password.
-4. Create (or reuse) the target Google Sheet, then **share it** with the
-   service account's email address (looks like
-   `something@your-project.iam.gserviceaccount.com`, found in the key file
-   or the service account's details page) with **Editor** access -- without
-   this share step, every sync attempt fails with a permission error.
-5. Copy the spreadsheet's ID from its URL:
+**There is no service account.** Google Sheets authenticates with the **same
+OAuth credentials as the Gmail integration** (`GMAIL_CLIENT_ID` /
+`GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN`, §7 Option B). `GOOGLE_SERVICE_ACCOUNT_JSON`
+has been removed. To enable Sheets sync:
+
+1. In the **same** Google Cloud project that owns your Gmail OAuth client,
+   enable the **Google Sheets API** (APIs & Services -> Library -> search
+   "Google Sheets API" -> Enable). Enable the **Gmail API** there too if you
+   haven't already.
+2. Make sure your OAuth refresh token includes the Sheets scope. If your
+   existing `GMAIL_REFRESH_TOKEN` was minted for Gmail only, **re-run the
+   consent flow (§7 Option B step 4) requesting BOTH scopes**:
+   `https://www.googleapis.com/auth/gmail.modify` and
+   `https://www.googleapis.com/auth/spreadsheets`, then update
+   `GMAIL_REFRESH_TOKEN`. (Symptom of a Gmail-only token: Sheets sync fails
+   with `invalid_scope` or a 403 insufficient-permission error.)
+3. Create (or reuse) the target Google Sheet, then **share it** with the
+   Google **account** that consented the OAuth flow (the mailbox/user, e.g.
+   `orders@yourdomain.com`) with **Editor** access -- not a service-account
+   email. Without this share, every sync attempt fails with a permission error.
+4. Copy the spreadsheet's ID from its URL:
    `https://docs.google.com/spreadsheets/d/<THIS_PART>/edit`.
-6. Set in `backend/.env` (or the Render dashboard):
+5. Set in `backend/.env` (or the Render dashboard):
    ```
    ENABLE_GOOGLE_SHEETS_SYNC=true
-   GOOGLE_SHEET_ID=<the spreadsheet id from step 5>
-   GOOGLE_SERVICE_ACCOUNT_JSON=<paste the entire key file's JSON on one line>
+   GOOGLE_SHEET_ID=<the spreadsheet id from step 4>
+   # Auth is reused from Gmail -- no GOOGLE_SERVICE_ACCOUNT_JSON needed:
+   GMAIL_CLIENT_ID=<...>
+   GMAIL_CLIENT_SECRET=<...>
+   GMAIL_REFRESH_TOKEN=<minted with the spreadsheets scope, see step 2>
    ```
-   `GOOGLE_SERVICE_ACCOUNT_JSON` also accepts a file path instead of inline
-   JSON (e.g. `./credentials/google-service-account.json`) if you'd rather
-   mount the key file directly -- either form works with no code change.
-7. Redeploy/restart, then upload (or wait for) an inventory import and check
+6. Redeploy/restart, then upload (or wait for) an inventory import and check
    Settings -> Integration Status -> Google Sheets Sync.
 
 A Sheets outage or misconfiguration never fails the inventory import itself
@@ -460,9 +473,14 @@ change against it.** See the script's own docstring
   a spun-down service doesn't poll until a request wakes it (see the
   cold-start note above) -- if the mailbox needs near-real-time processing,
   use a paid plan or an uptime-ping service to keep it warm.
-- **Google Sheets sync fails with a permission error:** the target sheet
-  wasn't shared with the service account's email address (see §8 step 4) --
-  sharing the sheet with your own Google account doesn't count.
-- **`GOOGLE_SERVICE_ACCOUNT_JSON` / Gmail OAuth credentials rejected:** check
-  for accidental line breaks or trailing whitespace when pasting a
-  multi-line JSON key or token into a single-line env var field.
+- **Google Sheets sync fails with `invalid_scope` or a 403 insufficient
+  permission:** the shared `GMAIL_REFRESH_TOKEN` was minted for Gmail only.
+  Re-run the OAuth consent requesting BOTH the gmail.modify and spreadsheets
+  scopes and update the token (see §8 step 2), and ensure the Google Sheets
+  API is enabled in the project.
+- **Google Sheets sync fails with a permission error (403 on the sheet):**
+  the target sheet wasn't shared with the Google account that consented the
+  OAuth flow (see §8 step 3) with Editor access.
+- **Gmail OAuth credentials rejected:** check for accidental line breaks or
+  trailing whitespace when pasting the refresh token into a single-line env
+  var field.

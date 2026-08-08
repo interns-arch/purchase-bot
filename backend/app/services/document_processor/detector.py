@@ -93,25 +93,38 @@ def classify(
     per the business workflow, so WhatsApp and Gmail bypass the heuristic
     classifier entirely -- only MANUAL uploads are classified:
 
-    - WHATSAPP -> ALWAYS Vendor Inventory. The vendor is still resolved from
-      the filename's Vendor Code (AR_CT.xlsx / BI_CT.xlsx ...) so the
-      vendor-code onboarding workflow is unaffected.
+    - WHATSAPP -> the type is decided by the sender's routing command
+      (Vendor / Customer / ...), which the WhatsApp worker passes in as
+      `document_type_hint`. Vendor Inventory still resolves the vendor from
+      the filename's Vendor Code (AR_CT.xlsx / BI_CT.xlsx ...) so that
+      onboarding workflow is unaffected. With no hint it defaults to Vendor
+      Inventory (backward-compatible with any direct caller).
     - EMAIL (dedicated Gmail inbox) -> Customer Order for spreadsheets, or
       Vendor Invoice for PDF purchase bills, decided purely by file format.
     - MANUAL -> the hint/heuristic classifier below (`_classify_manual`)."""
     if source == DocumentSource.WHATSAPP:
-        # Force Vendor Inventory, but keep the filename Vendor-Code lookup so a
-        # returning vendor is still identified (and an unknown code is still
-        # rejected downstream) exactly as before.
-        classification = _classify_inventory(file_path, session)
+        hint = metadata.document_type_hint
+        if hint is None or hint == IncomingDocumentType.VENDOR_INVENTORY:
+            # Vendor Inventory (default): keep the filename Vendor-Code lookup
+            # so a returning vendor is still identified (and an unknown code is
+            # still rejected downstream) exactly as before.
+            classification = _classify_inventory(file_path, session)
+            logger.info(
+                "WHATSAPP document '%s' routed to VENDOR_INVENTORY "
+                "(vendor_code=%s, vendor_id=%s).",
+                file_path.name,
+                classification.vendor_code,
+                classification.vendor_id,
+            )
+            return classification
+        # Any other command-routed type (CUSTOMER_ORDER today; INVOICE/etc.
+        # later) -- import logic is reached unchanged via the dispatcher.
         logger.info(
-            "Forcing document_type=VENDOR_INVENTORY for WHATSAPP document '%s' "
-            "(vendor_code=%s, vendor_id=%s) -- classifier bypassed by source rule.",
+            "WHATSAPP document '%s' routed to %s by the sender's command.",
             file_path.name,
-            classification.vendor_code,
-            classification.vendor_id,
+            hint.value,
         )
-        return classification
+        return Classification(hint)
 
     if source == DocumentSource.EMAIL:
         if file_path.suffix.lower() in INVOICE_EXTENSIONS:

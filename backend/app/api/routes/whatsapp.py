@@ -20,9 +20,15 @@ from sqlalchemy.orm import Session
 from backend.app.database.session import get_db
 from backend.app.integrations.whatsapp import status_service
 from backend.app.integrations.whatsapp.config import whatsapp_settings
-from backend.app.integrations.whatsapp.parser import parse_webhook_payload
+from backend.app.integrations.whatsapp.parser import (
+    parse_text_messages,
+    parse_webhook_payload,
+)
 from backend.app.integrations.whatsapp.webhook import verify_webhook_signature
-from backend.app.workers.document_worker import handle_incoming_whatsapp_message
+from backend.app.workers.document_worker import (
+    handle_incoming_whatsapp_message,
+    handle_incoming_whatsapp_text,
+)
 from core.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -60,9 +66,21 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body.") from exc
 
-    messages = parse_webhook_payload(payload)
-    for message in messages:
+    # Text commands are scheduled before documents so that if a command and a
+    # file somehow arrive in the same webhook, the command is stored first.
+    texts = parse_text_messages(payload)
+    for text_message in texts:
+        background_tasks.add_task(handle_incoming_whatsapp_text, text_message)
+
+    documents = parse_webhook_payload(payload)
+    for message in documents:
         background_tasks.add_task(handle_incoming_whatsapp_message, message)
 
-    logger.info("WhatsApp webhook received %d document attachment(s).", len(messages))
-    return JSONResponse({"status": "received", "message_count": len(messages)})
+    logger.info(
+        "WhatsApp webhook received %d text message(s) and %d document attachment(s).",
+        len(texts),
+        len(documents),
+    )
+    return JSONResponse(
+        {"status": "received", "text_count": len(texts), "document_count": len(documents)}
+    )

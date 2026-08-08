@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from backend.app.integrations.google_sheets import status_service
-from backend.app.integrations.google_sheets.config import google_sheets_settings
+from backend.app.integrations.google_sheets.config import SHEETS_SCOPE, google_sheets_settings
+from backend.app.notifications import emitters as notifications
 from core.db import get_session
 from core.logging_setup import get_logger
 from core.services import inventory_import_service, vendor_service
@@ -31,17 +32,29 @@ _HEADERS = ["Vendor Part Number", "Description", "Quantity Available", "Price", 
 
 
 class GoogleSheetsNotConfiguredError(Exception):
-    """Raised when sync is enabled but `GOOGLE_SHEET_ID` / a valid
-    `GOOGLE_SERVICE_ACCOUNT_JSON` aren't both configured."""
+    """Raised when sync is enabled but `GOOGLE_SHEET_ID` and the shared Gmail
+    OAuth credentials (`GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` /
+    `GMAIL_REFRESH_TOKEN`) aren't all configured."""
 
 
 def _build_client():
     # Imported lazily so a deployment that never enables Sheets sync doesn't
     # need `gspread`/`google-auth` importable at all.
     import gspread
+    from google.oauth2.credentials import Credentials
 
-    info = google_sheets_settings.load_service_account_info()
-    return gspread.service_account_from_dict(info)
+    # Reuse the SAME OAuth refresh token the Gmail integration already uses
+    # (see `backend/app/integrations/gmail/client.py`); no separate service
+    # account. The token must carry the Sheets scope (see config.py).
+    credentials = Credentials(
+        None,
+        refresh_token=google_sheets_settings.refresh_token,
+        client_id=google_sheets_settings.client_id,
+        client_secret=google_sheets_settings.client_secret,
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=[SHEETS_SCOPE],
+    )
+    return gspread.authorize(credentials)
 
 
 def _get_or_create_worksheet(spreadsheet, title: str, num_cols: int):
@@ -68,7 +81,8 @@ def test_connection() -> str:
     otherwise."""
     if not google_sheets_settings.is_configured():
         raise GoogleSheetsNotConfiguredError(
-            "GOOGLE_SHEET_ID/GOOGLE_SERVICE_ACCOUNT_JSON are not configured."
+            "GOOGLE_SHEET_ID or the shared Gmail OAuth credentials "
+            "(GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET/GMAIL_REFRESH_TOKEN) are not configured."
         )
     client = _build_client()
     spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
@@ -78,8 +92,9 @@ def test_connection() -> str:
 def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
     if not google_sheets_settings.is_configured():
         raise GoogleSheetsNotConfiguredError(
-            "Google Sheets sync is enabled but GOOGLE_SHEET_ID/GOOGLE_SERVICE_ACCOUNT_JSON "
-            "are not configured (see .env.example)."
+            "Google Sheets sync is enabled but GOOGLE_SHEET_ID or the shared Gmail OAuth "
+            "credentials (GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET/GMAIL_REFRESH_TOKEN) are not "
+            "configured (see .env.example)."
         )
 
     vendor = vendor_service.get_vendor(vendor_id, session)
@@ -131,6 +146,7 @@ def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> Non
             status_service.record_sync(
                 status_session, success=False, message=str(exc), vendor_name=vendor_name
             )
+        notifications.publish_sheet_sync(False, vendor_name, str(exc))
         return
 
     with get_session() as status_session:
@@ -140,3 +156,4 @@ def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> Non
             message=f"Synced {vendor_name!r}'s active inventory.",
             vendor_name=vendor_name,
         )
+    notifications.publish_sheet_sync(True, vendor_name)

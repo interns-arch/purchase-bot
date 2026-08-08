@@ -1,15 +1,26 @@
 """Google Sheets Sync configuration, read from environment variables
 (`backend/.env`). Same tiny-class idiom as the WhatsApp/Gmail integrations.
 
-`GOOGLE_SERVICE_ACCOUNT_JSON` accepts EITHER a path to a service account key
-file OR the key's JSON contents inline (handy for platforms like Render
-where a multi-line file is awkward to configure but a single env var is
-easy) -- detected by whether the value parses as JSON."""
+Authentication reuses the SAME OAuth 2.0 credentials as the Gmail
+integration -- `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` /
+`GMAIL_REFRESH_TOKEN`, delegated to `gmail_settings` so there's a single
+source of truth. There is no longer a separate Google service account
+(`GOOGLE_SERVICE_ACCOUNT_JSON` has been removed).
+
+The reused refresh token must have been granted the Google Sheets scope
+(`https://www.googleapis.com/auth/spreadsheets`) IN ADDITION to Gmail's
+scope when it was minted -- see DEPLOYMENT.md's Gmail/Google Sheets setup.
+"""
 
 from __future__ import annotations
 
-import json
 import os
+
+from backend.app.integrations.gmail.config import gmail_settings
+
+# The OAuth scope Google Sheets access requires. The shared refresh token
+# must have been consented for this scope as well as Gmail's.
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 
 class GoogleSheetsSettings:
@@ -18,36 +29,26 @@ class GoogleSheetsSettings:
     )
     sheet_id: str | None = os.environ.get("GOOGLE_SHEET_ID") or None
     project_id: str | None = os.environ.get("GOOGLE_PROJECT_ID") or None
-    _service_account_json: str | None = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None
+
+    # OAuth credentials are shared with the Gmail integration (same Google
+    # account) -- read through `gmail_settings` rather than re-reading the
+    # env, so both integrations can never drift apart.
+    @property
+    def client_id(self) -> str | None:
+        return gmail_settings.client_id
+
+    @property
+    def client_secret(self) -> str | None:
+        return gmail_settings.client_secret
+
+    @property
+    def refresh_token(self) -> str | None:
+        return gmail_settings.refresh_token
 
     def is_configured(self) -> bool:
-        return bool(self.sheet_id and self._service_account_json)
-
-    def load_service_account_info(self) -> dict:
-        """Raises `ValueError` with a clear message if the credential is
-        missing or malformed -- callers turn this into a logged failure,
-        never a crash."""
-        if not self._service_account_json:
-            raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is not configured.")
-
-        raw = self._service_account_json.strip()
-        if raw.startswith("{"):
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {exc}") from exc
-
-        # Otherwise treat it as a path to a service account key file.
-        try:
-            with open(raw, encoding="utf-8") as key_file:
-                return json.load(key_file)
-        except OSError as exc:
-            raise ValueError(
-                f"GOOGLE_SERVICE_ACCOUNT_JSON does not look like inline JSON and "
-                f"'{raw}' could not be opened as a key file: {exc}"
-            ) from exc
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"'{raw}' is not a valid service account JSON key file: {exc}") from exc
+        return bool(
+            self.sheet_id and self.client_id and self.client_secret and self.refresh_token
+        )
 
 
 google_sheets_settings = GoogleSheetsSettings()

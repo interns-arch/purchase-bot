@@ -3,7 +3,12 @@ the last webhook verification and the last live connection test, so the
 admin can see current integration health without re-triggering anything.
 Shares `core.models.Base`/the same database, same reasoning as
 `backend/app/documents/models.py`: this is a web-app/integration concept,
-not core business logic."""
+not core business logic.
+
+Also holds `WhatsAppPendingCommand`: the per-number routing command
+(`vendor` / `customer` / future ...) a WhatsApp user must send BEFORE
+uploading a file, so the system knows which import workflow to run for the
+next file from that number."""
 
 from __future__ import annotations
 
@@ -15,6 +20,24 @@ from sqlalchemy.orm import Mapped, mapped_column
 from core.models import Base
 
 STATUS_ROW_ID = 1
+
+
+class WhatsAppPendingCommand(Base):
+    """The latest valid routing command a WhatsApp number sent, remembered
+    until that number's next file is processed (then cleared). Exactly one
+    row per number (`whatsapp_number` unique), so multiple users route
+    independently and concurrently. `command` stores the canonical command
+    key from `backend.app.integrations.whatsapp.commands` (e.g. "vendor",
+    "customer"), never raw user text."""
+
+    __tablename__ = "whatsapp_pending_commands"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(unique=True, index=True)
+    command: Mapped[str] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
 
 
 class WhatsAppIntegrationStatus(Base):

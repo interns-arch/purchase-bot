@@ -105,6 +105,39 @@ class WhatsAppClient:
 
         return _with_retries(f"download_media({media_url})", _call)
 
+    def send_text_message(self, to: str, body: str) -> None:
+        """Send a plain-text WhatsApp message back to `to` (an inbound sender
+        number). Used only for the routing command prompts/confirmations --
+        never to deliver business documents to a vendor. Requires
+        `WHATSAPP_PHONE_NUMBER_ID`. Wrapped in the same retry/backoff as the
+        media calls since it also runs inside a background task.
+        https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages"""
+        access_token = self._require_access_token()
+        if not self._settings.phone_number_id:
+            raise WhatsAppNotConfiguredError(
+                "WHATSAPP_PHONE_NUMBER_ID is not configured -- cannot send a message."
+            )
+
+        url = f"{self._settings.graph_api_base_url}/{self._settings.phone_number_id}/messages"
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "text",
+            "text": {"preview_url": False, "body": body},
+        }
+
+        def _call() -> None:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+
+        _with_retries(f"send_text_message({to})", _call)
+
     def get_phone_number_info(self) -> dict[str, Any]:
         """Used only by the interactive "Test Connection" action on the
         Integration Status page -- a single attempt, deliberately NOT
