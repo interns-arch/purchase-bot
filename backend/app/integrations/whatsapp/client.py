@@ -138,6 +138,66 @@ class WhatsAppClient:
 
         _with_retries(f"send_text_message({to})", _call)
 
+    def upload_media(self, content: bytes, filename: str, mime_type: str) -> str:
+        """Upload a document to WhatsApp's media store and return its media id
+        (step 1 of sending a document -- the Cloud API needs the file
+        registered before it can be attached to a message). Requires
+        `WHATSAPP_PHONE_NUMBER_ID`. Wrapped in the same retry as the other
+        calls."""
+        access_token = self._require_access_token()
+        if not self._settings.phone_number_id:
+            raise WhatsAppNotConfiguredError(
+                "WHATSAPP_PHONE_NUMBER_ID is not configured -- cannot upload media."
+            )
+
+        url = f"{self._settings.graph_api_base_url}/{self._settings.phone_number_id}/media"
+
+        def _call() -> str:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    data={"messaging_product": "whatsapp"},
+                    files={"file": (filename, content, mime_type)},
+                )
+                response.raise_for_status()
+                return response.json()["id"]
+
+        return _with_retries(f"upload_media({filename})", _call)
+
+    def send_document_message(
+        self, to: str, media_id: str, filename: str, caption: str | None = None
+    ) -> None:
+        """Send a previously-uploaded document (by media id) to `to`, with a
+        download filename and optional caption (step 2 of sending a
+        document)."""
+        access_token = self._require_access_token()
+        if not self._settings.phone_number_id:
+            raise WhatsAppNotConfiguredError(
+                "WHATSAPP_PHONE_NUMBER_ID is not configured -- cannot send a document."
+            )
+
+        url = f"{self._settings.graph_api_base_url}/{self._settings.phone_number_id}/messages"
+        document: dict[str, Any] = {"id": media_id, "filename": filename}
+        if caption:
+            document["caption"] = caption
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "document",
+            "document": document,
+        }
+
+        def _call() -> None:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
+                )
+                response.raise_for_status()
+
+        _with_retries(f"send_document_message({filename})", _call)
+
     def get_phone_number_info(self) -> dict[str, Any]:
         """Used only by the interactive "Test Connection" action on the
         Integration Status page -- a single attempt, deliberately NOT

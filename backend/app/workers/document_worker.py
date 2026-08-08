@@ -24,6 +24,7 @@ from backend.app.integrations.whatsapp.commands import WhatsAppCommand
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.integrations.whatsapp.media import download_document_media
 from backend.app.integrations.whatsapp.outbound import send_reply_safe
+from backend.app.integrations.whatsapp import inventory_output
 from backend.app.integrations.whatsapp.parser import (
     IncomingWhatsAppMessage,
     IncomingWhatsAppText,
@@ -142,6 +143,7 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
         "database) and starting document processing...",
         file_path,
     )
+    result = None
     try:
         with get_session() as session:
             logger.info("WhatsApp pipeline: DB session opened; calling process_document...")
@@ -172,3 +174,16 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
             message.media_id,
         )
         raise
+
+    # Temporary Google-Sheets replacement (output layer): the import above is
+    # now committed, so on a SUCCESSFUL Vendor Inventory import build one
+    # consolidated all-vendor workbook and send it to the Founder over WhatsApp.
+    # Fully best-effort -- it opens its own session and cannot affect the import.
+    if _is_successful_inventory_import(result):
+        inventory_output.send_consolidated_inventory_to_founder()
+
+
+def _is_successful_inventory_import(result) -> bool:
+    doc_type = getattr(getattr(result, "document_type", None), "value", None)
+    status = getattr(getattr(result, "status", None), "value", None)
+    return doc_type == "VENDOR_INVENTORY" and status in ("PROCESSED", "PROCESSED_WITH_ERRORS")

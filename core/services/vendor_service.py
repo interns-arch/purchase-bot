@@ -41,6 +41,17 @@ def get_vendor(vendor_id: int, session: Session) -> Vendor | None:
     return session.get(Vendor, vendor_id)
 
 
+def list_vendors(session: Session) -> list[Vendor]:
+    """Every vendor in the database, ordered by vendor code then name --
+    used by read-only outputs (e.g. the consolidated Vendor Inventory
+    workbook) that need to enumerate all vendors, not just one."""
+    return list(
+        session.execute(
+            select(Vendor).order_by(func.coalesce(Vendor.vendor_code, Vendor.name), Vendor.name)
+        ).scalars()
+    )
+
+
 def get_vendor_by_name(name: str, session: Session) -> Vendor | None:
     return session.execute(
         select(Vendor).where(func.lower(Vendor.name) == name.strip().lower())

@@ -52,6 +52,13 @@ class WhatsAppSettings:
     )
     webhook_callback_url: str | None = os.environ.get("WHATSAPP_WEBHOOK_CALLBACK_URL") or None
 
+    # Founder/admin destination for outbound documents (e.g. the temporary
+    # consolidated Vendor Inventory workbook). In WhatsApp international format
+    # without '+', e.g. 919876543210. If unset, outbound document sending is
+    # skipped (logged, never an error). Reuses the same WHATSAPP_ACCESS_TOKEN /
+    # WHATSAPP_PHONE_NUMBER_ID above -- no separate auth.
+    admin_phone_number: str | None = os.environ.get("WHATSAPP_ADMIN_PHONE_NUMBER") or None
+
     @property
     def graph_api_base_url(self) -> str:
         return f"https://graph.facebook.com/{self.graph_api_version}"
