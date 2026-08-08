@@ -45,12 +45,12 @@ def resolve_part(vendor_id: int, raw_part_number: str, session: Session) -> Part
         session.add(part)
         session.flush()  # assign part.id before the alias references it
 
-    alias = Part(
-        part_id=part.id,
-        vendor_id=vendor_id,
-        vendor_part_number=raw_part_number,
-        normalized_part_number=normalized,
-    )
+    alias = PartAlias(
+    part_id=part.id,
+    vendor_id=vendor_id,
+    vendor_part_number=raw_part_number,
+    normalized_part_number=normalized,
+)
     session.add(alias)
     session.flush()  # surface any unique-constraint violation immediately
 
