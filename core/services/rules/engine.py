@@ -22,11 +22,11 @@ Allocation rules per line:
 
 from __future__ import annotations
 
-from collections import defaultdict
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from core.logging_setup import get_logger
 from core.models import VendorSelection
 from core.services import customer_order_service, vendor_selection_service
 from core.services.rules.registry import get_strategy
@@ -34,6 +34,35 @@ from core.services.vendor_comparison_service import (
     VendorComparisonRow,
     compare_vendors_for_order,
 )
+
+logger = get_logger(__name__)
+
+
+def _try_upsert_selection(
+    order_item_id: int, vendor_id: int, quantity: Decimal, session: Session
+) -> bool:
+    """Same call `vendor_selection_service.upsert_selection` always uses to
+    apply an allocation -- but the AUTOMATIC engine treats a rejection (this
+    vendor turned out to have less remaining than the snapshot this run
+    started from suggested -- e.g. an earlier line in this same order, or a
+    concurrent order, just claimed some of it) as "skip this vendor for this
+    line" rather than a fatal error that aborts the rest of the order's
+    automatic selection. Manual selection (the API endpoint) still lets the
+    same `ValueError` surface directly to its caller -- only the automatic
+    engine gets this graceful treatment, since it has no user watching a
+    single request to react to a rejection. Returns True if applied."""
+    try:
+        vendor_selection_service.upsert_selection(order_item_id, vendor_id, quantity, session)
+        return True
+    except ValueError:
+        logger.warning(
+            "Automatic Vendor Selection: vendor %s no longer had %s remaining for "
+            "order item %s (claimed elsewhere since this run started) -- skipping.",
+            vendor_id,
+            quantity,
+            order_item_id,
+        )
+        return False
 
 
 def _allocate_own_stock_first(
@@ -49,7 +78,7 @@ def _allocate_own_stock_first(
 
     remaining = requested_quantity
     for offer in sorted(
-        own_stock_offers, key=lambda o: o.vendor_available_quantity or Decimal(0), reverse=True
+        own_stock_offers, key=lambda o: o.vendor_raw_available_quantity or Decimal(0), reverse=True
     ):
         if remaining <= 0:
             break
@@ -57,8 +86,8 @@ def _allocate_own_stock_first(
             continue
 
         take = min(remaining, offer.vendor_available_quantity)
-        vendor_selection_service.upsert_selection(order_item_id, offer.vendor_id, take, session)
-        remaining -= take
+        if _try_upsert_selection(order_item_id, offer.vendor_id, take, session):
+            remaining -= take
 
     return remaining, other_offers
 
@@ -73,24 +102,34 @@ def run_automatic_vendor_selection(order_id: int, session: Session) -> list[Vend
         raise LookupError(f"Customer order {order_id} not found.")
 
     strategy = get_strategy(_AUTOMATIC_STRATEGY)
-    comparison = compare_vendors_for_order(order_id, session)
 
-    offers_by_item: dict[int, list[VendorComparisonRow]] = defaultdict(list)
+    # Which lines exist and how much each requests comes from the customer's
+    # own order -- that doesn't change during this run, so one read is fine.
+    # Vendor AVAILABILITY, in contrast, is re-read fresh per line below.
     requested_by_item: dict[int, Decimal] = {}
-    for row in comparison.rows:
-        if row.order_item_id is None:
-            continue
-        requested_by_item[row.order_item_id] = row.requested_quantity
-        if row.vendor_id is not None and row.vendor_available_quantity:
-            offers_by_item[row.order_item_id].append(row)
+    for row in compare_vendors_for_order(order_id, session).rows:
+        if row.order_item_id is not None:
+            requested_by_item[row.order_item_id] = row.requested_quantity
 
     applied: list[VendorSelection] = []
     for order_item_id, requested_quantity in requested_by_item.items():
-        offers = offers_by_item.get(order_item_id, [])
-
         # Always start from a clean slate for this line (drop any prior manual
         # or automatic picks) so a re-run never leaves stale vendors behind.
         vendor_selection_service.clear_selections_for_item(order_item_id, session)
+
+        # Re-read vendor availability fresh for EVERY line, right before
+        # deciding its allocation -- not from a snapshot taken once for the
+        # whole order. Otherwise an earlier line in this SAME order (or a
+        # concurrent order committing in between) that already consumed some
+        # of a vendor's remaining stock would be invisible to this line's
+        # decision. Cheap at this scale -- one extra query per line.
+        offers: list[VendorComparisonRow] = [
+            row
+            for row in compare_vendors_for_order(order_id, session).rows
+            if row.order_item_id == order_item_id
+            and row.vendor_id is not None
+            and row.vendor_available_quantity
+        ]
 
         if not offers:
             continue
@@ -112,7 +151,7 @@ def run_automatic_vendor_selection(order_id: int, session: Session) -> list[Vend
             for allocation in strategy.allocate(remaining_quantity, external_offers):
                 if allocation.quantity <= 0:
                     continue
-                vendor_selection_service.upsert_selection(
+                _try_upsert_selection(
                     order_item_id, allocation.vendor_id, allocation.quantity, session
                 )
 

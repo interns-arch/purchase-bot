@@ -7,10 +7,17 @@ A `VendorSelection` row is created or replaced per (order line, vendor)
 pair -- each customer part can be split across several vendors when no
 single vendor can cover the full requested quantity, but selecting/removing
 one vendor's allocation never touches another vendor's allocation for the
-same line, or another line's selections. Selections persist until the
-comparison report is regenerated (i.e. a new customer order is uploaded);
-there is no further lifecycle beyond that -- no Purchase Order concept, no
-locking.
+same line, or another line's selections. Selections persist until explicitly
+cleared/replaced (re-running Automatic Vendor Selection, or a manual
+deselect) or a Purchase Order is generated from them (see
+`purchase_order_generation_service.py`), which only flips their status.
+
+`VendorSelection` doubles as the vendor-stock reservation ledger (see
+`core.services.vendor_stock_service`): `upsert_selection` locks the vendor's
+inventory row (`_find_active_vendor_offer`'s `.with_for_update()`) and checks
+the requested quantity against what's left ACROSS EVERY customer order for
+that vendor+part, not just this one order line -- this is what prevents the
+same vendor stock from being allocated to two different customers at once.
 
 Pure business logic -- no FastAPI/print()/input() here.
 """
@@ -34,12 +41,20 @@ from core.models import (
     VendorInventory,
     VendorSelection,
 )
+from core.services import vendor_stock_service
 from core.services.vendor_comparison_service import compare_vendors_for_order
 
 
 def _find_active_vendor_offer(
     vendor_id: int, normalized_part_number: str, session: Session
 ) -> VendorInventory | None:
+    """`.with_for_update()` makes this the lock point for the allocation
+    guard below: two concurrent calls trying to allocate against the same
+    vendor+part serialize here (a real row lock on Postgres/production; on
+    SQLite -- which has no row-level lock -- its own single-writer file lock
+    still serializes concurrent writers, just at a coarser grain, which is
+    fine for dev/tests). The lock is released on commit/rollback of the
+    caller's transaction, right after `upsert_selection` finishes writing."""
     return session.execute(
         select(VendorInventory)
         .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
@@ -48,6 +63,7 @@ def _find_active_vendor_offer(
             VendorInventory.normalized_part_number == normalized_part_number,
             InventoryImport.is_active.is_(True),
         )
+        .with_for_update()
     ).scalar_one_or_none()
 
 
@@ -103,18 +119,33 @@ def upsert_selection(
             f"{order_item.part_number_raw!r}."
         )
 
-    if quantity_selected > offer.quantity_available:
-        raise ValueError(
-            f"Vendor '{vendor.name}' only has {offer.quantity_available} of "
-            f"{order_item.part_number_raw!r} available (requested "
-            f"{quantity_selected})."
-        )
-
     if offer.part_id is None:
         raise ValueError(
             f"Vendor '{vendor.name}'s inventory row for "
             f"{order_item.part_number_raw!r} has no resolved Part -- re-import "
             "that vendor's inventory before selecting it."
+        )
+
+    # The actual double-allocation guard: how much of this vendor's part is
+    # left once every OTHER customer order's reservation is accounted for --
+    # not just this vendor's raw imported quantity. `exclude_order_item_id`
+    # leaves this line's own existing selection (if any) for this same
+    # vendor out of the "already reserved" sum, so re-selecting the same
+    # vendor for the same line is judged against "what's free excluding what
+    # I already had," not double-counted against itself. Computed AFTER the
+    # row lock above, so two concurrent calls for the same vendor+part never
+    # both see the same stale remaining figure.
+    remaining = vendor_stock_service.remaining_quantity(
+        vendor_id, offer.part_id, offer.quantity_available, session,
+        exclude_order_item_id=order_item_id,
+    )
+    if quantity_selected > remaining:
+        raise ValueError(
+            f"Vendor '{vendor.name}' only has {remaining} of "
+            f"{order_item.part_number_raw!r} remaining (requested "
+            f"{quantity_selected}) once other customer orders' allocations are "
+            f"accounted for -- {offer.quantity_available} is the vendor's raw "
+            "imported quantity."
         )
 
     other_selections = _selections_for_item(

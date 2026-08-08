@@ -4,12 +4,20 @@ The channel a document arrived on is authoritative (business workflow), so
 `classify()` routes by `source` first and only MANUAL uploads reach the
 heuristic classifier:
 
-- WHATSAPP -> ALWAYS Vendor Inventory. The vendor is still resolved from the
-  filename's Vendor Code (see `_classify_inventory`) so the AR_CT.xlsx /
-  BI_CT.xlsx onboarding workflow is unchanged; an unregistered code is still
-  rejected downstream rather than silently misrouted.
+- WHATSAPP -> decided by the sender's last routing command (Vendor /
+  Customer / Invoice -- see `backend.app.integrations.whatsapp.commands`),
+  passed in as `metadata.document_type_hint`. Vendor Inventory resolves the
+  vendor from the filename's Vendor Code (see `_classify_inventory`,
+  AR_CT.xlsx / BI_CT.xlsx); Customer Order resolves the customer from the
+  filename's Customer Code the same way (see `_classify_customer_order`,
+  AB_CO_Order.xlsx). Either way an unregistered code is rejected downstream
+  rather than silently misrouted. With no hint, defaults to Vendor Inventory
+  (backward-compatible with any direct caller).
 - EMAIL (dedicated Gmail inbox) -> Customer Order for spreadsheets, Vendor
-  Invoice for PDF purchase bills -- decided purely by file format.
+  Invoice for PDF purchase bills -- decided purely by file format. Gmail
+  never identifies a customer (no Customer Code in an email attachment's
+  name to parse), so its Customer Orders always get `customer_id=None`,
+  exactly as before Customer Codes existed.
 - MANUAL -> `_classify_manual`: the explicit `document_type_hint` from the
   endpoint the user clicked (a manual Vendor Inventory upload's *vendor* is
   still resolved from its filename's Vendor Code, exactly like WhatsApp).
@@ -18,9 +26,10 @@ Vendor Inventory and Customer Order files are NOT distinguishable by column
 headers alone (both only require Part Number + Quantity per
 `core.ingestion.column_detector.find_required_columns`) -- which is why
 source, not file structure, is the primary signal. Sender identity is
-deliberately NEVER used to identify a vendor: every vendor messages the same
-shared WhatsApp Business number, so a sender's phone number cannot tell them
-apart (see `core.services.vendor_code_service`).
+deliberately NEVER used to identify a vendor or a customer: every vendor (and
+every customer) messages the same shared WhatsApp Business number, so a
+sender's phone number cannot tell them apart (see
+`core.services.vendor_code_service` / `core.services.customer_code_service`).
 """
 
 from __future__ import annotations
@@ -34,7 +43,7 @@ from backend.app.documents.models import DocumentSource, IncomingDocumentType
 from backend.app.services.document_processor.metadata import DocumentMetadata
 from backend.app.services.document_processor.validator import INVOICE_EXTENSIONS
 from core.logging_setup import get_logger
-from core.services import vendor_code_service
+from core.services import customer_code_service, vendor_code_service
 
 logger = get_logger(__name__)
 
@@ -56,6 +65,17 @@ class Classification:
     # dispatcher rejects with a clear error instead of silently treating the
     # file as a customer order.
     vendor_code: str | None = None
+    customer_id: int | None = None
+    # Same "code present but not registered" signal as `vendor_code`, but for
+    # a Customer Order's Customer Code (e.g. "AB_CO").
+    customer_code: str | None = None
+    # True only when `_classify_customer_order` actually ran (WhatsApp
+    # Customer Order files) -- distinguishes "no code-shaped prefix, but
+    # customer identification was attempted" (dispatcher should onboard a new
+    # customer by filename) from Gmail/manual Customer Orders, which never
+    # attempt customer identification at all and must keep `customer_id`
+    # unset exactly as before this feature existed.
+    resolve_customer: bool = False
 
 
 def _keyword_override(caption: str | None) -> IncomingDocumentType | None:
@@ -83,6 +103,25 @@ def _classify_inventory(file_path: Path, session: Session) -> Classification:
         IncomingDocumentType.VENDOR_INVENTORY,
         vendor.id if vendor is not None else None,
         vendor_code=code,
+    )
+
+
+def _classify_customer_order(file_path: Path, session: Session) -> Classification:
+    """Resolves the customer for a WhatsApp Customer Order file from its
+    filename's Customer Code, mirroring `_classify_inventory` exactly.
+    `resolve_customer=True` is set regardless of whether a code was found, so
+    the dispatcher knows customer identification was actually attempted (as
+    opposed to Gmail/manual Customer Orders, which never call this)."""
+    code = customer_code_service.parse_customer_code_from_filename(file_path.name)
+    if code is None:
+        return Classification(IncomingDocumentType.CUSTOMER_ORDER, resolve_customer=True)
+
+    customer = customer_code_service.get_customer_by_code(code, session)
+    return Classification(
+        IncomingDocumentType.CUSTOMER_ORDER,
+        customer_id=customer.id if customer is not None else None,
+        customer_code=code,
+        resolve_customer=True,
     )
 
 
@@ -117,8 +156,25 @@ def classify(
                 classification.vendor_id,
             )
             return classification
-        # Any other command-routed type (CUSTOMER_ORDER today; INVOICE/etc.
-        # later) -- import logic is reached unchanged via the dispatcher.
+        if hint == IncomingDocumentType.CUSTOMER_ORDER:
+            # Customer Order (see `_classify_customer_order`): resolve which
+            # customer this file belongs to from its filename's Customer
+            # Code, exactly as Vendor Inventory resolves its vendor above --
+            # each file arriving under a persisted "Customer" command is
+            # classified independently, so consecutive files never get merged
+            # into one customer.
+            classification = _classify_customer_order(file_path, session)
+            logger.info(
+                "WHATSAPP document '%s' routed to CUSTOMER_ORDER "
+                "(customer_code=%s, customer_id=%s).",
+                file_path.name,
+                classification.customer_code,
+                classification.customer_id,
+            )
+            return classification
+
+        # Any other command-routed type (INVOICE today) -- import logic is
+        # reached unchanged via the dispatcher.
         logger.info(
             "WHATSAPP document '%s' routed to %s by the sender's command.",
             file_path.name,

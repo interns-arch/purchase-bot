@@ -63,9 +63,17 @@ def _read_file(file_path: Path) -> ParsedFile:
     return read_excel_rows(file_path)
 
 
-def run_customer_order_import(file_path: Path, session: Session) -> CustomerOrderImportResult:
+def run_customer_order_import(
+    file_path: Path, session: Session, *, customer_id: int | None = None
+) -> CustomerOrderImportResult:
     """Import one customer order file. Raises `DuplicateCustomerOrderFileError`
-    if this exact file content was already imported successfully."""
+    if this exact file content was already imported successfully.
+
+    `customer_id` associates the resulting `CustomerOrder` with the customer
+    it was resolved to belong to (see
+    `document_processor.detector._classify_customer_order`); `None` for
+    channels (Gmail, manual upload) that don't identify a customer, exactly
+    as before this parameter existed."""
     if not file_path.exists():
         raise FileNotFoundError(str(file_path))
 
@@ -104,6 +112,7 @@ def run_customer_order_import(file_path: Path, session: Session) -> CustomerOrde
         status=CustomerOrderStatus.COMPLETED,
         row_count=0,
         error_count=0,
+        customer_id=customer_id,
     )
     session.add(customer_order)
     session.flush()  # assign customer_order.id

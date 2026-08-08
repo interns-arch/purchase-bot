@@ -385,6 +385,12 @@ class VendorSelection(Base):
         Index("ix_vendor_selections_vendor_id", "vendor_id"),
         Index("ix_vendor_selections_part_id", "part_id"),
         Index("ix_vendor_selections_order_item_id", "customer_order_item_id"),
+        # The reservation ledger's core query (see
+        # core.services.vendor_stock_service.reserved_quantity) sums
+        # quantity_selected filtered on exactly this pair, across every
+        # customer order -- a composite index serves it directly instead of
+        # relying on a bitmap-AND of the two single-column indexes above.
+        Index("ix_vendor_selections_vendor_part", "vendor_id", "part_id"),
     )
 
 
@@ -681,6 +687,39 @@ class VendorDeliveryImportError(Base):
     )
 
 
+class Customer(Base):
+    """A business's own customer -- the counterpart to `Vendor`. Identified
+    the same way vendors are (see `core.services.customer_code_service`):
+    every WhatsApp Customer Order arrives on the same shared WhatsApp
+    Business number, so the sender's phone number can never tell customers
+    apart -- only the Customer Code embedded in the filename can."""
+
+    __tablename__ = "customers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(nullable=False)
+    # Permanent identifier used for Customer Order imports (see
+    # core.services.customer_code_service) -- <first two letters of
+    # name>_CO, e.g. "AB_CO", with a numeric suffix on collision. Mirrors
+    # `Vendor.vendor_code` exactly.
+    customer_code: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("ux_customers_name_lower", func.lower(name), unique=True),
+        Index(
+            "ux_customers_customer_code",
+            customer_code,
+            unique=True,
+            sqlite_where=text("customer_code IS NOT NULL"),
+            postgresql_where=text("customer_code IS NOT NULL"),
+        ),
+    )
+
+
 class CustomerOrder(Base):
     """Import-history record for one customer order file. Mirrors
     `DeliveryImport`: purely additive history -- there is no active/
@@ -698,6 +737,14 @@ class CustomerOrder(Base):
     )
     row_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     error_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    # Which customer this order belongs to -- resolved from the filename's
+    # Customer Code for WhatsApp uploads (see
+    # `document_processor.detector._classify_customer_order`); left NULL for
+    # Gmail/manual uploads exactly as before this column existed, since
+    # neither of those channels identifies a customer.
+    customer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("customers.id"), default=None
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(default=None)
 
@@ -716,6 +763,7 @@ class CustomerOrder(Base):
             postgresql_where=text("status IN ('COMPLETED', 'COMPLETED_WITH_ERRORS')"),
         ),
         Index("ix_customer_orders_content_hash", "content_hash"),
+        Index("ix_customer_orders_customer_id", "customer_id"),
     )
 
 

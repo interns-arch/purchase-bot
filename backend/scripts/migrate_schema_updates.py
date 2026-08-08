@@ -31,6 +31,17 @@ Covers:
    none -- so an existing database never ends up with an unidentifiable
    vendor once WhatsApp-sender-based identification is removed in favor of
    Vendor Codes (see `core/services/vendor_code_service.py`).
+6. `customer_orders`: adds `customer_id` (the `customers` table itself is
+   brand new, so `init_db()` below creates it directly). Existing rows are
+   left with `customer_id = NULL` -- they predate Customer Codes entirely
+   (Gmail/manual imports never identified a customer, and neither did any
+   WhatsApp Customer Order before this change), so there is nothing to
+   backfill them to.
+7. `vendor_selections`: adds the `(vendor_id, part_id)` composite index the
+   shared vendor-stock reservation ledger's SUM query filters on (see
+   `core/services/vendor_stock_service.py`) -- serves that lookup directly
+   instead of relying on a bitmap-AND of the two existing single-column
+   indexes.
 """
 
 from __future__ import annotations
@@ -270,6 +281,52 @@ def _migrate_vendors_columns() -> None:
         session.commit()
 
 
+def _migrate_customer_orders_columns() -> None:
+    inspector = inspect(engine)
+    if "customer_orders" not in inspector.get_table_names():
+        # Brand-new database -- `init_db()` creates the column directly.
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("customer_orders")}
+    existing_indexes = {idx["name"] for idx in inspector.get_indexes("customer_orders")}
+
+    with engine.begin() as connection:
+        if "customer_id" not in existing_columns:
+            print("Adding 'customer_orders.customer_id' column...")
+            connection.execute(
+                text("ALTER TABLE customer_orders ADD COLUMN customer_id INTEGER")
+            )
+        if "ix_customer_orders_customer_id" not in existing_indexes:
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_customer_orders_customer_id "
+                    "ON customer_orders (customer_id)"
+                )
+            )
+
+
+def _migrate_vendor_selections_vendor_part_index() -> None:
+    inspector = inspect(engine)
+    if "vendor_selections" not in inspector.get_table_names():
+        # Brand-new database -- `init_db()` creates the index directly.
+        return
+
+    existing_indexes = {idx["name"] for idx in inspector.get_indexes("vendor_selections")}
+    if "ix_vendor_selections_vendor_part" in existing_indexes:
+        print("'vendor_selections' already has the (vendor_id, part_id) index.")
+        return
+
+    print("Adding 'vendor_selections' (vendor_id, part_id) index...")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE INDEX ix_vendor_selections_vendor_part "
+                "ON vendor_selections (vendor_id, part_id)"
+            )
+        )
+    print("Added 'ix_vendor_selections_vendor_part'.")
+
+
 def _require_expected_database(*, allow_sqlite: bool) -> None:
     """Print the resolved target database (password hidden) and refuse to run
     against local SQLite unless explicitly allowed. This is the safety net for
@@ -297,9 +354,12 @@ def main() -> int:
     _migrate_vendor_delivery_imports_source_column()
     _migrate_incoming_documents_columns()
     _migrate_vendors_columns()
+    _migrate_customer_orders_columns()
+    _migrate_vendor_selections_vendor_part_index()
     # Creates any brand-new tables introduced alongside these migrations
-    # (e.g. vendor_invoice_imports, vendor_invoice_line_results) that don't
-    # need a hand-rolled step since `create_all` already handles new tables.
+    # (e.g. vendor_invoice_imports, vendor_invoice_line_results, customers)
+    # that don't need a hand-rolled step since `create_all` already handles
+    # new tables.
     init_db()
     return 0
 

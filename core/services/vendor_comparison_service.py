@@ -38,6 +38,7 @@ from core.services.inventory_import_service import (
     MasterInventoryVendorEntry,
     get_master_inventory,
 )
+from core.services import vendor_stock_service
 
 AVAILABLE = "Available"
 PARTIAL = "Partial"
@@ -104,6 +105,9 @@ class VendorComparisonRow:
     vendor_part_number: str | None
     part_description: str | None
     brand: str | None
+    # REMAINING quantity: raw imported stock minus every OTHER customer
+    # order's reservation (see `vendor_stock_service.remaining_quantity`) --
+    # this is the number that's actually safe to allocate or display.
     vendor_available_quantity: Decimal | None
     mrp: Decimal | None
     sale_price: Decimal | None
@@ -113,6 +117,12 @@ class VendorComparisonRow:
     order_item_id: int | None = None
     vendor_id: int | None = None
     is_own_stock: bool = False
+    # RAW imported quantity (never reduced by other orders' reservations) --
+    # used only so the automatic engine's greedy "biggest vendor first"
+    # ordering (`combination.py`, `_allocate_own_stock_first`) stays a stable
+    # ranking by real capacity instead of reshuffling every time another
+    # customer's order consumes some of a vendor's remaining stock.
+    vendor_raw_available_quantity: Decimal | None = None
 
 
 @dataclass
@@ -164,11 +174,24 @@ def compare_vendors(
     part are sorted with the best-stocked vendor first so the Purchase Team
     can compare at a glance.
 
+    `vendor_available_quantity` is each vendor's REMAINING quantity --
+    raw imported stock minus whatever is already reserved by every OTHER
+    customer order's `VendorSelection` for that same vendor+part (see
+    `vendor_stock_service.remaining_quantity`), clamped at 0 for display.
+    This is the single choke point Automatic Vendor Selection
+    (`rules/engine.py`) and every export/report read from, so fixing it here
+    means neither of those needs its own separate double-allocation check to
+    stay correct.
+
     `id_column`, when given, names a column in `input_rows` holding the
     originating `CustomerOrderItem.id` (as a string) -- passed through as
     `VendorComparisonRow.order_item_id` so a later Vendor Selection step can
-    tie a chosen offer back to the exact order line. CLI callers (which have
-    no such row identity) simply omit it and get `order_item_id=None`.
+    tie a chosen offer back to the exact order line, and so THIS row's own
+    existing reservation (if any) is excluded from its own "already
+    reserved" figure. CLI callers (which have no such row identity) simply
+    omit it and get `order_item_id=None` -- their remaining-quantity figure
+    then reflects every reservation in the system, since there's no "this
+    line's own row" to exclude.
     """
     offer_index = {
         part_row.canonical_part_number: part_row
@@ -207,12 +230,38 @@ def compare_vendors(
 
         result.summary.matched_items += 1
 
+        # The AMOUNT reported/allocated per vendor is remaining (raw imported
+        # minus what every OTHER customer order already reserved) -- this is
+        # what closes the double-allocation gap. The SORT ORDER stays keyed
+        # on raw imported quantity, unchanged from before this fix: which
+        # vendor counts as "best-stocked" is the vendor's real total
+        # capacity, a stable ranking that doesn't reshuffle line-to-line as
+        # other customers' orders consume stock. A vendor whose remaining
+        # has been drawn down to 0 still sorts in its usual place but
+        # contributes nothing (`combination.py` already skips any offer with
+        # no remaining quantity), so this never causes a fully-consumed
+        # vendor to be picked over one that still has stock.
+        remaining_by_vendor: dict[int, Decimal] = {
+            offer.vendor_id: max(
+                vendor_stock_service.remaining_quantity(
+                    offer.vendor_id,
+                    part_row.part_id,
+                    offer.quantity_available,
+                    session,
+                    exclude_order_item_id=order_item_id,
+                ),
+                Decimal(0),
+            )
+            for offer in part_row.vendors
+        }
+
         ordered_offers = sorted(
             part_row.vendors,
             key=lambda offer: (-offer.quantity_available, offer.vendor_name.lower()),
         )
 
         for offer in ordered_offers:
+            remaining = remaining_by_vendor[offer.vendor_id]
             result.rows.append(
                 VendorComparisonRow(
                     customer_part_number=raw_part_number,
@@ -224,13 +273,12 @@ def compare_vendors(
                         part_row.part_description, offer
                     ),
                     brand=part_row.brand,
-                    vendor_available_quantity=offer.quantity_available,
+                    vendor_available_quantity=remaining,
+                    vendor_raw_available_quantity=offer.quantity_available,
                     mrp=_resolve_mrp(offer),
                     sale_price=_resolve_sale_price(offer),
                     discount=_resolve_discount(offer),
-                    stock_status=_stock_status(
-                        offer.quantity_available, requested_quantity
-                    ),
+                    stock_status=_stock_status(remaining, requested_quantity),
                     inventory_file=offer.inventory_file,
                     order_item_id=order_item_id,
                     is_own_stock=offer.is_own_stock,

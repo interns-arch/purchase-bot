@@ -10,9 +10,15 @@ both Vendor Inventory and Customer Order files can now arrive over WhatsApp,
 a file is only imported after the sender has first sent a text command
 (`Vendor` / `Customer` -- see `commands.py`). The command is remembered
 per-number (`command_store`), used to pick which existing import workflow to
-run, and cleared once that file has been processed. This module only routes;
-it never reimplements any import logic -- the Vendor Inventory and Customer
-Order imports are reached through the unchanged `process_document`."""
+run. Non-persistent commands (Vendor, Invoice) are cleared once that one file
+has been processed, so the next file requires a fresh command; the
+persistent `Customer` command (see `WhatsAppCommand.persistent`) is left
+active instead, so multiple Customer Order files sent one after another are
+each routed and independently attributed to their own customer without
+resending "Customer" before every file -- see
+`document_processor.detector._classify_customer_order`. This module only
+routes; it never reimplements any import logic -- the Vendor Inventory and
+Customer Order imports are reached through the unchanged `process_document`."""
 
 from __future__ import annotations
 
@@ -96,12 +102,26 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     try:
         _download_and_process(message, command)
     finally:
-        # Requirement 4: clear the stored command once the file has been
-        # processed -- whether it succeeded or failed -- so the next file
-        # requires a fresh command.
-        with get_session() as session:
-            command_store.clear_command(message.sender, session)
-        logger.info("Cleared pending WhatsApp command for %s after processing.", message.sender)
+        if command.persistent:
+            # Multiple Customer Order files, one after another, must all
+            # route the same way without resending "Customer" -- each file
+            # still identifies its own customer independently from its
+            # filename (see detector._classify_customer_order), so leaving
+            # the command active never merges files into one order. Only
+            # cleared by the sender switching to a different command
+            # (`set_command` overwrites the pending row in place).
+            logger.info(
+                "Pending WhatsApp command '%s' for %s left active for additional files.",
+                command.key,
+                message.sender,
+            )
+        else:
+            # Requirement 4: clear the stored command once the file has been
+            # processed -- whether it succeeded or failed -- so the next file
+            # requires a fresh command.
+            with get_session() as session:
+                command_store.clear_command(message.sender, session)
+            logger.info("Cleared pending WhatsApp command for %s after processing.", message.sender)
 
 
 def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCommand) -> None:

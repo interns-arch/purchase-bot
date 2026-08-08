@@ -39,7 +39,9 @@ from backend.app.integrations.google_sheets.sync_service import sync_vendor_inve
 from backend.app.services.document_processor.detector import Classification
 from core.logging_setup import get_logger
 from core.models import ImportStatus
+from core.services import customer_code_service
 from core.services import customer_order_service as order_service
+from core.services import customer_service
 from core.services import inventory_import_service as import_service
 from core.services import vendor_code_service
 from core.services import vendor_delivery_service
@@ -83,6 +85,22 @@ class UnknownVendorCodeError(Exception):
         )
 
 
+class UnknownCustomerCodeError(Exception):
+    """Raised when a filename carries a customer-code-shaped prefix (e.g.
+    "AB_CO") that doesn't match any registered customer. Deliberately just a
+    plain exception -- mirrors `UnknownVendorCodeError` exactly, so
+    `processor.py`'s existing catch-all `except Exception` already marks the
+    document FAILED with this message instead of silently assigning the
+    order to the wrong customer."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(
+            f"Customer code '{code}' is not registered. Ask your team for the correct "
+            "code, or resend without a code prefix if this is a new customer's first order."
+        )
+
+
 @dataclass
 class DispatchResult:
     row_count: int = 0
@@ -92,6 +110,8 @@ class DispatchResult:
     vendor_name: str | None = None
     inventory_import_id: int | None = None
     customer_order_id: int | None = None
+    customer_id: int | None = None
+    customer_name: str | None = None
     delivery_import_id: int | None = None
     invoice_verification_id: int | None = None
     is_duplicate: bool = False
@@ -185,16 +205,66 @@ def _dispatch_inventory(
     )
 
 
-def _dispatch_customer_order(file_path: Path, session: Session) -> DispatchResult:
+def _customer_name_from_filename(filename: str) -> str:
+    return Path(filename).stem.strip()
+
+
+def _onboard_new_customer(name: str, session: Session) -> tuple["Customer", str]:
+    """First-time onboarding: a customer's very first WhatsApp order file may
+    still be named with their real name/company (no code prefix yet).
+    Creates the customer and auto-generates + permanently stores its
+    Customer Code, mirroring `_onboard_new_vendor` exactly."""
+    customer = customer_service.create_customer(name, session)
+    code = customer_code_service.generate_customer_code(name, session)
+    customer.customer_code = code
+    session.flush()
+    logger.info("New customer onboarded: '%s' (id=%s, code=%s)", customer.name, customer.id, code)
+    return customer, code
+
+
+def _dispatch_customer_order(
+    file_path: Path, classification: Classification, session: Session
+) -> DispatchResult:
+    customer = None
+    onboarding_message: str | None = None
+
+    if classification.customer_id is not None:
+        customer = customer_service.get_customer(classification.customer_id, session)
+        if customer is None:
+            raise ValueError(f"Customer {classification.customer_id} does not exist.")
+    elif classification.customer_code is not None:
+        # A code-shaped prefix was found in the filename but didn't match any
+        # customer -- reject rather than silently misassigning the order.
+        raise UnknownCustomerCodeError(classification.customer_code)
+    elif classification.resolve_customer:
+        # WhatsApp Customer Order with no code-shaped prefix -- first-time
+        # onboarding by name, exactly like an unrecognized Vendor Inventory
+        # filename onboards a new vendor.
+        name = _customer_name_from_filename(file_path.name)
+        existing = customer_service.get_customer_by_name(name, session)
+        if existing is not None:
+            customer = existing
+        else:
+            customer, code = _onboard_new_customer(name, session)
+            onboarding_message = f"New customer '{customer.name}' onboarded with code {code}."
+    # else: Gmail/manual Customer Order -- customer identification was never
+    # attempted (see `Classification.resolve_customer`), so `customer` stays
+    # None exactly as before this feature existed.
+
     try:
-        result = order_service.run_customer_order_import(file_path, session)
+        result = order_service.run_customer_order_import(
+            file_path, session, customer_id=customer.id if customer is not None else None
+        )
     except order_service.DuplicateCustomerOrderFileError as exc:
         raise DocumentAlreadyProcessedError(exc.existing_order_id, str(exc)) from exc
 
     return DispatchResult(
         row_count=result.row_count,
         error_count=result.error_count,
+        message=onboarding_message,
         customer_order_id=result.order_id,
+        customer_id=customer.id if customer is not None else None,
+        customer_name=customer.name if customer is not None else None,
         core_status=result.status.value,
     )
 
@@ -234,7 +304,7 @@ def dispatch(file_path: Path, classification: Classification, session: Session) 
     if classification.document_type == IncomingDocumentType.VENDOR_INVENTORY:
         return _dispatch_inventory(file_path, classification, session)
     if classification.document_type == IncomingDocumentType.CUSTOMER_ORDER:
-        return _dispatch_customer_order(file_path, session)
+        return _dispatch_customer_order(file_path, classification, session)
     if classification.document_type == IncomingDocumentType.DELIVERY:
         return _dispatch_delivery(file_path, session)
     if classification.document_type == IncomingDocumentType.VENDOR_INVOICE:

@@ -25,6 +25,18 @@ class WhatsAppCommand:
     key: str  # canonical, lowercase -- what we persist (e.g. "vendor")
     label: str  # user-facing display (e.g. "Vendor")
     document_type: IncomingDocumentType  # which existing import workflow to run
+    # When True, `document_worker` leaves this command active in
+    # `command_store` after a file is processed instead of clearing it, so
+    # multiple files sent one after another (each its own separate WhatsApp
+    # message/customer) are all routed the same way without the sender having
+    # to resend the command before every file. Cleared only by the existing
+    # "sending a different command overwrites the pending one" mechanism
+    # (`command_store.set_command`) -- e.g. sending "Vendor" switches routing
+    # immediately, same as today. Only "customer" needs this: a Customer
+    # Order file already carries its own customer identity via its filename's
+    # Customer Code (see `document_processor.detector._classify_customer_order`),
+    # so consecutive files are never merged into one order.
+    persistent: bool = False
 
 
 # The extension point. Order here is the order shown in the instruction text.
@@ -32,7 +44,9 @@ _COMMANDS: dict[str, WhatsAppCommand] = {
     command.key: command
     for command in (
         WhatsAppCommand("vendor", "Vendor", IncomingDocumentType.VENDOR_INVENTORY),
-        WhatsAppCommand("customer", "Customer", IncomingDocumentType.CUSTOMER_ORDER),
+        WhatsAppCommand(
+            "customer", "Customer", IncomingDocumentType.CUSTOMER_ORDER, persistent=True
+        ),
         # Routes the next (PDF) file to the existing Vendor Invoice importer
         # (detector.classify honours this hint for WhatsApp; dispatcher sends it
         # to vendor_invoice_verification_service). "invoice"/"Invoice"/"INVOICE"
