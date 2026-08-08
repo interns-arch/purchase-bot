@@ -14,6 +14,8 @@ from typing import Any
 # The script searches for these possible header names.
 PART_NUMBER_HEADERS = {
     "partno",
+    "PartNo",
+    "Part Num",
     "partnumber",
     "partnum",
     "partcode",
@@ -32,6 +34,7 @@ QUANTITY_HEADERS = {
     "stockqty",
     "orderedquantity",
     "orderedqty",
+    "Current Stock",
 }
 
 # --- Vendor Inventory-specific header aliases -------------------------------
@@ -43,7 +46,9 @@ QUANTITY_HEADERS = {
 INVENTORY_PART_NUMBER_HEADERS = PART_NUMBER_HEADERS | {
     "partnumber",  # Part Number / Part_Number
     "partnum",     # Part Num
-    "partno",      # PartNo / Part No
+    "partno", 
+    "Part Num", 
+    "PartNo",    # PartNo / Part No
 }
 
 # Explicit, curated quantity aliases -- NEVER derived from arbitrary numeric
@@ -63,6 +68,7 @@ INVENTORY_QUANTITY_HEADERS = {
     "currentstockqty",     # Current Stock Qty
     "partquantity",        # "part Quantity" (e.g. DELHI.csv)
     "partqty",
+    "Current Stock",  # Current Stock (capitalized)
 }
 
 

@@ -45,7 +45,7 @@ def resolve_part(vendor_id: int, raw_part_number: str, session: Session) -> Part
         session.add(part)
         session.flush()  # assign part.id before the alias references it
 
-    alias = PartAlias(
+    alias = Part(
         part_id=part.id,
         vendor_id=vendor_id,
         vendor_part_number=raw_part_number,

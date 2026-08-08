@@ -27,6 +27,8 @@ PART_NUMBER_HEADERS = {
     "itemcode",
     "itemnumber",
     "sku",
+    "Part Num",
+    "PartNo",
     "productcode",
 }
 

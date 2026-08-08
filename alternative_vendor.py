@@ -29,6 +29,9 @@ OUTPUT_FILE = OUTPUT_DIR / "alternative_vendor_report.xlsx"
 
 HEADERS = [
     "Part Number",
+    "Part Num",
+    "Part Description",
+    "Current Stock",
     "Pending Qty",
     "Alternative Vendor",
     "Available Quantity",
