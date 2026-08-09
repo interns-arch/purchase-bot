@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
@@ -539,7 +540,7 @@ export function DeliveryTrackingPage() {
                     <td>
                       <StatusPill status={row.status} />
                     </td>
-                    <td>{new Date(row.created_at).toLocaleString()}</td>
+                    <td>{formatDateTime(row.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

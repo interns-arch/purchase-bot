@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Layout } from "../components/Layout";
@@ -252,7 +253,7 @@ export function VendorComparisonPage() {
             >
               {orders.map((order) => (
                 <option key={order.id} value={order.id}>
-                  {order.file_name} — {new Date(order.created_at).toLocaleString()}
+                  {order.file_name} — {formatDateTime(order.created_at)}
                 </option>
               ))}
             </select>

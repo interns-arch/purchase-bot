@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useEffect, useState } from "react";
 import { Layout } from "../components/Layout";
 import { Modal } from "../components/Modal";
@@ -153,7 +154,7 @@ export function PurchaseOrdersPage() {
                     <td>
                       <StatusPill status={po.status} />
                     </td>
-                    <td>{new Date(po.created_at).toLocaleString()}</td>
+                    <td>{formatDateTime(po.created_at)}</td>
                     <td className="data-table__actions">
                       <button
                         type="button"

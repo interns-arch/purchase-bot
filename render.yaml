@@ -43,3 +43,22 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
+      # --- Document understanding (Architecture V2) ---------------------
+      # backend/.env is git-ignored and is NEVER deployed, so these MUST be
+      # set here / in the Render dashboard or production silently runs with
+      # NullProvider (deterministic-only, no Gemma call).
+      # Leave AI_PROVIDER=null to keep the LLM layer completely inert.
+      - key: AI_PROVIDER
+        value: "null"
+      - key: AI_MODEL
+        value: google/gemma-4-31b-it
+      # Set in the dashboard -- a real credential, never committed.
+      - key: NVIDIA_API_KEY
+        sync: false
+      # Observation only: logs what the model WOULD have extracted from a
+      # document the deterministic parser failed on. Writes nothing.
+      - key: AI_SHADOW_MODE
+        value: "false"
+      # Real model-assisted imports. Keep false until Phase 2C.
+      - key: AI_FALLBACK_ENABLED
+        value: "false"

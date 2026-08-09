@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout } from "../components/Layout";
 import { Modal } from "../components/Modal";
@@ -292,7 +293,7 @@ export function VendorInventoryPage() {
                     <td>
                       <StatusPill status={row.status} />
                     </td>
-                    <td>{new Date(row.created_at).toLocaleString()}</td>
+                    <td>{formatDateTime(row.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

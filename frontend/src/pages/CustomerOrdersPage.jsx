@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
@@ -324,7 +325,7 @@ export function CustomerOrdersPage() {
                     <td>
                       <StatusPill status={row.status} />
                     </td>
-                    <td>{new Date(row.created_at).toLocaleString()}</td>
+                    <td>{formatDateTime(row.created_at)}</td>
                     <td className="data-table__actions">
                       <button
                         type="button"

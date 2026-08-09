@@ -34,7 +34,6 @@ QUANTITY_HEADERS = {
     "stockqty",
     "orderedquantity",
     "orderedqty",
-    "Current Stock",
 }
 
 # --- Vendor Inventory-specific header aliases -------------------------------
@@ -68,8 +67,19 @@ INVENTORY_QUANTITY_HEADERS = {
     "currentstockqty",     # Current Stock Qty
     "partquantity",        # "part Quantity" (e.g. DELHI.csv)
     "partqty",
-    "Current Stock",  # Current Stock (capitalized)
+    # Tally / Indian accounting exports (e.g. MAHINDRA.xlsx) call on-hand
+    # stock "Closing Stock". These are unambiguous on-hand quantities -- note
+    # "Closing Value"/"Closing Amount" are deliberately NOT here, since those
+    # are money, and money must never become a quantity.
+    "closingstock",        # Closing Stock
+    "closingqty",          # Closing Qty
+    "closingquantity",     # Closing Quantity
+    "closingbalance",      # Closing Balance
+    "closingstockqty",     # Closing Stock Qty
 }
+# NOTE: every entry above must already be in `normalise_header` form
+# (lowercase, alphanumeric only). An entry like "Current Stock" can never
+# match, because headers are normalised before lookup.
 
 
 VENDOR_NAME_HEADERS = {

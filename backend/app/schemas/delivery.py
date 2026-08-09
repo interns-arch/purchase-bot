@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from pydantic import BaseModel
+from backend.app.schemas.types import IstDateTime
 
 
 class DeliveryImportResultOut(BaseModel):
@@ -20,8 +21,8 @@ class DeliveryImportHistoryOut(BaseModel):
     status: str
     row_count: int
     error_count: int
-    created_at: datetime
-    completed_at: datetime | None = None
+    created_at: IstDateTime
+    completed_at: IstDateTime | None = None
 
 
 class DeliveryImportErrorOut(BaseModel):

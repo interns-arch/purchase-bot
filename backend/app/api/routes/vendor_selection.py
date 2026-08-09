@@ -9,7 +9,6 @@ business rules live here."""
 from __future__ import annotations
 
 import io
-from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -22,6 +21,7 @@ from backend.app.database.session import get_db
 from backend.app.integrations.gmail.mailer import send_email
 from backend.app.schemas.vendor_selection import VendorSelectionIn, VendorSelectionOut
 from core.logging_setup import get_logger
+from core.time_utils import now_ist
 from core.models import VendorSelection
 from core.services import customer_order_service, purchase_order_generation_service, vendor_selection_service
 from core.services.rules.engine import run_automatic_vendor_selection
@@ -125,7 +125,7 @@ def _send_allocation_report_email(order_id: int, db: Session) -> None:
     body = (
         f"Customer Order Number: {order_id}\n"
         f"Order File: {order.file_name if order else '-'}\n"
-        f"Date: {date.today().isoformat()}\n"
+        f"Date: {now_ist().date().isoformat()}\n"
         f"Total Vendors Selected: {total_vendors_selected}\n"
         f"Total Parts: {total_parts}\n\n"
         f"Summary (vendor -> total quantity allocated):\n{summary_lines or '  (none)'}\n"

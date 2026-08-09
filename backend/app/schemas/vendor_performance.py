@@ -5,6 +5,7 @@ from datetime import date, datetime
 from pydantic import BaseModel
 
 from backend.app.schemas.delivery_tracking import DeliveryTrackingRowOut
+from backend.app.schemas.types import IstDateTime
 
 
 class VendorPerformanceRowOut(BaseModel):
@@ -46,7 +47,7 @@ class VendorDetailSelectionOut(BaseModel):
     customer_order_file_name: str
     part_number: str
     quantity_selected: float
-    selected_at: datetime
+    selected_at: IstDateTime
 
 
 class VendorDetailDeliveryOut(BaseModel):

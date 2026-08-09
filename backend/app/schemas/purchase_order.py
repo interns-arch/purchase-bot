@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
+from backend.app.schemas.types import IstDateTime
 
 
 class PurchaseOrderOut(BaseModel):
@@ -14,8 +15,8 @@ class PurchaseOrderOut(BaseModel):
     vendor_code: str | None
     customer_order_id: int
     status: str
-    created_at: datetime
-    emailed_at: datetime | None = None
+    created_at: IstDateTime
+    emailed_at: IstDateTime | None = None
 
 
 class PurchaseOrderLineOut(BaseModel):

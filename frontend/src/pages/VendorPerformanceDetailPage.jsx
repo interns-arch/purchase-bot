@@ -1,3 +1,4 @@
+import { formatDateTime, formatDate } from "../utils/datetime";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Layout } from "../components/Layout";
@@ -117,7 +118,7 @@ export function VendorPerformanceDetailPage() {
                         <td>{selection.customer_order_file_name}</td>
                         <td>{selection.part_number}</td>
                         <td>{selection.quantity_selected}</td>
-                        <td>{new Date(selection.selected_at).toLocaleString()}</td>
+                        <td>{formatDateTime(selection.selected_at)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -148,7 +149,7 @@ export function VendorPerformanceDetailPage() {
                       <tr key={`${delivery.part_number}-${index}`}>
                         <td>{delivery.part_number}</td>
                         <td>{delivery.quantity_delivered}</td>
-                        <td>{delivery.delivery_date ? new Date(delivery.delivery_date).toLocaleDateString() : "—"}</td>
+                        <td>{delivery.delivery_date ? formatDate(delivery.delivery_date) : "—"}</td>
                         <td>{delivery.file_name}</td>
                       </tr>
                     ))}

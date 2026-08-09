@@ -25,6 +25,7 @@ from openpyxl.styles import Font
 from sqlalchemy.orm import Session
 
 from core.services import inventory_import_service, vendor_service
+from core.time_utils import now_ist
 
 WORKBOOK_FILENAME = "Vendor_Inventory.xlsx"
 XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -69,7 +70,8 @@ def build_workbook(session: Session) -> openpyxl.Workbook:
     workbook = openpyxl.Workbook()
     workbook.remove(workbook.active)  # drop the default blank sheet
 
-    synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # Business timezone is IST -- see core.time_utils (single source of truth).
+    synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
     used_titles: set[str] = set()
 
     vendors = vendor_service.list_vendors(session)

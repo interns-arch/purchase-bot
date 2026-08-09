@@ -23,6 +23,7 @@ from backend.app.integrations.google_sheets import status_service
 from backend.app.integrations.google_sheets.config import SHEETS_SCOPE, google_sheets_settings
 from backend.app.notifications import emitters as notifications
 from core.db import get_session
+from core.time_utils import now_ist
 from core.logging_setup import get_logger
 from core.services import inventory_import_service, vendor_service
 
@@ -107,7 +108,8 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
     spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
     worksheet = _get_or_create_worksheet(spreadsheet, vendor.name, len(_HEADERS))
 
-    synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # Business timezone is IST -- see core.time_utils.
+    synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
     values = [_HEADERS] + [
         [
             row.vendor_part_number,

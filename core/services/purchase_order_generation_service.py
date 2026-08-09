@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from core.ingestion.column_detector import decimal_to_string
 from core.logging_setup import get_logger
+from core.time_utils import now_ist
 from core.models import (
     CustomerOrder,
     Part,
@@ -175,7 +176,7 @@ def to_export_workbook(
     sheet.append([f"Phone: {company_phone}  Email: {company_email}"])
     sheet.append([f"Vendor: {po.vendor.name} ({po.vendor.vendor_code or '-'})"])
     sheet.append([f"Customer Order Reference: {po.customer_order_id}"])
-    sheet.append([f"Date: {date.today().isoformat()}"])
+    sheet.append([f"Date: {now_ist().date().isoformat()}"])
     sheet.append([])
 
     header_row_index = sheet.max_row + 1
@@ -192,7 +193,7 @@ def to_export_workbook(
                 line.part_number,
                 line.vendor_part_number,
                 decimal_to_string(line.quantity),
-                date.today().isoformat(),
+                now_ist().date().isoformat(),
             ]
         )
 
@@ -254,7 +255,7 @@ def _email_purchase_order(
         f"Purchase Order: {po.po_number}\n"
         f"Vendor: {po.vendor.name} ({po.vendor.vendor_code or '-'})\n"
         f"Customer Order Reference: {order.file_name if order else po.customer_order_id}\n"
-        f"Date: {date.today().isoformat()}\n"
+        f"Date: {now_ist().date().isoformat()}\n"
     )
 
     try:

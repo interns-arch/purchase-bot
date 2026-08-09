@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
@@ -54,7 +55,7 @@ export function DashboardPage() {
             <StatCard
               label="Last Import Time"
               value={
-                summary.last_import_at ? new Date(summary.last_import_at).toLocaleString() : "—"
+                summary.last_import_at ? formatDateTime(summary.last_import_at) : "—"
               }
             />
           </div>
@@ -107,7 +108,7 @@ export function DashboardPage() {
                         <td>
                           <StatusPill status={entry.status} />
                         </td>
-                        <td>{new Date(entry.created_at).toLocaleString()}</td>
+                        <td>{formatDateTime(entry.created_at)}</td>
                       </tr>
                     ))}
                   </tbody>

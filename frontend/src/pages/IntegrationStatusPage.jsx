@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
@@ -26,7 +27,7 @@ function StatusCard({ label, status, hint }) {
 }
 
 function formatWhen(value) {
-  return value ? new Date(value).toLocaleString() : "Never";
+  return value ? formatDateTime(value) : "Never";
 }
 
 export function IntegrationStatusPage() {

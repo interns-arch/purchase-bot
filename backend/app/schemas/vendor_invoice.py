@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
+from backend.app.schemas.types import IstDateTime
 
 
 class VendorInvoiceUploadResultOut(BaseModel):
@@ -27,8 +28,8 @@ class VendorInvoiceImportOut(BaseModel):
     row_count: int
     error_count: int
     error_message: str | None
-    created_at: datetime
-    completed_at: datetime | None = None
+    created_at: IstDateTime
+    completed_at: IstDateTime | None = None
 
 
 class VendorInvoiceLineResultOut(BaseModel):
