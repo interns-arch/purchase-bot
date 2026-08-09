@@ -25,19 +25,37 @@ def _build_provider() -> DocumentUnderstandingProvider:
     if name in ("", "null", "none", "off", "disabled"):
         return NullProvider()
 
-    if not settings.ai_api_key and name != "ollama":
-        logger.warning(
-            "AI_PROVIDER=%s but AI_API_KEY is not set -- falling back to NullProvider "
-            "(deterministic behaviour unchanged).",
-            name,
-        )
-        return NullProvider()
+    if name == "nvidia":
+        # A provider-specific key wins over the generic one, so several
+        # providers can be configured side by side.
+        api_key = settings.nvidia_api_key or settings.ai_api_key
+        if not api_key:
+            logger.warning(
+                "AI_PROVIDER=nvidia but neither NVIDIA_API_KEY nor AI_API_KEY is set -- "
+                "falling back to NullProvider (deterministic behaviour unchanged)."
+            )
+            return NullProvider()
+        try:
+            # Imported lazily so this module never enters the import graph
+            # unless the provider is actually selected.
+            from backend.app.ai.providers.nvidia import NvidiaDocumentProvider
 
-    # Real providers are added in Phase 3+. Importing them lazily HERE keeps
-    # every vendor SDK out of the import graph until it is actually selected.
+            return NvidiaDocumentProvider(
+                api_key,
+                model=settings.ai_model,
+                base_url=settings.nvidia_base_url,
+                timeout_seconds=settings.ai_timeout_seconds,
+                max_tokens=settings.nvidia_max_tokens,
+            )
+        except Exception:  # noqa: BLE001 -- provider construction must never break boot
+            logger.exception(
+                "Could not construct the NVIDIA provider -- falling back to NullProvider."
+            )
+            return NullProvider()
+
     logger.warning(
-        "AI_PROVIDER=%s is not implemented yet (Phase 1 is scaffolding only) -- "
-        "using NullProvider; deterministic behaviour unchanged.",
+        "AI_PROVIDER=%s is not implemented -- using NullProvider; "
+        "deterministic behaviour unchanged.",
         name,
     )
     return NullProvider()
@@ -67,3 +85,11 @@ def document_fallback_enabled() -> bool:
 
 def intent_enabled() -> bool:
     return bool(settings.ai_intent_enabled) and get_provider().name != "null"
+
+
+def shadow_mode_enabled() -> bool:
+    """Observation-only analysis of documents the deterministic parser failed
+    on. Independent of `document_fallback_enabled()` on purpose: shadow mode
+    may run while real LLM imports stay off, and it can never write anything
+    (see `backend.app.ai.shadow`)."""
+    return bool(settings.ai_shadow_mode) and get_provider().name != "null"

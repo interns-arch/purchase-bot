@@ -89,10 +89,26 @@ class Settings:
     # AI_FALLBACK_ENABLED is true (Phase 3+). API keys are read from the
     # environment only and are never logged.
     ai_provider: str = os.environ.get("AI_PROVIDER", "null")
+    # Generic key; each provider may also read its own dedicated variable
+    # (NVIDIA_API_KEY below) which takes precedence for that provider.
     ai_api_key: str | None = os.environ.get("AI_API_KEY") or None
     ai_model: str | None = os.environ.get("AI_MODEL") or None
+
+    # NVIDIA-hosted models (OpenAI-compatible API). The key is read ONLY from
+    # the environment and is never logged. AI_MODEL overrides the default
+    # model id; NVIDIA_BASE_URL is only needed for a non-standard endpoint.
+    nvidia_api_key: str | None = os.environ.get("NVIDIA_API_KEY") or None
+    nvidia_base_url: str | None = os.environ.get("NVIDIA_BASE_URL") or None
+    nvidia_max_tokens: int = int(os.environ.get("NVIDIA_MAX_TOKENS", "8192"))
     ai_fallback_enabled: bool = (
         os.environ.get("AI_FALLBACK_ENABLED", "false").strip().lower() == "true"
+    )
+    # SHADOW MODE is deliberately a SEPARATE switch from ai_fallback_enabled:
+    # it lets the model read documents the deterministic parser failed on and
+    # logs what it *would* have extracted, while writing nothing. Turning this
+    # on can never change an import outcome or a database row.
+    ai_shadow_mode: bool = (
+        os.environ.get("AI_SHADOW_MODE", "false").strip().lower() == "true"
     )
     ai_intent_enabled: bool = (
         os.environ.get("AI_INTENT_ENABLED", "false").strip().lower() == "true"

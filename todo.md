@@ -171,3 +171,7 @@ Report:
 4. What was live-tested.
 5. What could not be live-tested.
 6. Confirm that Gmail, Google Sheets, Vendor Selection, and Vendor Inventory workbook generation were not changed.
+
+
+
+Use NVIDIA's google/gemma-4-31b-it model through the NVIDIA API. Keep the API key in .env as NVIDIA_API_KEY, not hardcoded in source code. First create and test a simple Python API call to confirm the connection. Do not modify the existing application flow yet.

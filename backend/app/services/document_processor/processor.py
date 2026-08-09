@@ -10,6 +10,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from backend.app.ai import shadow
 from backend.app.documents import service as documents_service
 from backend.app.documents.models import (
     DocumentSource,
@@ -190,6 +191,15 @@ def process_document(
         documents_service.mark_failed(
             document, result.message or "Import failed -- no valid rows.", session
         )
+        # SHADOW MODE (observation only): the deterministic parser has already
+        # failed and the document is already marked FAILED above -- this call
+        # cannot change that. It takes no Session, writes nothing, and its
+        # return value is deliberately ignored; it only logs what the model
+        # would have extracted. Runs here because the nested transaction has
+        # closed but the file has not been moved yet. No-ops unless
+        # AI_SHADOW_MODE=true with a real provider configured.
+        if classification.document_type == IncomingDocumentType.VENDOR_INVENTORY:
+            shadow.observe_failed_inventory(file_path, deterministic_reason=result.message)
         staging.mark_failed_location(file_path)
     elif result.core_status == "NEEDS_REVIEW":
         documents_service.mark_needs_review(document, session, result.message)
