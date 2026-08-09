@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from core.hashing import sha256_of_file
 from core.ingestion.column_detector import (
     INVENTORY_PART_NUMBER_HEADERS,
+    INVENTORY_QUANTITY_HEADERS,
     MRP_HEADERS,
     PRICE_HEADERS,
     detect_header_row,
@@ -186,7 +187,9 @@ def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, st
     else:
         grid = read_excel_grid(file_path)
 
-    header_index = detect_header_row(grid, INVENTORY_PART_NUMBER_HEADERS)
+    header_index = detect_header_row(
+        grid, INVENTORY_PART_NUMBER_HEADERS, quantity_headers=INVENTORY_QUANTITY_HEADERS
+    )
     if header_index is None:
         raise ValueError(
             f"Part-number column not found in '{file_path.name}'. "

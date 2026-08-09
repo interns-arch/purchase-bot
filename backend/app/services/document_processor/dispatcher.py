@@ -209,12 +209,13 @@ def _dispatch_inventory(
         )
 
     if result.status != ImportStatus.FAILED:
-        # Never allowed to fail this import -- see
-        # `sync_vendor_inventory_to_sheet_safe`'s own docstring/try-except.
-        # No-ops entirely when ENABLE_GOOGLE_SHEETS_SYNC is false. Covers
-        # both manual upload and WhatsApp inventory import, since both
-        # funnel through this one function.
-        sync_vendor_inventory_to_sheet_safe(vendor.id, session)
+        # Google Sheets sync deliberately does NOT run here any more: this
+        # function executes inside `processor.py`'s `session.begin_nested()`,
+        # and a network call there holds a DB transaction open for the whole
+        # request (measured at ~20s per import while the OAuth token lacks the
+        # spreadsheets scope). It is now triggered by `processor.py` AFTER the
+        # transaction closes -- same behaviour, bounded, transaction-safe.
+        pass
 
     combined_message = (
         f"{onboarding_message} {result.message}" if onboarding_message and result.message else (

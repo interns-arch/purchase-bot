@@ -273,6 +273,7 @@ def detect_header_row(
     grid: list[list[str]],
     required_headers: set[str] = PART_NUMBER_HEADERS,
     *,
+    quantity_headers: set[str] | None = None,
     max_scan_rows: int = 100,
 ) -> int | None:
     """Locate the line-item header row in a raw grid that may have metadata
@@ -288,12 +289,29 @@ def detect_header_row(
     single-section format keeps working. Returns None if no such row is found
     within `max_scan_rows` (the caller treats that as "part-number column not
     found")."""
+    fallback: int | None = None
     for index, row in enumerate(grid[:max_scan_rows]):
         normalised = [normalise_header(cell) for cell in row]
         non_empty = [value for value in normalised if value]
-        if len(non_empty) >= 2 and any(value in required_headers for value in normalised):
+        if len(non_empty) < 2 or not any(value in required_headers for value in normalised):
+            continue
+
+        if quantity_headers is None:
             return index
-    return None
+
+        # A REAL line-item header carries both required columns. A metadata
+        # row can accidentally contain a part-number alias -- e.g. the label
+        # "SKU:" in a purchase-order header block normalises to "sku" -- so
+        # matching on the part column alone would stop on the metadata block
+        # and never reach the real table. Prefer a row with BOTH; remember the
+        # first part-only row and fall back to it if no better row exists, so
+        # single-column-alias files behave exactly as before.
+        if any(value in quantity_headers for value in normalised):
+            return index
+        if fallback is None:
+            fallback = index
+
+    return fallback
 
 
 def find_inventory_columns(headers: list[str], file_name: str) -> tuple[str, str]:

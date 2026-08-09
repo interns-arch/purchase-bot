@@ -11,6 +11,9 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from backend.app.ai import shadow
+from backend.app.integrations.google_sheets.sync_service import (
+    sync_vendor_inventory_to_sheet_safe,
+)
 from backend.app.documents import service as documents_service
 from backend.app.documents.models import (
     DocumentSource,
@@ -215,6 +218,26 @@ def process_document(
             invoice_verification_id=result.invoice_verification_id,
         )
         staging.mark_processed_location(file_path)
+
+    # Google Sheets sync runs HERE, after the nested transaction has closed and
+    # the import has reached its terminal state -- never inside it. An optional
+    # integration must not hold a DB transaction open across a network call, and
+    # its failure must not change the import outcome (the function catches
+    # everything itself and records the failure on the integration status row).
+    if (
+        classification.document_type == IncomingDocumentType.VENDOR_INVENTORY
+        and result.vendor_id is not None
+        and result.core_status != "FAILED"
+    ):
+        try:
+            sync_vendor_inventory_to_sheet_safe(result.vendor_id, session)
+        except Exception:  # noqa: BLE001 -- an optional integration must never
+            # turn an already-committed successful import into a failure.
+            logger.exception(
+                "Google Sheets sync raised for vendor %s -- the inventory import is "
+                "already complete and is unaffected.",
+                result.vendor_id,
+            )
 
     return ProcessingResult(
         document_id=document.id,

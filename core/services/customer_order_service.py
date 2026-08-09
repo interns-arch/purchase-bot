@@ -89,7 +89,9 @@ def _parse_line_items(file_path: Path) -> tuple[list[str], list[dict[str, str]]]
     `... PART NUMBER ...` header, then the item rows). The item table ends at
     the first fully-blank row (a section boundary)."""
     grid = _read_grid(file_path)
-    header_index = detect_header_row(grid, PART_NUMBER_HEADERS)
+    header_index = detect_header_row(
+        grid, PART_NUMBER_HEADERS, quantity_headers=QUANTITY_HEADERS
+    )
     if header_index is None:
         raise ValueError(
             f"Part-number column not found in '{file_path.name}'. "

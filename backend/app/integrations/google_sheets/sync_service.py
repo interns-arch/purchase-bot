@@ -15,6 +15,8 @@ outage never fails the inventory import itself."""
 
 from __future__ import annotations
 
+import os
+
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -30,6 +32,11 @@ from core.services import inventory_import_service, vendor_service
 logger = get_logger(__name__)
 
 _HEADERS = ["Vendor Part Number", "Description", "Quantity Available", "Price", "MRP", "Last Updated"]
+
+# Bounded HTTP timeouts for the Sheets API (seconds). Overridable via env for
+# a slow network, but never unbounded.
+SHEETS_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("GOOGLE_SHEETS_CONNECT_TIMEOUT", "10"))
+SHEETS_READ_TIMEOUT_SECONDS = float(os.environ.get("GOOGLE_SHEETS_READ_TIMEOUT", "30"))
 
 
 class GoogleSheetsNotConfiguredError(Exception):
@@ -55,7 +62,14 @@ def _build_client():
         token_uri="https://oauth2.googleapis.com/token",
         scopes=[SHEETS_SCOPE],
     )
-    return gspread.authorize(credentials)
+    client = gspread.authorize(credentials)
+    # Finite (connect, read) timeout so an unreachable or hanging Sheets API can
+    # never stall the caller indefinitely. This sync already runs AFTER the
+    # inventory transaction has closed (see document_processor/processor.py), so
+    # a slow Sheets call cannot hold a DB transaction open -- this bounds the
+    # remaining wall-clock cost as well.
+    client.set_timeout((SHEETS_CONNECT_TIMEOUT_SECONDS, SHEETS_READ_TIMEOUT_SECONDS))
+    return client
 
 
 def _get_or_create_worksheet(spreadsheet, title: str, num_cols: int):

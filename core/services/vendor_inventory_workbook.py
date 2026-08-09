@@ -76,12 +76,21 @@ def build_workbook(session: Session) -> openpyxl.Workbook:
 
     vendors = vendor_service.list_vendors(session)
     for vendor in vendors:
+        rows = inventory_import_service.get_active_inventory(vendor.id, session)
+        if not rows:
+            # A vendor with no CURRENT (active) inventory gets no worksheet at
+            # all -- rather than an empty, obsolete tab that looks like real
+            # data. The database is the source of truth, so when a vendor's
+            # inventory stops being current its sheet simply disappears from
+            # the next generated workbook.
+            continue
+
         sheet = workbook.create_sheet(title=_sheet_title(vendor, used_titles))
         sheet.append(_HEADERS)
         for cell in sheet[1]:
             cell.font = Font(bold=True)
 
-        for row in inventory_import_service.get_active_inventory(vendor.id, session):
+        for row in rows:
             sheet.append(
                 [
                     row.vendor_part_number,
