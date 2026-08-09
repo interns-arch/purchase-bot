@@ -14,11 +14,18 @@ from collections.abc import Iterator
 
 from sqlalchemy.orm import Session
 
-from core.db import SessionLocal, init_db
+from core.db import SessionLocal
 
 
 def get_db() -> Iterator[Session]:
-    init_db()
+    # `init_db()` is deliberately NOT called here. It runs
+    # `Base.metadata.create_all`, which issues ~30 catalogue/reflection queries
+    # -- measured at 2.4-3.6s per request against hosted Postgres. Doing that on
+    # EVERY request added that cost to every endpoint (a `/api/notifications`
+    # poll does no database work of its own, yet took ~3s). Schema creation is a
+    # startup concern, so it now happens once in the FastAPI lifespan
+    # (`backend/app/main.py`); the CLI keeps its own `init_db()` via
+    # `core.db.get_session()`.
     db = SessionLocal()
     try:
         yield db

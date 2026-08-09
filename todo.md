@@ -174,3 +174,243 @@ Report:
 
 
 create a button on ui to clear all files from database
+
+VENDOR INVENTORY OUTPUT CONTRACT
+
+Vendor_Inventory.xlsx must remain a multi-sheet workbook.
+
+Each current vendor must have exactly one worksheet.
+
+The canonical vendor_code is the vendor identity and must be used consistently.
+
+Example:
+
+MA_CT -> MAHINDRA
+DE_CT -> DELHI
+BI_CT -> BIJVASAN
+
+The Excel workbook must contain:
+
+MA_CT
+DE_CT
+BI_CT
+...
+
+Each worksheet must contain ONLY that vendor's latest/current inventory.
+
+When a vendor uploads a new inventory:
+- replace that vendor's worksheet completely
+- preserve every unrelated vendor worksheet unchanged
+
+When a vendor has no current/valid inventory:
+- remove that vendor's worksheet completely
+- never leave an empty/stale worksheet
+
+Never create duplicate vendor worksheets.
+
+The database remains the source of truth.
+Never use the existing Excel workbook as the source of truth.
+
+FUTURE GOOGLE SHEETS COMPATIBILITY:
+
+The same vendor-inventory generation contract must be usable for Google Sheets later.
+
+When valid Google OAuth/refresh-token credentials are available, the Google Spreadsheet must mirror the same structure as Vendor_Inventory.xlsx:
+
+Database
+  -> vendor_code
+  -> vendor name
+  -> latest inventory
+  -> one tab per vendor
+
+Excel:
+  MA_CT
+  DE_CT
+  BI_CT
+
+Google Spreadsheet:
+  MA_CT
+  DE_CT
+  BI_CT
+
+Do not design Excel and Google Sheets as two different business workflows.
+
+Keep the workbook/spreadsheet generation logic based on the same DB source-of-truth and canonical vendor_code.
+
+For now:
+- Excel output is required and must work independently.
+- Google Sheets must remain optional and must not block inventory processing.
+- If Google OAuth is unavailable/invalid, Excel generation and WhatsApp delivery must still work normally.
+- Do not fabricate or bypass Google credentials.
+
+Later, when the refresh token is correctly configured:
+- update/sync the same vendor tabs
+- replace only changed vendor tabs
+- preserve unrelated vendor tabs
+- remove tabs for vendors with no current inventory
+- never duplicate vendor tabs.
+
+TEST:
+
+Initial:
+DE_CT
+BI_CT
+MA_CT
+
+Update MA_CT:
+Expected:
+DE_CT unchanged
+BI_CT unchanged
+MA_CT completely replaced
+
+Remove BI_CT:
+Expected:
+DE_CT remains
+MA_CT remains
+BI_CT is completely removed
+
+Verify that the Excel workbook structure and future Google Spreadsheet structure are identical in terms of vendor tabs and vendor_code identity.
+
+
+
+GOOGLE SHEETS VENDOR TAB IDENTITY REQUIREMENT
+
+This is a design/consistency requirement for the Google Sheets integration.
+
+DO NOT implement or modify Google Sheets authentication/OAuth in this task.
+The current Google OAuth credentials are still being fixed separately.
+
+However, verify and document the future Google Sheets implementation so that it uses the EXACT SAME canonical vendor identity as the Excel Vendor_Inventory.xlsx workflow.
+
+CURRENT EXCEL STRUCTURE:
+
+Vendor_Inventory.xlsx
+
+    MA_CT
+    DE_CT
+    BI_CT
+    ...
+
+Where:
+
+    MA_CT -> MAHINDRA
+    DE_CT -> DELHI
+    BI_CT -> BIJVASAN
+
+The canonical identity is vendor_code.
+
+FUTURE GOOGLE SHEETS STRUCTURE MUST BE:
+
+Google Spreadsheet
+
+    MA_CT
+    DE_CT
+    BI_CT
+    ...
+
+NOT:
+
+    MAHINDRA
+    DELHI
+    BIJVASAN
+
+REQUIREMENTS:
+
+1. vendor_code must be the canonical identifier for vendor worksheets/tabs.
+
+2. Google Sheets worksheet/tab names must use vendor_code, exactly like Excel.
+
+3. Do not use vendor display name as the worksheet identity.
+
+4. Vendor display names can change in the future. vendor_code should remain the stable identity.
+
+5. The same vendor must never result in two tabs because of a vendor-name change.
+
+Example:
+
+Current:
+
+    MA_CT -> MAHINDRA
+
+If the vendor display name later changes to:
+
+    MAHINDRA AUTO PARTS
+
+The Google Sheet must still use:
+
+    MA_CT
+
+It must NOT create:
+
+    MAHINDRA AUTO PARTS
+
+while leaving MA_CT behind.
+
+6. Vendor replacement behaviour must be identical to the Excel workflow.
+
+If MA_CT uploads new inventory:
+
+    MA_CT -> completely replace/update MA_CT
+
+    DE_CT -> unchanged
+    BI_CT -> unchanged
+
+7. If a vendor has no current/valid inventory:
+
+    remove its worksheet completely
+
+Do not leave an empty or stale tab.
+
+8. Never create duplicate vendor tabs.
+
+9. The database remains the source of truth.
+
+The Google Spreadsheet must NOT be treated as the source of truth.
+
+The logical flow is:
+
+    Database
+        ↓
+    Current vendor inventory
+        ↓
+    vendor_code
+        ↓
+    Output
+      ├── Vendor_Inventory.xlsx
+      └── Google Spreadsheet (future)
+
+10. Excel and Google Sheets must use the same vendor inventory representation and the same vendor_code identity.
+
+11. Do not create a separate Google-specific vendor mapping unless absolutely required by the Google Sheets API. If an API-specific mapping is required, it must still resolve to the canonical vendor_code.
+
+12. Do not modify OAuth credentials, refresh-token handling, Gmail scopes, or Google authentication in this task.
+
+13. Do not change the current Excel implementation unless required to preserve this identity contract.
+
+14. Since Google OAuth is currently unavailable, do not claim that live Google Sheets behaviour has been tested.
+
+VERIFY:
+
+- Find where Google Sheets currently determines worksheet/tab names.
+- Confirm whether it currently uses vendor.name instead of vendor_code.
+- Confirm where Excel gets its worksheet name.
+- Verify both ultimately use the same DB vendor identity.
+- If the Google Sheets code is currently using vendor name, document the exact location and the minimal change required for the future Google Sheets phase.
+- Do NOT make that change now unless explicitly requested.
+- Confirm that changing the vendor display name in the future would not create a second worksheet once this requirement is implemented.
+
+FINAL RESPONSE:
+
+Report:
+
+1. Current Excel worksheet identity
+2. Current Google Sheets worksheet identity
+3. Exact source-code location responsible for each
+4. Whether they currently match
+5. What must change in the future Google Sheets phase
+6. Confirmation that no OAuth/authentication code was changed
+7. Confirmation that no Excel/vendor-selection/inventory business logic was changed
+8. Any remaining risks
+
+DO NOT COMMIT.
+DO NOT PUSH.

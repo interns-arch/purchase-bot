@@ -37,7 +37,7 @@ from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
 from backend.app.core.config import settings
 from backend.app.workers.scheduler import start_scheduler, stop_scheduler
-from core.db import get_session
+from core.db import get_session, init_db
 from core.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -69,6 +69,10 @@ def _bootstrap_admin_if_configured() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     logger.info("API starting up (cors_origins=%s)", settings.cors_origins)
+    # Create any missing tables ONCE at startup. This used to run on every
+    # request via get_db() and cost ~2.4-3.6s each time (see
+    # backend/app/database/session.py).
+    init_db()
     _bootstrap_admin_if_configured()
     start_scheduler()
     yield

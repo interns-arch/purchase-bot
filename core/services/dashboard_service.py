@@ -21,10 +21,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from core.models import CustomerOrder, InventoryImport, Part, Vendor
-from core.services.vendor_comparison_service import compare_vendors_for_order
+from core.ingestion.column_detector import normalise_part_number
+from core.models import (
+    CustomerOrder,
+    CustomerOrderItem,
+    InventoryImport,
+    Part,
+    Vendor,
+    VendorInventory,
+)
 
 
 @dataclass
@@ -52,6 +59,16 @@ class DashboardSummary:
 
 
 def _latest_order_match_counts(session: Session) -> tuple[int, int]:
+    """(matched, not_found) part counts for the most recent customer order.
+
+    Deliberately does NOT call `compare_vendors_for_order`: that builds the
+    entire master inventory to produce two integers, which measured at ~6,869
+    SQL statements and made this endpoint take ~357s in production. The same
+    two counters are derived here with two bounded queries -- the order's own
+    items, then a single membership check against currently-active vendor
+    inventory. Matching semantics are unchanged (same normalisation, same
+    "a part is matched when some active vendor stocks it" rule, same handling
+    of blank/non-positive rows as invalid and therefore uncounted)."""
     latest_order = session.execute(
         select(CustomerOrder).order_by(CustomerOrder.created_at.desc()).limit(1)
     ).scalar_one_or_none()
@@ -59,8 +76,36 @@ def _latest_order_match_counts(session: Session) -> tuple[int, int]:
     if latest_order is None:
         return 0, 0
 
-    summary = compare_vendors_for_order(latest_order.id, session).summary
-    return summary.matched_items, summary.not_found_items
+    items = session.execute(
+        select(CustomerOrderItem.part_number_raw, CustomerOrderItem.quantity_requested)
+        .where(CustomerOrderItem.customer_order_id == latest_order.id)
+    ).all()
+
+    wanted: list[str] = []
+    for raw_part_number, quantity_requested in items:
+        normalized = normalise_part_number(raw_part_number)
+        if not normalized or quantity_requested is None or quantity_requested <= 0:
+            continue  # invalid line -- neither matched nor not-found
+        wanted.append(normalized)
+
+    if not wanted:
+        return 0, 0
+
+    stocked = set(
+        session.execute(
+            select(VendorInventory.normalized_part_number)
+            .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+            .where(
+                InventoryImport.is_active.is_(True),
+                VendorInventory.part_id.isnot(None),
+                VendorInventory.normalized_part_number.in_(set(wanted)),
+            )
+            .distinct()
+        ).scalars()
+    )
+
+    matched = sum(1 for part_number in wanted if part_number in stocked)
+    return matched, len(wanted) - matched
 
 
 def get_dashboard_summary(session: Session, *, recent_limit: int = 10) -> DashboardSummary:
@@ -79,7 +124,10 @@ def get_dashboard_summary(session: Session, *, recent_limit: int = 10) -> Dashbo
 
     inventory_rows = list(
         session.execute(
-            select(InventoryImport).order_by(InventoryImport.created_at.desc()).limit(recent_limit)
+            select(InventoryImport)
+            .options(selectinload(InventoryImport.vendor))
+            .order_by(InventoryImport.created_at.desc())
+            .limit(recent_limit)
         ).scalars()
     )
     order_rows = list(

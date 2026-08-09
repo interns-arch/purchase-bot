@@ -16,7 +16,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from core.hashing import sha256_of_file
 from core.ingestion.column_detector import (
@@ -371,6 +371,31 @@ def run_import(
             session,
         )
 
+    # Duplicate short-circuit -- BEFORE the row loop below.
+    #
+    # The loop calls `resolve_part()` once per row, and each call is a database
+    # round-trip; for a 484-row file against hosted Postgres that measured ~116s.
+    # The duplicate decision depends only on this vendor's currently-active
+    # import and the file's content hash, both already known here, so an
+    # unchanged re-upload no longer pays for a full parse it is about to throw
+    # away. Semantics are unchanged: same vendor-scoped comparison, same
+    # AWAITING_CONFIRMATION result, same `duplicate_of_import_id` -- only the
+    # point at which it is detected moved earlier.
+    active_import = _find_active_import(vendor_id, session)
+    if active_import is not None and active_import.content_hash == content_hash:
+        import_row.status = ImportStatus.AWAITING_CONFIRMATION
+        import_row.duplicate_of_import_id = active_import.id
+        session.flush()
+        return _to_result(
+            import_row,
+            is_duplicate=True,
+            message=(
+                f"This file's content matches vendor {vendor_id}'s current "
+                f"active import (#{active_import.id}). Confirm to make this "
+                f"the new active batch anyway, or cancel to discard it."
+            ),
+        )
+
     row_count = 0
     error_count = 0
 
@@ -434,25 +459,8 @@ def run_import(
     import_row.error_count = error_count
     session.flush()
 
-    active_import = _find_active_import(vendor_id, session)
-    is_duplicate = (
-        active_import is not None and active_import.content_hash == content_hash
-    )
-
-    if is_duplicate:
-        import_row.status = ImportStatus.AWAITING_CONFIRMATION
-        import_row.duplicate_of_import_id = active_import.id
-        session.flush()
-        return _to_result(
-            import_row,
-            is_duplicate=True,
-            message=(
-                f"This file's content matches vendor {vendor_id}'s current "
-                f"active import (#{active_import.id}). Confirm to make this "
-                f"the new active batch anyway, or cancel to discard it."
-            ),
-        )
-
+    # `active_import` was already fetched (and the duplicate case already
+    # returned) before the row loop above, so this is a genuinely new batch.
     _activate(import_row, active_import, session)
     return _to_result(import_row, is_duplicate=False)
 
@@ -531,6 +539,11 @@ def get_master_inventory(session: Session) -> list[MasterInventoryRow]:
     inventory_rows = session.execute(
         select(VendorInventory, InventoryImport)
         .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+        # Eager-load the two relationships the loop below reads. Without this
+        # SQLAlchemy lazy-loads `.part` and `.vendor` ONE QUERY PER ROW --
+        # measured at 6,869 queries for 6,866 active rows, which is what made
+        # the dashboard take ~357s and Vendor Comparison ~5s.
+        .options(selectinload(VendorInventory.part), selectinload(VendorInventory.vendor))
         .where(
             VendorInventory.import_id.in_(active_import_ids),
             VendorInventory.part_id.isnot(None),
