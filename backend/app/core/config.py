@@ -82,6 +82,25 @@ class Settings:
     purchase_team_email: str | None = os.environ.get("PURCHASE_TEAM_EMAIL") or None
     enable_po_email: bool = os.environ.get("ENABLE_PO_EMAIL", "false").strip().lower() == "true"
 
+    # --- Document-understanding (Architecture V2) -------------------------
+    # Phase 1 is scaffolding only: with these at their defaults the provider
+    # registry returns NullProvider and NOTHING in the import pipeline
+    # changes. A real provider is only used once AI_PROVIDER names one AND
+    # AI_FALLBACK_ENABLED is true (Phase 3+). API keys are read from the
+    # environment only and are never logged.
+    ai_provider: str = os.environ.get("AI_PROVIDER", "null")
+    ai_api_key: str | None = os.environ.get("AI_API_KEY") or None
+    ai_model: str | None = os.environ.get("AI_MODEL") or None
+    ai_fallback_enabled: bool = (
+        os.environ.get("AI_FALLBACK_ENABLED", "false").strip().lower() == "true"
+    )
+    ai_intent_enabled: bool = (
+        os.environ.get("AI_INTENT_ENABLED", "false").strip().lower() == "true"
+    )
+    ai_max_rows_sample: int = int(os.environ.get("AI_MAX_ROWS_SAMPLE", "40"))
+    ai_timeout_seconds: float = float(os.environ.get("AI_TIMEOUT_SECONDS", "30"))
+    ai_confidence_threshold: float = float(os.environ.get("AI_CONFIDENCE_THRESHOLD", "0.7"))
+
     # Company details printed on generated Purchase Orders.
     company_name: str = os.environ.get("COMPANY_NAME", "")
     company_address: str = os.environ.get("COMPANY_ADDRESS", "")
