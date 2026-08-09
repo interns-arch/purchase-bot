@@ -24,6 +24,7 @@ import openpyxl
 from openpyxl.styles import Font
 from sqlalchemy.orm import Session
 
+from core.ingestion.column_detector import DESCRIPTION_HEADERS, normalise_header
 from core.services import inventory_import_service, vendor_service
 from core.time_utils import now_ist
 
@@ -54,10 +55,18 @@ def _sheet_title(vendor, used: set[str]) -> str:
     return title
 
 
-def _description(raw_data) -> str:
+def _description(row) -> str:
+    """Pull the description out of a DB inventory row. Prefers the resolved
+    `Part.description` (canonical, if the import wrote one), then falls back
+    to the raw source-file description column (matched by the same
+    `DESCRIPTION_HEADERS` the detector uses -- handles MAHINDRA's "Name",
+    BIJVASAN's "Part Descr", etc.)."""
+    if getattr(row, "part", None) is not None and getattr(row.part, "description", None):
+        return str(row.part.description)
+    raw_data = getattr(row, "raw_data", None)
     if isinstance(raw_data, dict):
         for key, value in raw_data.items():
-            if key.strip().lower() in {"description", "part description", "item description"}:
+            if normalise_header(key) in DESCRIPTION_HEADERS:
                 return str(value or "")
     return ""
 
@@ -94,7 +103,7 @@ def build_workbook(session: Session) -> openpyxl.Workbook:
             sheet.append(
                 [
                     row.vendor_part_number,
-                    _description(row.raw_data),
+                    _description(row),
                     str(row.quantity_available),
                     str(row.price) if row.price is not None else "",
                     str(row.mrp) if row.mrp is not None else "",

@@ -130,6 +130,18 @@ DESCRIPTION_HEADERS = {
     "itemdescription",
     "productdescription",
     "desc",
+    # Real-world vendor/customer files name the descriptive column many ways
+    # (MAHINDRA.xlsx uses "Name", BIJVASAN.xlsx uses "Part Descr"). These
+    # aliases capture those descriptions without touching quantity/price
+    # anti-mis-mapping rules -- "name"/"partname"/"itemname" are purely
+    # descriptive and can never be mistaken for a quantity.
+    "name",
+    "partname",
+    "partdescr",
+    "partdescriptiontxt",
+    "itemname",
+    "productname",
+    "materialdescription",
 }
 
 

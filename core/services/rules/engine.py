@@ -14,10 +14,11 @@ Allocation rules per line:
   across as many vendors as it takes. Drawing from the largest first means a
   single vendor is used when one can cover the line, and otherwise the
   practical minimum number of vendors is combined, higher-availability first.
-- All-or-nothing: if the TOTAL available across all matching vendors is less
-  than the requested quantity, NO allocation is made for that line (it is left
-  unselected and reported as "Cannot Fulfill") -- the system never creates a
-  partial allocation.
+- Partial fulfilment allowed: if the TOTAL available across all matching
+  vendors is less than the requested quantity, the line is still allocated
+  as much as the available vendors can supply (never more than requested),
+  and the shortfall is reported as PARTIALLY FULFILLED. A line is left
+  completely unselected only when no vendor has any available quantity.
 """
 
 from __future__ import annotations
@@ -134,14 +135,12 @@ def run_automatic_vendor_selection(order_id: int, session: Session) -> list[Vend
         if not offers:
             continue
 
-        # All-or-nothing: if every matching vendor together still can't cover
-        # the requested quantity, make NO allocation -- the line stays
-        # unselected and is reported as "Cannot Fulfill". No partial fulfilment.
-        total_available = sum(
-            (offer.vendor_available_quantity or Decimal(0) for offer in offers), Decimal(0)
-        )
-        if total_available < requested_quantity:
-            continue
+        # Note: no all-or-nothing guard here -- a line whose matching vendors
+        # together can't fully cover the requested quantity is still PARTIALLY
+        # fulfilled (allocate as much as available, never more than requested).
+        # The `combination` strategy below already stops drawing once every
+        # offer is exhausted, so the shortfall is simply reported as
+        # PARTIALLY FULFILLED instead of discarding all allocations.
 
         remaining_quantity, external_offers = _allocate_own_stock_first(
             order_item_id, requested_quantity, offers, session

@@ -336,13 +336,17 @@ EXPORT_HEADERS = [
 
 
 def _export_row_cells(row: SelectionExportRow) -> list[str]:
+    """One export row. `available_quantity`/`selected_quantity` are shown as
+    actual numbers when present; a missing selected quantity (Cannot Fulfill /
+    Not Selected with no allocation) is shown as "0", never left blank, so the
+    Selected Qty column always carries an explicit value."""
     return [
         row.customer_part_number,
         decimal_to_string(row.requested_quantity),
         row.vendor_name,
         row.vendor_part_number,
         decimal_to_string(row.available_quantity) if row.available_quantity is not None else "",
-        decimal_to_string(row.selected_quantity) if row.selected_quantity is not None else "",
+        decimal_to_string(row.selected_quantity) if row.selected_quantity is not None else "0",
         row.status,
         row.reason,
     ]
