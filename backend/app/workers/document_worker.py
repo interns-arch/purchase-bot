@@ -201,11 +201,13 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
         notifications.publish_document_result("WhatsApp", result)
 
     # Temporary Google-Sheets replacement (output layer): the import above is
-    # now committed, so on a SUCCESSFUL Vendor Inventory import build one
-    # consolidated all-vendor workbook and send it to the Founder over WhatsApp.
-    # Fully best-effort -- it opens its own session and cannot affect the import.
+    # now committed, so on a SUCCESSFUL Vendor Inventory import request the
+    # consolidated all-vendor workbook for the Founder over WhatsApp. The
+    # request is DEBOUNCED: a batch of vendor files produces ONE final
+    # workbook (sent after the batch goes quiet), not one per file. Fully
+    # best-effort -- it opens its own session and cannot affect the import.
     if _is_successful_inventory_import(result):
-        inventory_output.send_consolidated_inventory_to_founder()
+        inventory_output.request_consolidated_send()
 
 
 def _is_successful_inventory_import(result) -> bool:

@@ -59,6 +59,15 @@ class WhatsAppSettings:
     # WHATSAPP_PHONE_NUMBER_ID above -- no separate auth.
     admin_phone_number: str | None = os.environ.get("WHATSAPP_ADMIN_PHONE_NUMBER") or None
 
+    # When several vendor files arrive in one WhatsApp batch, each successful
+    # import requests the consolidated workbook -- this debounce coalesces
+    # those requests so ONE final workbook is sent after imports have been
+    # quiet for this many seconds (0 = send immediately per import, the old
+    # behaviour).
+    workbook_debounce_seconds: float = float(
+        os.environ.get("WHATSAPP_WORKBOOK_DEBOUNCE_SECONDS", "20")
+    )
+
     @property
     def graph_api_base_url(self) -> str:
         return f"https://graph.facebook.com/{self.graph_api_version}"
