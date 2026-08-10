@@ -429,6 +429,23 @@ def run_import(
             error_count += 1
             continue
 
+        quantity = parse_quantity(raw_quantity)
+        if quantity < 0:
+            # Stock can never be negative (DB enforces it with
+            # ck_vendor_inventory_qty_nonneg) -- reject just this row instead
+            # of letting the constraint blow up the whole import.
+            session.add(
+                ImportErrorRecord(
+                    import_id=import_row.id,
+                    row_number=row_number,
+                    raw_row=row,
+                    error_reason="INVALID_QUANTITY",
+                    error_detail=f"Negative quantity {raw_quantity!r} -- stock cannot be negative.",
+                )
+            )
+            error_count += 1
+            continue
+
         part = resolve_part(vendor_id, raw_part_number, session)
 
         price = None
@@ -447,7 +464,7 @@ def run_import(
                 row_number=row_number,
                 vendor_part_number=raw_part_number,
                 normalized_part_number=normalise_part_number(raw_part_number),
-                quantity_available=parse_quantity(raw_quantity),
+                quantity_available=quantity,
                 price=price,
                 mrp=mrp,
                 raw_data=row,
