@@ -8,6 +8,7 @@ package) and `backend` are importable:
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -153,3 +154,14 @@ app.include_router(notifications_router)
 def health_check() -> dict[str, str]:
     """Used by Render to determine whether the service is up."""
     return {"status": "ok"}
+
+
+@app.get("/api/version", tags=["health"])
+def version() -> dict[str, str]:
+    """Which commit this instance is actually running -- Render injects
+    RENDER_GIT_COMMIT at deploy time. Lets anyone verify the deployed code
+    matches origin/main instead of guessing from log behaviour."""
+    return {
+        "commit": os.environ.get("RENDER_GIT_COMMIT", "unknown"),
+        "branch": os.environ.get("RENDER_GIT_BRANCH", "unknown"),
+    }
