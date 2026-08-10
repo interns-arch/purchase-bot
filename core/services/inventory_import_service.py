@@ -459,6 +459,26 @@ def run_import(
     import_row.error_count = error_count
     session.flush()
 
+    if row_count == 0:
+        # A header row was detected but NOT ONE valid inventory row was
+        # imported (empty data region, or every row rejected). Never record
+        # this as a success and never activate it -- activating would
+        # silently supersede the vendor's previous good inventory with an
+        # empty batch (seen in production: ERP exports whose detected header
+        # row had no readable data rows -> COMPLETED rows=0, blank workbook
+        # tab). The per-row rejects (if any) stay recorded in Import History.
+        return _fail_import(
+            import_row,
+            _ImportValidationError(
+                "NO_DATA_ROWS",
+                "A header row was found but no inventory rows could be "
+                f"imported ({error_count} row(s) rejected -- see Import "
+                "History). Nothing was updated; the vendor's previous "
+                "inventory (if any) remains active.",
+            ),
+            session,
+        )
+
     # `active_import` was already fetched (and the duplicate case already
     # returned) before the row loop above, so this is a genuinely new batch.
     _activate(import_row, active_import, session)
