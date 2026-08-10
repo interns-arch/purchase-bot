@@ -24,6 +24,7 @@ Pure business logic -- no FastAPI/print()/input() here.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
@@ -380,13 +381,7 @@ def _export_row_cells(row: SelectionExportRow) -> list[str]:
     ]
 
 
-def to_export_workbook(rows: list[SelectionExportRow]) -> openpyxl.Workbook:
-    """Vendor allocation sheet: "this customer part will be sourced from
-    this vendor" -- no pricing, no vendor grouping, no PO numbering."""
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "Selected Vendors"
-
+def _fill_export_sheet(sheet, rows: list[SelectionExportRow]) -> None:
     sheet.append(EXPORT_HEADERS)
     for cell in sheet[1]:
         cell.font = Font(bold=True)
@@ -398,4 +393,39 @@ def to_export_workbook(rows: list[SelectionExportRow]) -> openpyxl.Workbook:
         max_length = max(len(str(cell.value)) for cell in column_cells)
         sheet.column_dimensions[column_cells[0].column_letter].width = max_length + 2
 
+
+def to_export_workbook(rows: list[SelectionExportRow]) -> openpyxl.Workbook:
+    """Vendor allocation sheet: "this customer part will be sourced from
+    this vendor" -- no pricing, no vendor grouping, no PO numbering."""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Selected Vendors"
+    _fill_export_sheet(sheet, rows)
+    return workbook
+
+
+def to_batch_export_workbook(
+    reports: list[tuple[str, list[SelectionExportRow]]],
+) -> openpyxl.Workbook:
+    """ONE workbook holding every customer order's allocation report as its
+    own worksheet -- the batched counterpart of `to_export_workbook`, used by
+    the automatic allocation batch. (WhatsApp's Cloud API rejects ZIP uploads,
+    so 'all reports together in one file' is delivered as a multi-sheet
+    Excel, mirroring the Vendor_Inventory.xlsx one-sheet-per-vendor shape.)
+    `reports` is a list of (worksheet title, export rows), one per order."""
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    used: set[str] = set()
+    for title, rows in reports:
+        # Excel worksheet titles: max 31 chars, no : \ / ? * [ ] -- and
+        # unique within the workbook.
+        base = re.sub(r"[:\\/?*\[\]]", "_", (title or "Order").strip())[:31] or "Order"
+        candidate, suffix = base, 2
+        while candidate.lower() in used:
+            candidate = f"{base[:28]}_{suffix}"
+            suffix += 1
+        used.add(candidate.lower())
+        _fill_export_sheet(workbook.create_sheet(title=candidate), rows)
+    if not workbook.sheetnames:  # an empty workbook is invalid
+        workbook.create_sheet(title="No Allocations")
     return workbook

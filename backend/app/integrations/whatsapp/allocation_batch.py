@@ -13,8 +13,11 @@ consolidated inventory workbook), the batch is processed:
       the next customer is matched -- identical semantics to clicking
       Auto-Select once per customer, in sequence)
       build that order's allocation workbook
-  then send ONE ZIP containing every order's
-  vendor_allocation_order_<id>.xlsx to the Founder's WhatsApp.
+  then send ONE consolidated Excel workbook -- one worksheet per customer
+  order -- to the Founder's WhatsApp. (Originally a ZIP of per-order files,
+  but WhatsApp's Cloud API rejects application/zip uploads with 400; a
+  multi-sheet .xlsx delivers the same "all reports together in one file"
+  and mirrors the Vendor_Inventory.xlsx shape the Founder already knows.)
 
 Failure isolation mirrors `inventory_output.py` / `allocation_output.py`:
 each order gets its own session/transaction, one failing order never blocks
@@ -27,7 +30,6 @@ from __future__ import annotations
 
 import io
 import threading
-import zipfile
 
 from backend.app.integrations.whatsapp import outbound
 from backend.app.integrations.whatsapp.config import whatsapp_settings
@@ -38,7 +40,7 @@ from core.services import vendor_selection_service
 from core.services.rules.engine import run_automatic_vendor_selection
 from core.time_utils import now_ist
 
-ZIP_MIME_TYPE = "application/zip"
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 logger = get_logger(__name__)
 
@@ -97,7 +99,8 @@ def _run_batch(order_ids: list[int]) -> None:
         len(order_ids),
         order_ids,
     )
-    reports: list[tuple[str, bytes]] = []
+    reports: list[tuple[str, list]] = []  # (worksheet title, export rows)
+    done: list[int] = []
     failed: list[int] = []
 
     for order_id in order_ids:
@@ -107,10 +110,8 @@ def _run_batch(order_ids: list[int]) -> None:
             with get_session() as session:
                 run_automatic_vendor_selection(order_id, session)
                 rows = vendor_selection_service.list_selections_for_export(order_id, session)
-                workbook = vendor_selection_service.to_export_workbook(rows)
-            buffer = io.BytesIO()
-            workbook.save(buffer)
-            reports.append((f"vendor_allocation_order_{order_id}.xlsx", buffer.getvalue()))
+            reports.append((f"Order_{order_id}", rows))
+            done.append(order_id)
         except Exception:  # noqa: BLE001 -- one bad order must not block the batch
             logger.exception(
                 "Automatic vendor selection failed for customer order %s -- "
@@ -131,44 +132,43 @@ def _run_batch(order_ids: list[int]) -> None:
     if not to:
         logger.info(
             "WHATSAPP_ADMIN_PHONE_NUMBER not set -- allocations for orders %s are "
-            "saved; skipping the ZIP report send (this output is optional).",
+            "saved; skipping the consolidated report send (this output is optional).",
             order_ids,
         )
         broker.publish(
             "success",
             f"Automatic vendor selection completed for {len(reports)} customer order(s).",
-            "Reports not sent: WHATSAPP_ADMIN_PHONE_NUMBER is not configured.",
+            "Report not sent: WHATSAPP_ADMIN_PHONE_NUMBER is not configured.",
         )
         return
 
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for file_name, content in reports:
-            archive.writestr(file_name, content)
-    zip_name = f"vendor_allocations_{now_ist().strftime('%Y%m%d_%H%M')}.zip"
+    workbook = vendor_selection_service.to_batch_export_workbook(reports)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    file_name = f"vendor_allocations_{now_ist().strftime('%Y%m%d_%H%M')}.xlsx"
 
-    detail = f"Orders: {[int(n.split('_')[-1].split('.')[0]) for n, _ in reports]}"
+    detail = f"Orders: {done}"
     if failed:
         detail += f"\nFailed (see logs): {failed}"
     sent = outbound.send_document_safe(
         to,
-        zip_buffer.getvalue(),
-        zip_name,
-        ZIP_MIME_TYPE,
+        buffer.getvalue(),
+        file_name,
+        XLSX_MIME_TYPE,
         caption=(
             f"Automatic vendor allocation completed for {len(reports)} customer "
-            f"order(s). One report per order inside."
+            f"order(s). One worksheet per order inside."
         ),
     )
     if sent:
         broker.publish(
             "success",
-            f"Automatic vendor selection completed -- {zip_name} sent to WhatsApp.",
+            f"Automatic vendor selection completed -- {file_name} sent to WhatsApp.",
             detail,
         )
     else:
         broker.publish(
             "warning",
-            "Automatic vendor selection completed, but the ZIP could not be sent to WhatsApp.",
+            "Automatic vendor selection completed, but the report could not be sent to WhatsApp.",
             detail + "\nAllocations are saved; use the Vendor Comparison export if needed.",
         )
