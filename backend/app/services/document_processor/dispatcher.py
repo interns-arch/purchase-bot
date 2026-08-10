@@ -238,17 +238,39 @@ def _customer_name_from_filename(filename: str) -> str:
     return Path(filename).stem.strip()
 
 
-def _onboard_new_customer(name: str, session: Session) -> tuple["Customer", str]:
-    """First-time onboarding: a customer's very first WhatsApp order file may
-    still be named with their real name/company (no code prefix yet).
-    Creates the customer and auto-generates + permanently stores its
-    Customer Code, mirroring `_onboard_new_vendor` exactly."""
-    customer = customer_service.create_customer(name, session)
-    code = customer_code_service.generate_customer_code(name, session)
-    customer.customer_code = code
-    session.flush()
+def _resolve_or_onboard_customer(name: str, session: Session) -> tuple["Customer", str | None]:
+    """Reuse the existing customer for this NAME, or onboard a brand-new one
+    (create + generate ONE permanent Customer Code). Race-safe, mirroring
+    `_resolve_or_onboard_vendor` exactly: if two order files for the same new
+    customer are processed almost simultaneously, `ux_customers_name_lower`
+    makes the second INSERT fail; we recover inside a SAVEPOINT and reuse the
+    customer the winning transaction created -- only ONE customer / ONE code
+    ever exists and both imports share it."""
+    existing = customer_service.get_customer_by_name(name, session)
+    if existing is not None:
+        return existing, None  # reuse existing customer + code, unchanged
+
+    try:
+        with session.begin_nested():  # SAVEPOINT: undoable if the race is lost
+            customer = customer_service.create_customer(name, session)
+            code = customer_code_service.generate_customer_code(name, session)
+            customer.customer_code = code
+            session.flush()
+    except (IntegrityError, ValueError):
+        existing = customer_service.get_customer_by_name(name, session)
+        if existing is None:
+            raise
+        logger.info(
+            "Concurrent customer onboarding race for '%s' -- reusing existing customer "
+            "(id=%s, code=%s); no duplicate created.",
+            name,
+            existing.id,
+            existing.customer_code,
+        )
+        return existing, None
+
     logger.info("New customer onboarded: '%s' (id=%s, code=%s)", customer.name, customer.id, code)
-    return customer, code
+    return customer, f"New customer '{customer.name}' onboarded with code {code}."
 
 
 def _dispatch_customer_order(
@@ -270,12 +292,7 @@ def _dispatch_customer_order(
         # onboarding by name, exactly like an unrecognized Vendor Inventory
         # filename onboards a new vendor.
         name = _customer_name_from_filename(file_path.name)
-        existing = customer_service.get_customer_by_name(name, session)
-        if existing is not None:
-            customer = existing
-        else:
-            customer, code = _onboard_new_customer(name, session)
-            onboarding_message = f"New customer '{customer.name}' onboarded with code {code}."
+        customer, onboarding_message = _resolve_or_onboard_customer(name, session)
     # else: Gmail/manual Customer Order -- customer identification was never
     # attempted (see `Classification.resolve_customer`), so `customer` stays
     # None exactly as before this feature existed.

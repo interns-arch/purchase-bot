@@ -699,9 +699,9 @@ class Customer(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(nullable=False)
     # Permanent identifier used for Customer Order imports (see
-    # core.services.customer_code_service) -- <first two letters of
-    # name>_CO, e.g. "AB_CO", with a numeric suffix on collision. Mirrors
-    # `Vendor.vendor_code` exactly.
+    # core.services.customer_code_service) -- name-derived stem + "_CO",
+    # e.g. "AB_CO"; collisions get a longer name-derived stem ("AMA_CO" vs
+    # "AMI_CO"), never a blind numeric suffix. Mirrors `Vendor.vendor_code`.
     customer_code: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

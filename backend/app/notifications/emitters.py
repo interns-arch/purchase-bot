@@ -33,6 +33,7 @@ def publish_document_result(source: str, result) -> None:
         rows = getattr(result, "row_count", 0) or 0
 
         if status in _SUCCESS_STATUSES:
+            errors = getattr(result, "error_count", 0) or 0
             lines = []
             if vendor:
                 lines.append(f"Vendor: {vendor}")
@@ -40,7 +41,17 @@ def publish_document_result(source: str, result) -> None:
             lines.append(
                 f"Order Lines: {rows}" if doc_type == "CUSTOMER_ORDER" else f"Records Imported: {rows}"
             )
-            broker.publish("success", f"{label} imported successfully.", "\n".join(lines))
+            if status == "PROCESSED_WITH_ERRORS" or errors:
+                # Partial import: never report a plain success -- expose the
+                # real Imported/Rejected split and the reason when one exists.
+                lines.append(f"Rows Rejected: {errors}")
+                reason = getattr(result, "message", None)
+                if reason:
+                    lines.append(f"Reason: {reason}")
+                lines.append("See Import History for row-level details.")
+                broker.publish("warning", f"{label} imported with errors.", "\n".join(lines))
+            else:
+                broker.publish("success", f"{label} imported successfully.", "\n".join(lines))
         elif status in _FAILURE_STATUSES:
             reason = getattr(result, "message", None) or "Unknown error."
             broker.publish("error", f"{label} import failed.", f"Source: {source}\nReason: {reason}")
