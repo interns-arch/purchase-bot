@@ -15,3 +15,6 @@ frontend/dist/
 .env
 *.env
 !*.env.example
+
+# Google OAuth client secret + local token helper output -- never commit
+oauth_client.json
