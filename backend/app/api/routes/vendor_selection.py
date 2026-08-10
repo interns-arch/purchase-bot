@@ -11,7 +11,7 @@ from __future__ import annotations
 import io
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from backend.app.auth.dependencies import get_current_user
 from backend.app.core.config import settings
 from backend.app.database.session import get_db
 from backend.app.integrations.gmail.mailer import send_email
+from backend.app.integrations.whatsapp import allocation_output
 from backend.app.schemas.vendor_selection import VendorSelectionIn, VendorSelectionOut
 from core.logging_setup import get_logger
 from core.time_utils import now_ist
@@ -146,6 +147,7 @@ def _send_allocation_report_email(order_id: int, db: Session) -> None:
 @router.post("/{order_id}/auto-select", response_model=list[VendorSelectionOut])
 def auto_select_vendors(
     order_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> list[VendorSelectionOut]:
     """One automatic vendor-selection action -- the system decides whether to
@@ -158,6 +160,13 @@ def auto_select_vendors(
 
     _send_allocation_report_email(order_id, db)
     purchase_order_generation_service.generate_and_email_purchase_orders(order_id, db)
+
+    # Per-order allocation report over WhatsApp (requirement: every customer
+    # order produces its own allocation output, generated from the database
+    # state AFTER this order's reservation). Runs after the response so the two
+    # Graph API calls don't add latency to auto-select; opens its own session
+    # and is best-effort -- a delivery failure never affects the allocation.
+    background_tasks.add_task(allocation_output.send_allocation_report_to_founder, order_id)
 
     return [_to_out(selection) for selection in selections]
 
