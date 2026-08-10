@@ -24,6 +24,7 @@ from backend.app.integrations.gmail.client import (
     get_gmail_client,
 )
 from backend.app.integrations.gmail.config import gmail_settings
+from backend.app.integrations.whatsapp import allocation_batch
 from backend.app.notifications import emitters as notifications
 from backend.app.services.document_processor import staging
 from backend.app.services.document_processor.metadata import DocumentMetadata
@@ -96,6 +97,21 @@ def _process_message(message: IncomingEmailMessage) -> None:
         # The session above has now committed -- announce the result only
         # after the transaction is durable, never before.
         notifications.publish_document_result("Gmail", result)
+
+        # Founder automation ("Combined ZIP" mode): queue a successfully
+        # imported customer order for automatic vendor selection -- same
+        # batch/debounce as WhatsApp-sourced orders.
+        order_id = _successful_customer_order_id(result)
+        if order_id is not None:
+            allocation_batch.request_order_allocation(order_id)
+
+
+def _successful_customer_order_id(result) -> int | None:
+    doc_type = getattr(getattr(result, "document_type", None), "value", None)
+    status = getattr(getattr(result, "status", None), "value", None)
+    if doc_type == "CUSTOMER_ORDER" and status in ("PROCESSED", "PROCESSED_WITH_ERRORS"):
+        return getattr(result, "customer_order_id", None)
+    return None
 
 
 def poll_gmail_inbox() -> None:

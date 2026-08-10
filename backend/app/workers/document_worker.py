@@ -30,7 +30,7 @@ from backend.app.integrations.whatsapp.commands import WhatsAppCommand
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.integrations.whatsapp.media import download_document_media
 from backend.app.integrations.whatsapp.outbound import send_reply_safe
-from backend.app.integrations.whatsapp import inventory_output
+from backend.app.integrations.whatsapp import allocation_batch, inventory_output
 from backend.app.integrations.whatsapp.parser import (
     IncomingWhatsAppMessage,
     IncomingWhatsAppText,
@@ -209,8 +209,23 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
     if _is_successful_inventory_import(result):
         inventory_output.request_consolidated_send()
 
+    # Founder automation ("Combined ZIP" mode): a successfully imported
+    # customer order is queued for automatic vendor selection; the batch runs
+    # after order imports go quiet and sends ONE ZIP of allocation reports.
+    order_id = _successful_customer_order_id(result)
+    if order_id is not None:
+        allocation_batch.request_order_allocation(order_id)
+
 
 def _is_successful_inventory_import(result) -> bool:
     doc_type = getattr(getattr(result, "document_type", None), "value", None)
     status = getattr(getattr(result, "status", None), "value", None)
     return doc_type == "VENDOR_INVENTORY" and status in ("PROCESSED", "PROCESSED_WITH_ERRORS")
+
+
+def _successful_customer_order_id(result) -> int | None:
+    doc_type = getattr(getattr(result, "document_type", None), "value", None)
+    status = getattr(getattr(result, "status", None), "value", None)
+    if doc_type == "CUSTOMER_ORDER" and status in ("PROCESSED", "PROCESSED_WITH_ERRORS"):
+        return getattr(result, "customer_order_id", None)
+    return None

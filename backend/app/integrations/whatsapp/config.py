@@ -68,6 +68,22 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_WORKBOOK_DEBOUNCE_SECONDS", "20")
     )
 
+    # Automatic vendor selection for imported customer orders (Founder
+    # requirement, "Combined ZIP" mode): orders are collected while a batch is
+    # arriving; once order imports have been quiet for this many seconds, the
+    # engine auto-selects vendors for every pending order IN ARRIVAL ORDER
+    # (each order consumes stock before the next) and ONE ZIP containing every
+    # order's allocation report is sent to WHATSAPP_ADMIN_PHONE_NUMBER.
+    # 0 = process each order the moment it imports (one ZIP per order).
+    # Set WHATSAPP_AUTO_ALLOCATION_ENABLED=false to turn the automation off
+    # entirely (the manual Auto-Select button keeps working either way).
+    auto_allocation_enabled: bool = (
+        os.environ.get("WHATSAPP_AUTO_ALLOCATION_ENABLED", "true").strip().lower() == "true"
+    )
+    allocation_batch_debounce_seconds: float = float(
+        os.environ.get("WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS", "20")
+    )
+
     @property
     def graph_api_base_url(self) -> str:
         return f"https://graph.facebook.com/{self.graph_api_version}"
