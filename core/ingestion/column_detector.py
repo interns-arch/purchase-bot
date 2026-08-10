@@ -23,6 +23,10 @@ PART_NUMBER_HEADERS = {
     "itemnumber",
     "sku",
     "productcode",
+    # SAP-style exports label the part column "Material Code" / "Material No".
+    "materialcode",
+    "materialno",
+    "materialnumber",
 }
 
 QUANTITY_HEADERS = {
@@ -34,6 +38,15 @@ QUANTITY_HEADERS = {
     "stockqty",
     "orderedquantity",
     "orderedqty",
+    # Customer purchase orders commonly label the ordered amount this way
+    # ("Requested Quantity", "Order Qty", "Required Qty"). These are
+    # unambiguous order quantities -- money columns stay excluded.
+    "requestedquantity",
+    "requestedqty",
+    "orderquantity",
+    "orderqty",
+    "requiredquantity",
+    "requiredqty",
 }
 
 # --- Vendor Inventory-specific header aliases -------------------------------

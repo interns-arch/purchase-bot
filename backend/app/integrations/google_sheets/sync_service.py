@@ -120,7 +120,12 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
 
     client = _build_client()
     spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
-    worksheet = _get_or_create_worksheet(spreadsheet, vendor.name, len(_HEADERS))
+    # Canonical worksheet identity is the permanent Vendor Code (MA_CT, DE_CT),
+    # exactly like the Excel workbook (`core/services/vendor_inventory_workbook.
+    # py:_sheet_title`) -- one identity rule for both outputs, never the
+    # display name.
+    worksheet_title = (vendor.vendor_code or vendor.name or f"V{vendor.id}").strip()
+    worksheet = _get_or_create_worksheet(spreadsheet, worksheet_title, len(_HEADERS))
 
     # Business timezone is IST -- see core.time_utils.
     synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")

@@ -183,7 +183,6 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
                 getattr(getattr(result, "status", None), "value", None),
                 getattr(getattr(result, "document_type", None), "value", None),
             )
-            notifications.publish_document_result("WhatsApp", result)
     except Exception:
         # Step 11: any processing/DB failure, with full traceback. Re-raised so
         # behaviour is unchanged -- only observability is added. The caller's
@@ -194,6 +193,12 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
             message.media_id,
         )
         raise
+
+    # The session context above has now COMMITTED -- only from this point may a
+    # success be announced. Publishing inside the session block would toast
+    # SUCCESS for a transaction that could still fail at commit.
+    if result is not None:
+        notifications.publish_document_result("WhatsApp", result)
 
     # Temporary Google-Sheets replacement (output layer): the import above is
     # now committed, so on a SUCCESSFUL Vendor Inventory import build one

@@ -41,21 +41,47 @@ logger = get_logger(__name__)
 
 def _try_upsert_selection(
     order_item_id: int, vendor_id: int, quantity: Decimal, session: Session
-) -> bool:
+) -> Decimal:
     """Same call `vendor_selection_service.upsert_selection` always uses to
     apply an allocation -- but the AUTOMATIC engine treats a rejection (this
     vendor turned out to have less remaining than the snapshot this run
     started from suggested -- e.g. an earlier line in this same order, or a
-    concurrent order, just claimed some of it) as "skip this vendor for this
-    line" rather than a fatal error that aborts the rest of the order's
-    automatic selection. Manual selection (the API endpoint) still lets the
-    same `ValueError` surface directly to its caller -- only the automatic
-    engine gets this graceful treatment, since it has no user watching a
-    single request to react to a rejection. Returns True if applied."""
+    concurrent order, just claimed some of it) gracefully instead of letting
+    it abort the rest of the order's automatic selection: it re-reads what is
+    genuinely still allocatable UNDER THE ROW LOCK and takes that (partial
+    fulfilment), only skipping the vendor when truly nothing is left. Manual
+    selection (the API endpoint) still lets the same `ValueError` surface
+    directly to its caller. Returns the quantity actually allocated (0 if
+    none)."""
     try:
         vendor_selection_service.upsert_selection(order_item_id, vendor_id, quantity, session)
-        return True
+        return quantity
     except ValueError:
+        # The availability snapshot this run started from can be stale by the
+        # time the row lock is acquired (a concurrent order committed first).
+        # `live_allocatable_quantity` re-reads remaining stock + this line's
+        # unfulfilled quantity under the same lock, so the retry below acts on
+        # a stable figure instead of walking away with nothing.
+        clamped = vendor_selection_service.live_allocatable_quantity(
+            order_item_id, vendor_id, session
+        )
+        if clamped > 0:
+            try:
+                vendor_selection_service.upsert_selection(
+                    order_item_id, vendor_id, clamped, session
+                )
+                logger.warning(
+                    "Automatic Vendor Selection: vendor %s no longer had %s remaining "
+                    "for order item %s (claimed elsewhere since this run started) -- "
+                    "allocated the remaining %s instead.",
+                    vendor_id,
+                    quantity,
+                    order_item_id,
+                    clamped,
+                )
+                return clamped
+            except ValueError:
+                pass
         logger.warning(
             "Automatic Vendor Selection: vendor %s no longer had %s remaining for "
             "order item %s (claimed elsewhere since this run started) -- skipping.",
@@ -63,7 +89,7 @@ def _try_upsert_selection(
             quantity,
             order_item_id,
         )
-        return False
+        return Decimal(0)
 
 
 def _allocate_own_stock_first(
@@ -87,8 +113,7 @@ def _allocate_own_stock_first(
             continue
 
         take = min(remaining, offer.vendor_available_quantity)
-        if _try_upsert_selection(order_item_id, offer.vendor_id, take, session):
-            remaining -= take
+        remaining -= _try_upsert_selection(order_item_id, offer.vendor_id, take, session)
 
     return remaining, other_offers
 

@@ -84,6 +84,34 @@ def list_selections_for_item(order_item_id: int, session: Session) -> list[Vendo
     return _selections_for_item(order_item_id, session)
 
 
+def live_allocatable_quantity(order_item_id: int, vendor_id: int, session: Session) -> Decimal:
+    """The most this vendor can be allocated for this order line RIGHT NOW:
+    min(live remaining stock, this line's still-unfulfilled quantity) -- the
+    same two guards `upsert_selection` enforces, exposed read-only. Takes the
+    same `.with_for_update()` row lock as `upsert_selection`, so a caller that
+    reads this and then upserts inside one transaction acts on a stable
+    figure. Used by the automatic engine to clamp an allocation computed from
+    a stale availability snapshot down to what a concurrent order left behind,
+    instead of skipping the vendor entirely. Returns 0 when nothing can be
+    allocated (no active offer, unresolved part, or nothing left)."""
+    order_item = session.get(CustomerOrderItem, order_item_id)
+    if order_item is None:
+        return Decimal(0)
+    normalized = normalise_part_number(order_item.part_number_raw)
+    offer = _find_active_vendor_offer(vendor_id, normalized, session)
+    if offer is None or offer.part_id is None:
+        return Decimal(0)
+    remaining = vendor_stock_service.remaining_quantity(
+        vendor_id, offer.part_id, offer.quantity_available, session,
+        exclude_order_item_id=order_item_id,
+    )
+    others = _selections_for_item(order_item_id, session, exclude_vendor_id=vendor_id)
+    unfulfilled = order_item.quantity_requested - sum(
+        (other.quantity_selected for other in others), Decimal(0)
+    )
+    return max(min(remaining, unfulfilled), Decimal(0))
+
+
 def upsert_selection(
     order_item_id: int, vendor_id: int, quantity_selected: Decimal, session: Session
 ) -> VendorSelection:

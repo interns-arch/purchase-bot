@@ -93,7 +93,9 @@ def _process_message(message: IncomingEmailMessage) -> None:
                 original_filename=attachment.filename,
             )
             result = process_document(DocumentSource.EMAIL, file_path, metadata, session)
-            notifications.publish_document_result("Gmail", result)
+        # The session above has now committed -- announce the result only
+        # after the transaction is durable, never before.
+        notifications.publish_document_result("Gmail", result)
 
 
 def poll_gmail_inbox() -> None:

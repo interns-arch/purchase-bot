@@ -9,6 +9,7 @@ step is required in this phase.
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.ingestion.column_detector import normalise_part_number
@@ -41,17 +42,43 @@ def resolve_part(vendor_id: int, raw_part_number: str, session: Session) -> Part
     ).scalar_one_or_none()
 
     if part is None:
-        part = Part(canonical_part_number=normalized)
-        session.add(part)
-        session.flush()  # assign part.id before the alias references it
+        # Different vendors' files routinely contain the SAME part numbers, and
+        # imports run concurrently (one thread per WhatsApp document). Both
+        # sessions can pass the SELECT above before either commits, so this
+        # INSERT can violate the parts.canonical_part_number unique constraint.
+        # Insert under a SAVEPOINT so the violation poisons only the savepoint
+        # (not the whole import transaction), then re-read the winner's row.
+        try:
+            with session.begin_nested():
+                part = Part(canonical_part_number=normalized)
+                session.add(part)
+        except IntegrityError:
+            part = session.execute(
+                select(Part).where(Part.canonical_part_number == normalized)
+            ).scalar_one_or_none()
+            if part is None:
+                raise
 
-    alias = PartAlias(
-    part_id=part.id,
-    vendor_id=vendor_id,
-    vendor_part_number=raw_part_number,
-    normalized_part_number=normalized,
-)
-    session.add(alias)
-    session.flush()  # surface any unique-constraint violation immediately
+    # Same race for the alias (e.g. the same vendor file delivered twice at
+    # once): recover by reusing the alias the concurrent import created.
+    try:
+        with session.begin_nested():
+            alias = PartAlias(
+                part_id=part.id,
+                vendor_id=vendor_id,
+                vendor_part_number=raw_part_number,
+                normalized_part_number=normalized,
+            )
+            session.add(alias)
+    except IntegrityError:
+        existing = session.execute(
+            select(PartAlias).where(
+                PartAlias.vendor_id == vendor_id,
+                PartAlias.normalized_part_number == normalized,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        return existing.part
 
     return part
