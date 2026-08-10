@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
+from backend.app.api.routes.data_management import router as data_management_router
 from backend.app.api.routes.deliveries import router as deliveries_router
 from backend.app.api.routes.delivery_tracking import router as delivery_tracking_router
 from backend.app.api.routes.gmail_integration import router as gmail_integration_router
@@ -133,6 +134,7 @@ async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSON
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+app.include_router(data_management_router)
 app.include_router(inventory_router)
 app.include_router(deliveries_router)
 app.include_router(delivery_tracking_router)
