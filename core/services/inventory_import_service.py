@@ -28,6 +28,7 @@ from core.ingestion.column_detector import (
     find_inventory_columns,
     find_optional_column,
     is_parseable_quantity,
+    normalise_header,
     normalise_part_number,
     parse_quantity,
 )
@@ -175,6 +176,79 @@ def _read_file(file_path: Path) -> ParsedFile:
     return read_excel_rows(file_path)
 
 
+def read_table_with_mapping(
+    file_path: Path, column_mapping: dict[str, str]
+) -> tuple[list[str], list[dict[str, str]], str, str]:
+    """Read the inventory table using an EXPLICIT column mapping (source header
+    text for `part_number` and `available_quantity`) instead of alias
+    detection. Used by the AI-assisted rescue path: the language model only
+    proposes WHICH columns to use -- every value imported still comes straight
+    from the file via this deterministic read, never from model output.
+
+    Returns (headers, rows, part_column, quantity_column). Raises ValueError
+    when the mapping is unusable (missing keys, forbidden money column, or the
+    mapped headers don't exist together on any row)."""
+    part_source = (column_mapping.get("part_number") or "").strip()
+    quantity_source = (
+        column_mapping.get("available_quantity") or column_mapping.get("quantity") or ""
+    ).strip()
+    if not part_source or not quantity_source:
+        raise ValueError("Column mapping must name both part_number and available_quantity.")
+
+    # Defense in depth (the AI validator already enforces this): a money /
+    # unconfirmed-stock column may NEVER be used as available quantity.
+    from core.services.normalized_validation import FORBIDDEN_QUANTITY_HEADERS
+
+    if normalise_header(quantity_source) in FORBIDDEN_QUANTITY_HEADERS:
+        raise ValueError(
+            f"Mapped quantity column {quantity_source!r} is a money/float-stock "
+            "column and may never be used as available quantity."
+        )
+
+    if file_path.suffix.lower() == ".csv":
+        grid = read_csv_grid(file_path)
+    else:
+        grid = read_excel_grid(file_path)
+
+    def _find_cell(row, text):
+        target = text.strip().casefold()
+        for value in row:
+            if str(value).strip().casefold() == target:
+                return str(value).strip()
+        return None
+
+    header_index = None
+    part_header = quantity_header = None
+    for index, row in enumerate(grid):
+        part_header = _find_cell(row, part_source)
+        quantity_header = _find_cell(row, quantity_source)
+        if part_header and quantity_header:
+            header_index = index
+            break
+    if header_index is None:
+        raise ValueError(
+            f"Mapped columns {part_source!r} + {quantity_source!r} were not found "
+            f"together on any row of '{file_path.name}'."
+        )
+
+    header_row = grid[header_index]
+    column_count = 0
+    for index, value in enumerate(header_row):
+        if str(value).strip():
+            column_count = index + 1
+    headers = [str(header_row[i]).strip() for i in range(column_count)]
+
+    rows: list[dict[str, str]] = []
+    for data_row in grid[header_index + 1 :]:
+        padded = list(data_row) + [""] * max(0, column_count - len(data_row))
+        cells = [str(padded[i]).strip() for i in range(column_count)]
+        if not any(cells):
+            break  # blank row -> end of the inventory section
+        rows.append({headers[i]: cells[i] for i in range(column_count)})
+
+    return headers, rows, part_header, quantity_header
+
+
 def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Locate the real inventory line-item header row ANYWHERE in the file
     (metadata rows above it are ignored) and return (headers, rows). Used only
@@ -275,6 +349,8 @@ def run_import(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     max_row_count: int = DEFAULT_MAX_ROW_COUNT,
+    column_mapping: dict[str, str] | None = None,
+    mapping_note: str | None = None,
 ) -> ImportResult:
     """Import one vendor file. See module docstring and ARCHITECTURE/plan for the
     full state machine this implements."""
@@ -337,25 +413,42 @@ def run_import(
     if parsed_file.sheet_name:
         import_row.sheet_name = parsed_file.sheet_name
 
-    # Normal case: the header is on row 1 (full metadata preserved above). If
-    # that row has no part-number column, the real inventory header is below a
-    # metadata block -- re-parse via header-row detection (grid scan).
-    headers = parsed_file.headers
-    rows = parsed_file.rows
-    if find_optional_column(headers, INVENTORY_PART_NUMBER_HEADERS) is None:
+    if column_mapping is not None:
+        # AI-assisted rescue path: the mapping names WHICH columns to use;
+        # everything imported below still comes from the file itself via the
+        # deterministic re-read (never from model output). All later guards
+        # (row limit, duplicates, blank/negative rows, zero-row failure,
+        # supersession) apply identically.
         try:
-            headers, rows = _read_inventory_table(file_path)
+            headers, rows, part_column, quantity_column = read_table_with_mapping(
+                file_path, column_mapping
+            )
+        except ValueError as exc:
+            return _fail_import(
+                import_row, _ImportValidationError("AI_MAPPING_INVALID", str(exc)), session
+            )
+    else:
+        # Normal case: the header is on row 1 (full metadata preserved above).
+        # If that row has no part-number column, the real inventory header is
+        # below a metadata block -- re-parse via header-row detection.
+        headers = parsed_file.headers
+        rows = parsed_file.rows
+        if find_optional_column(headers, INVENTORY_PART_NUMBER_HEADERS) is None:
+            try:
+                headers, rows = _read_inventory_table(file_path)
+            except ValueError as exc:
+                return _fail_import(
+                    import_row,
+                    _ImportValidationError("REQUIRED_COLUMNS_NOT_FOUND", str(exc)),
+                    session,
+                )
+
+        try:
+            part_column, quantity_column = find_inventory_columns(headers, file_path.name)
         except ValueError as exc:
             return _fail_import(
                 import_row, _ImportValidationError("REQUIRED_COLUMNS_NOT_FOUND", str(exc)), session
             )
-
-    try:
-        part_column, quantity_column = find_inventory_columns(headers, file_path.name)
-    except ValueError as exc:
-        return _fail_import(
-            import_row, _ImportValidationError("REQUIRED_COLUMNS_NOT_FOUND", str(exc)), session
-        )
 
     # Price/MRP are optional -- not every vendor file provides them.
     price_column = find_optional_column(headers, PRICE_HEADERS)
@@ -499,7 +592,7 @@ def run_import(
     # `active_import` was already fetched (and the duplicate case already
     # returned) before the row loop above, so this is a genuinely new batch.
     _activate(import_row, active_import, session)
-    return _to_result(import_row, is_duplicate=False)
+    return _to_result(import_row, is_duplicate=False, message=mapping_note)
 
 
 def confirm_import(import_id: int, session: Session) -> ImportResult:

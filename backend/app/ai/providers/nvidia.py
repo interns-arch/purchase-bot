@@ -59,7 +59,21 @@ _DOCUMENT_INSTRUCTIONS = {
         "This is a VENDOR INVENTORY document: a list of parts a vendor currently has in stock.\n"
         'Return rows of {"part_number", "part_name", "available_quantity"}.\n'
         "available_quantity MUST come from an on-hand stock column (e.g. Quantity, Qty, "
-        "Available Qty, Current Stock, Current St, Stock, Part Quantity, Balance Qty)."
+        "Available Qty, Current Stock, Current St, Stock, Part Quantity, Balance Qty).\n"
+        "HEADER NAME GUIDANCE (real vendor files are inconsistent):\n"
+        "- part_number columns may be named: Part No, PartNo, Part Num, Material Code, "
+        "Item Code, Item No, SKU, Code, Product Code.\n"
+        "- quantity columns may be named: Quantity, Qty, Available Qty, Current Stock, "
+        "Current St, Closing Stock, Closing Balance, Balance Qty, Balance, Stock.\n"
+        "- NEVER quantity (money or unconfirmed stock): MRP, Rate, Price, Unit Price, "
+        "Selling Price, Amount, Value, Closing Value, Closing Amount, Discount, Float Stock.\n"
+        "- When TWO columns could both be the quantity, prefer the one whose name is a "
+        "known stock alias and whose values look like piece counts (small integers), not "
+        "like prices; if it stays ambiguous, LOWER your confidence below 0.5 instead of "
+        "guessing.\n"
+        'Worked example: headers [Material Code, Description, Balance Qty, MRP, Closing Value] '
+        '-> column_mapping {"part_number": "Material Code", "available_quantity": "Balance Qty"}, '
+        'rejected_columns ["MRP", "Closing Value"].'
     ),
     "customer_order": (
         "This is a CUSTOMER ORDER document: parts and quantities a customer is requesting.\n"

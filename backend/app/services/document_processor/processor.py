@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from backend.app.ai import shadow
+from backend.app.ai import registry, shadow
 from backend.app.integrations.google_sheets.sync_service import (
     sync_vendor_inventory_to_sheet_safe,
 )
@@ -201,7 +201,14 @@ def process_document(
         # would have extracted. Runs here because the nested transaction has
         # closed but the file has not been moved yet. No-ops unless
         # AI_SHADOW_MODE=true with a real provider configured.
-        if classification.document_type == IncomingDocumentType.VENDOR_INVENTORY:
+        # Skipped when the real AI fallback is enabled -- the dispatcher's
+        # rescue path (`backend.app.ai.fallback`) already made (and logged) the
+        # model call for this failure; a second shadow call would double the
+        # provider traffic for no information.
+        if (
+            classification.document_type == IncomingDocumentType.VENDOR_INVENTORY
+            and not registry.document_fallback_enabled()
+        ):
             shadow.observe_failed_inventory(file_path, deterministic_reason=result.message)
         staging.mark_failed_location(file_path)
     elif result.core_status == "NEEDS_REVIEW":

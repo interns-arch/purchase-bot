@@ -35,6 +35,7 @@ from pathlib import Path
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from backend.app.ai import fallback as ai_fallback
 from backend.app.documents.models import IncomingDocumentType
 from backend.app.integrations.google_sheets.sync_service import sync_vendor_inventory_to_sheet_safe
 from backend.app.services.document_processor.detector import Classification
@@ -212,6 +213,27 @@ def _dispatch_inventory(
         vendor, onboarding_message = _resolve_or_onboard_vendor(name, session)
 
     result = import_service.run_import(vendor.id, file_path, session)
+
+    if result.status == ImportStatus.FAILED and ai_fallback.rescue_eligible(result.message):
+        # AI-assisted rescue (gated by AI_FALLBACK_ENABLED): the model proposes
+        # a column mapping, which is strictly validated + cross-checked against
+        # the file; the import below re-reads the WHOLE file deterministically
+        # with that mapping through the unchanged run_import. The deterministic
+        # FAILED attempt above stays in Import History as the audit trail.
+        rescue = ai_fallback.discover_inventory_mapping(file_path, result.message)
+        if rescue is not None:
+            mapping, note = rescue
+            retry = import_service.run_import(
+                vendor.id, file_path, session, column_mapping=mapping, mapping_note=note
+            )
+            if retry.status != ImportStatus.FAILED:
+                logger.info(
+                    "AI rescue imported '%s' for vendor %s (%s rows).",
+                    file_path.name,
+                    vendor.name,
+                    retry.row_count,
+                )
+                result = retry
 
     if result.status == ImportStatus.AWAITING_CONFIRMATION:
         # Same auto-skip behavior as the original manual-upload glue: an
