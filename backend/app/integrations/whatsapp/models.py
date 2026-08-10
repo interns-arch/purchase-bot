@@ -40,6 +40,26 @@ class WhatsAppPendingCommand(Base):
     )
 
 
+class WhatsAppPendingVendorFile(Base):
+    """A staged Vendor Inventory file waiting for its VENDOR NAME.
+
+    Vendor identity comes from the name the sender supplies (file caption, or
+    a follow-up text) -- NEVER from the filename. When a vendor file arrives
+    without a caption, it is staged on disk and recorded here; the sender's
+    next non-command text message is taken as the vendor name and every
+    pending file for that number is then imported for that vendor. Persisted
+    in the DB (same reasoning as `WhatsAppPendingCommand`) so a restart never
+    loses the association. `original_filename` is audit metadata only."""
+
+    __tablename__ = "whatsapp_pending_vendor_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True)
+    staged_path: Mapped[str] = mapped_column()
+    original_filename: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class WhatsAppIntegrationStatus(Base):
     __tablename__ = "whatsapp_integration_status"
 

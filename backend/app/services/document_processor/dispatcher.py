@@ -182,13 +182,32 @@ def _dispatch_inventory(
         vendor = vendor_service.get_vendor(classification.vendor_id, session)
         if vendor is None:
             raise ValueError(f"Vendor {classification.vendor_id} does not exist.")
+    elif classification.vendor_name is not None:
+        # WhatsApp flow: the sender SUPPLIED the vendor name (caption or
+        # follow-up text). Resolve it against the existing Vendor master, or
+        # onboard a genuinely new vendor through the ONE existing mechanism
+        # (race-safe, existing code generation) -- the filename plays no part
+        # and is kept only as audit metadata on the import/document records.
+        vendor, onboarding_message = _resolve_or_onboard_vendor(
+            classification.vendor_name, session
+        )
+    elif classification.require_vendor_name:
+        # WhatsApp flow but no vendor name reached us (defensive: the worker
+        # normally holds the file and asks the sender first). NEVER guess
+        # from the filename.
+        raise ValueError(
+            f"Vendor name required for '{file_path.name}'. Reply with the vendor "
+            "name (or re-send the file with the vendor name as its caption) -- "
+            "the filename is never used to identify the vendor."
+        )
     elif classification.vendor_code is not None:
         # A code-shaped prefix was found in the filename but didn't match
         # any vendor -- reject rather than silently misrouting the file.
         raise UnknownVendorCodeError(classification.vendor_code)
     else:
-        # No code-shaped prefix at all -- reuse the existing vendor for this
-        # company name, or onboard a new one (race-safe: no duplicate/_2 code).
+        # MANUAL upload path (unchanged pre-existing behaviour): reuse the
+        # existing vendor for this company name, or onboard a new one
+        # (race-safe: no duplicate/_2 code).
         name = _vendor_name_from_filename(file_path.name)
         vendor, onboarding_message = _resolve_or_onboard_vendor(name, session)
 

@@ -76,6 +76,15 @@ class Classification:
     # attempt customer identification at all and must keep `customer_id`
     # unset exactly as before this feature existed.
     resolve_customer: bool = False
+    # The vendor NAME the sender supplied for a WhatsApp Vendor Inventory
+    # file (caption or follow-up text). The dispatcher resolves it against
+    # the existing Vendor master (`_resolve_or_onboard_vendor`).
+    vendor_name: str | None = None
+    # True only for the WhatsApp Vendor Inventory flow: vendor identity MUST
+    # come from `vendor_name` -- if it is missing the dispatcher fails with a
+    # clear message instead of guessing from the filename. Manual uploads
+    # keep their pre-existing filename behaviour (flag stays False).
+    require_vendor_name: bool = False
 
 
 def _keyword_override(caption: str | None) -> IncomingDocumentType | None:
@@ -134,26 +143,31 @@ def classify(
 
     - WHATSAPP -> the type is decided by the sender's routing command
       (Vendor / Customer / ...), which the WhatsApp worker passes in as
-      `document_type_hint`. Vendor Inventory still resolves the vendor from
-      the filename's Vendor Code (AR_CT.xlsx / BI_CT.xlsx ...) so that
-      onboarding workflow is unaffected. With no hint it defaults to Vendor
-      Inventory (backward-compatible with any direct caller).
+      `document_type_hint`. Vendor Inventory identity comes from the vendor
+      NAME the sender supplied (`metadata.vendor_name` -- caption or
+      follow-up text), never from the filename. With no hint it defaults to
+      Vendor Inventory (backward-compatible with any direct caller).
     - EMAIL (dedicated Gmail inbox) -> Customer Order for spreadsheets, or
       Vendor Invoice for PDF purchase bills, decided purely by file format.
     - MANUAL -> the hint/heuristic classifier below (`_classify_manual`)."""
     if source == DocumentSource.WHATSAPP:
         hint = metadata.document_type_hint
         if hint is None or hint == IncomingDocumentType.VENDOR_INVENTORY:
-            # Vendor Inventory (default): keep the filename Vendor-Code lookup
-            # so a returning vendor is still identified (and an unknown code is
-            # still rejected downstream) exactly as before.
-            classification = _classify_inventory(file_path, session)
+            # Vendor Inventory: identity comes from the vendor NAME the
+            # sender supplied (caption or follow-up text), resolved by the
+            # dispatcher against the existing Vendor master. The filename is
+            # audit metadata only -- it is NEVER used to identify the vendor
+            # (the same vendor may send stock.xlsx, August_Final.xlsx, ...).
+            classification = Classification(
+                IncomingDocumentType.VENDOR_INVENTORY,
+                vendor_name=(metadata.vendor_name or "").strip() or None,
+                require_vendor_name=True,
+            )
             logger.info(
                 "WHATSAPP document '%s' routed to VENDOR_INVENTORY "
-                "(vendor_code=%s, vendor_id=%s).",
+                "(vendor_name=%s; filename is metadata only).",
                 file_path.name,
-                classification.vendor_code,
-                classification.vendor_id,
+                classification.vendor_name,
             )
             return classification
         if hint == IncomingDocumentType.CUSTOMER_ORDER:

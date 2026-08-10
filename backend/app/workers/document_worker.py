@@ -22,9 +22,11 @@ Customer Order imports are reached through the unchanged `process_document`."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from backend.app.documents import service as documents_service
-from backend.app.documents.models import DocumentSource
-from backend.app.integrations.whatsapp import command_store, commands
+from backend.app.documents.models import DocumentSource, IncomingDocumentType
+from backend.app.integrations.whatsapp import command_store, commands, pending_vendor_files
 from backend.app.integrations.whatsapp.client import WhatsAppClient
 from backend.app.integrations.whatsapp.commands import WhatsAppCommand
 from backend.app.integrations.whatsapp.config import whatsapp_settings
@@ -45,11 +47,27 @@ logger = get_logger(__name__)
 
 
 def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
-    """A plain text message. If it's a known routing command, remember it for
-    this number so the next file is imported accordingly; otherwise reply
-    with the instruction (requirement 6)."""
+    """A plain text message. Priority:
+    1. A known routing command -> remember it for this number.
+    2. Otherwise, if this number has Vendor Inventory file(s) held while
+       waiting for their vendor name -> this text IS the vendor name; import
+       every held file for that vendor (identity from the NAME, never the
+       filename).
+    3. Otherwise -> reply with the instruction (requirement 6)."""
     command = commands.parse_command(message.text)
     if command is None:
+        vendor_name = (message.text or "").strip()
+        with get_session() as session:
+            held = pending_vendor_files.list_for(message.sender, session)
+        if held and vendor_name:
+            logger.info(
+                "WhatsApp text from %s taken as VENDOR NAME %r for %d held file(s).",
+                message.sender,
+                vendor_name,
+                len(held),
+            )
+            _process_pending_vendor_files(message.sender, vendor_name, held)
+            return
         logger.info(
             "WhatsApp text from %s is not a routing command (%r) -- replying with instructions.",
             message.sender,
@@ -61,10 +79,58 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     with get_session() as session:
         command_store.set_command(message.sender, command.key, session)
     logger.info("WhatsApp routing command from %s stored: %s", message.sender, command.key)
+    if command.document_type == IncomingDocumentType.VENDOR_INVENTORY:
+        send_reply_safe(
+            message.sender,
+            f"Got it — now upload your {command.label} file (Excel). "
+            "Add the vendor name as the file's caption, or send the vendor "
+            "name as a message right after the file.",
+        )
+    else:
+        send_reply_safe(
+            message.sender,
+            f"Got it — now upload your {command.label} file (Excel).",
+        )
+
+
+def _process_pending_vendor_files(sender: str, vendor_name: str, held) -> None:
+    """Import every held Vendor Inventory file for `sender` under the vendor
+    name they just supplied, oldest first. Each file is removed from the
+    pending store whether its import succeeds or fails (the result toast /
+    Import History carries the outcome either way)."""
     send_reply_safe(
-        message.sender,
-        f"Got it — now upload your {command.label} file (Excel).",
+        sender,
+        f"Importing {len(held)} file(s) for vendor '{vendor_name}'.",
     )
+    for row in held:
+        file_path = Path(row.staged_path)
+        try:
+            if not file_path.exists():
+                logger.error(
+                    "Held vendor file %s for %s no longer exists on disk -- skipping.",
+                    row.staged_path,
+                    sender,
+                )
+                notifications.publish_download_failure(
+                    "WhatsApp",
+                    row.original_filename,
+                    "The held file is no longer available -- please re-send it.",
+                )
+                continue
+            metadata = DocumentMetadata(
+                sender=sender,
+                document_type_hint=IncomingDocumentType.VENDOR_INVENTORY,
+                original_filename=row.original_filename,
+                vendor_name=vendor_name,
+            )
+            _process_staged_file(file_path, metadata, row.original_filename)
+        except Exception:  # noqa: BLE001 -- one bad held file must not block the rest
+            logger.exception(
+                "Failed to import held vendor file %s for %s.", row.original_filename, sender
+            )
+        finally:
+            with get_session() as session:
+                pending_vendor_files.remove(row.id, session)
 
 
 def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
@@ -156,7 +222,44 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
         )
         return
 
-    # Media downloaded + staged; next we open a DB session and process it.
+    # Vendor identity for Vendor Inventory comes from the vendor NAME the
+    # sender supplies -- the file caption, or a follow-up text message. The
+    # filename is audit metadata only. No caption -> hold the staged file and
+    # ASK for the vendor name instead of guessing.
+    vendor_name = (message.caption or "").strip()
+    if command.document_type == IncomingDocumentType.VENDOR_INVENTORY and not vendor_name:
+        with get_session() as session:
+            pending_vendor_files.add(message.sender, str(file_path), message.filename, session)
+        logger.info(
+            "WhatsApp vendor file '%s' from %s staged WITHOUT a vendor name -- "
+            "held at %s; asking the sender for the vendor name.",
+            message.filename,
+            message.sender,
+            file_path,
+        )
+        send_reply_safe(
+            message.sender,
+            f"Got '{message.filename}'. Which vendor is this inventory from? "
+            "Reply with the vendor name (e.g. MAHINDRA).",
+        )
+        return
+
+    metadata = DocumentMetadata(
+        sender=message.sender,
+        caption=message.caption,
+        external_message_id=message.message_id,
+        original_filename=message.filename,
+        document_type_hint=command.document_type,
+        vendor_name=vendor_name or None,
+    )
+    _process_staged_file(file_path, metadata, message.filename, message.media_id)
+
+
+def _process_staged_file(
+    file_path, metadata: DocumentMetadata, display_name: str, media_id: str | None = None
+) -> None:
+    """Run one already-staged WhatsApp file through the unchanged import
+    pipeline, then publish the result + trigger the post-commit outputs."""
     logger.info(
         "WhatsApp pipeline: media staged at %s -- opening DB session "
         "(note: get_session() runs Base.metadata.create_all against the configured "
@@ -167,18 +270,11 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
     try:
         with get_session() as session:
             logger.info("WhatsApp pipeline: DB session opened; calling process_document...")
-            metadata = DocumentMetadata(
-                sender=message.sender,
-                caption=message.caption,
-                external_message_id=message.message_id,
-                original_filename=message.filename,
-                document_type_hint=command.document_type,
-            )
             result = process_document(DocumentSource.WHATSAPP, file_path, metadata, session)
             logger.info(
                 "WhatsApp pipeline: process_document finished for %s "
                 "(document_id=%s, status=%s, type=%s)",
-                message.filename,
+                display_name,
                 getattr(result, "document_id", None),
                 getattr(getattr(result, "status", None), "value", None),
                 getattr(getattr(result, "document_type", None), "value", None),
@@ -189,8 +285,8 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
         # `finally` still clears the pending command (requirement 4).
         logger.exception(
             "WhatsApp pipeline: FAILED during DB session / process_document for %s (media_id=%s)",
-            message.filename,
-            message.media_id,
+            display_name,
+            media_id,
         )
         raise
 
