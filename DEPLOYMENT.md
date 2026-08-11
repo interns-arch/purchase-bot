@@ -121,7 +121,7 @@ never commit it). In production, set these in the Render dashboard instead.
 | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_BUSINESS_ACCOUNT_ID`/`META_BUSINESS_ID`, `WHATSAPP_APP_ID`/`META_APP_ID`, `WHATSAPP_APP_SECRET`/`META_APP_SECRET`/`WHATSAPP_WEBHOOK_SECRET` | Meta Business App credentials -- see §6 | *(unset)* |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` / `WHATSAPP_VERIFY_TOKEN` | Webhook handshake token. Second name is a fallback alias | *(unset)* |
 | `VENDOR_SELECTION_DEFAULT_STRATEGY` | Default Automatic Vendor Selection strategy: `highest_quantity` \| `minimum_vendors` \| `combination` | `combination` |
-| `OWN_STOCK_VENDOR_NAME` | Vendor name (case-insensitive) treated as the company's own stock and always allocated first, before any external vendor. Blank disables name-based detection (the `Vendor.is_own_stock` DB flag still applies). See README "Own Stock priority (Bijvasan)". | `Bijvasan` |
+| `OWN_STOCK_VENDOR_NAME` | Comma-separated vendor names (case-insensitive) treated as the company's own stock and always allocated first, before any external vendor. Blank disables name-based detection (the `Vendor.is_own_stock` DB flag still applies). See README "Own Stock priority". | `Bijvasan,Bijwasan,Mansarovar,Mansarover` |
 | `GMAIL_ENABLED` / `ENABLE_EMAIL_AUTOMATION` | `true`/`false` -- see §7 | `false` |
 | `GMAIL_AUTH_MODE` | `imap` or `oauth` -- see §7 | `imap` |
 | `GMAIL_EMAIL`, `GMAIL_APP_PASSWORD`, `GMAIL_IMAP_SERVER`, `GMAIL_IMAP_PORT` | IMAP mode credentials -- see §7 | *(unset except server/port)* |

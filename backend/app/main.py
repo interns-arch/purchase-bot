@@ -38,6 +38,7 @@ from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
 from backend.app.core.config import settings
+from backend.app.integrations.whatsapp import notification_forwarder
 from backend.app.workers.scheduler import start_scheduler, stop_scheduler
 from core.db import get_session, init_db
 from core.logging_setup import get_logger
@@ -76,6 +77,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     # backend/app/database/session.py).
     init_db()
     _bootstrap_admin_if_configured()
+    # Mirror UI toast notifications to the Founder's WhatsApp (best-effort).
+    notification_forwarder.register()
     start_scheduler()
     yield
     stop_scheduler()

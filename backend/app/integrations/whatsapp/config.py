@@ -59,6 +59,15 @@ class WhatsAppSettings:
     # WHATSAPP_PHONE_NUMBER_ID above -- no separate auth.
     admin_phone_number: str | None = os.environ.get("WHATSAPP_ADMIN_PHONE_NUMBER") or None
 
+    # Mirror every UI toast notification (import results, workbook/Sheet
+    # updates, allocation outcomes, failures) as a WhatsApp text to
+    # WHATSAPP_ADMIN_PHONE_NUMBER -- the Founder sees the same events the
+    # web UI shows without keeping it open. Requires the admin number above;
+    # set WHATSAPP_FORWARD_NOTIFICATIONS=false to turn the mirror off.
+    forward_notifications: bool = (
+        os.environ.get("WHATSAPP_FORWARD_NOTIFICATIONS", "true").strip().lower() == "true"
+    )
+
     # When several vendor files arrive in one WhatsApp batch, each successful
     # import requests the consolidated workbook -- this debounce coalesces
     # those requests so ONE final workbook is sent after imports have been

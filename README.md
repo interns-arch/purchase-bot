@@ -138,6 +138,7 @@ If everything fails, the file stays FAILED with the real reason in the toast and
 - **Google Sheet** (`backend/app/integrations/google_sheets/sync_service.py`): the vendor's worksheet — named by **Vendor Code** (`MA_CT`), never the filename — is overwritten with an **EXACT COPY of the vendor's own file**: original columns, original order, original values (MRP/Rate/dates included, nothing filtered). Built from `inventory_import_service.get_active_raw_table()`. Your hand-maintained hub tabs are never touched.
 - **Consolidated `Vendor_Inventory.xlsx`** (`core/services/vendor_inventory_workbook.py`): one tab per vendor (same exact-copy rule, same code-named tabs), sent to `WHATSAPP_ADMIN_PHONE_NUMBER`. **Debounced** — a batch of many vendor files produces ONE workbook ~20s after the batch goes quiet (`inventory_output.request_consolidated_send`). A vendor with no active inventory gets no tab.
 - The workbook and Sheet are **outputs only** — nothing ever reads them back; the database is the single source of truth.
+- **WhatsApp notification mirror** (`backend/app/integrations/whatsapp/notification_forwarder.py`): every toast the web UI shows — import success/failure, workbook and Sheet updates, allocation outcomes, Gmail poll errors — is also sent as a WhatsApp text (✅/⚠️/❌/ℹ️ + the same detail lines) to `WHATSAPP_ADMIN_PHONE_NUMBER`. Best-effort on its own thread; `WHATSAPP_FORWARD_NOTIFICATIONS=false` turns it off.
 
 ---
 
@@ -188,7 +189,7 @@ Example: V01 has P-1001 x10, V02 has P-1001 x5
 ```
 
 - `vendor_comparison_service.compare_vendors_for_order()` — every vendor holding the part, showing live REMAINING stock.
-- `rules/engine.run_automatic_vendor_selection()` — Own-Stock vendor (`OWN_STOCK_VENDOR_NAME`) first, then the `combination` strategy: vendors ranked by stock, each draw capped at live remaining, splitting across vendors as needed; partial fulfilment allowed (never all-or-nothing).
+- `rules/engine.run_automatic_vendor_selection()` — Own-Stock vendors first (`OWN_STOCK_VENDOR_NAME`, comma-separated — e.g. `Bijwasan,Mansarovar`; among them, biggest available stock first), then the `combination` strategy: vendors ranked by stock, each draw capped at live remaining, splitting across vendors as needed; partial fulfilment allowed (never all-or-nothing).
 - `vendor_selection_service.upsert_selection()` — takes a database row lock BEFORE computing remaining, so two orders processed at the same instant can never over-allocate (stock 10 + two orders of 6 = 6+4, never 12 — verified on production Postgres).
 - Unfulfilled lines always show `Selected Qty 0` with the reason ("Insufficient vendor stock (short N)") — never blank.
 
@@ -250,7 +251,7 @@ The **grouping window** (`WHATSAPP_GROUPING_WINDOW_MINUTES`, default 10): all fi
 |---|---|
 | Database | `DATABASE_URL` |
 | Auth | `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `JWT_SECRET_KEY` |
-| WhatsApp | `WHATSAPP_ENABLED`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ADMIN_PHONE_NUMBER`, `WHATSAPP_GROUPING_WINDOW_MINUTES`, `WHATSAPP_WORKBOOK_DEBOUNCE_SECONDS`, `WHATSAPP_AUTO_ALLOCATION_ENABLED`, `WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS` |
+| WhatsApp | `WHATSAPP_ENABLED`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ADMIN_PHONE_NUMBER`, `WHATSAPP_FORWARD_NOTIFICATIONS`, `WHATSAPP_GROUPING_WINDOW_MINUTES`, `WHATSAPP_WORKBOOK_DEBOUNCE_SECONDS`, `WHATSAPP_AUTO_ALLOCATION_ENABLED`, `WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS` |
 | Gmail | `GMAIL_ENABLED`, `GMAIL_AUTH_MODE=oauth`, `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` (one matching trio!), `GMAIL_ALLOWED_SENDERS`, `GMAIL_ATTACHMENT_PREFIX`, `GMAIL_SAVE_ATTACHMENT_AS`, `GMAIL_PROCESS_TODAY_ONLY` |
 | Google Sheets | `ENABLE_GOOGLE_SHEETS_SYNC`, `GOOGLE_SHEET_ID` (credentials shared with Gmail) |
 | AI | `AI_PROVIDER=nvidia`, `AI_MODEL`, `NVIDIA_API_KEY`, `AI_FALLBACK_ENABLED`, `AI_SHADOW_MODE`, `AI_TIMEOUT_SECONDS` |
