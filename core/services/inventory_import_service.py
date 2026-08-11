@@ -655,6 +655,34 @@ def get_active_inventory(vendor_id: int, session: Session) -> list[VendorInvento
     )
 
 
+def get_active_raw_table(vendor_id: int, session: Session) -> tuple[list[str], list[list[str]]]:
+    """The vendor's ACTIVE inventory reconstructed EXACTLY as the source
+    file's line-item table: the original column headers (original order) and
+    every row's original cell values -- MRP, Rate, dates, brand, anything the
+    vendor included is kept verbatim, nothing renamed or filtered. This is
+    the "exact copy" used by the OUTPUT layers (Google Sheet tabs and the
+    consolidated Vendor_Inventory.xlsx); comparison/allocation keep using the
+    normalized columns. Built from each row's `raw_data`, the verbatim source
+    cells captured at import time.
+
+    Returns ([], []) when the vendor has no active rows or the rows carry no
+    raw cells (legacy data) -- callers then fall back to the normalized
+    format."""
+    rows = get_active_inventory(vendor_id, session)
+    headers: list[str] = []
+    for row in rows:  # union of keys, first-seen order = original column order
+        if isinstance(row.raw_data, dict):
+            for key in row.raw_data:
+                if key not in headers:
+                    headers.append(key)
+    if not headers:
+        return [], []
+    table = [
+        [str((row.raw_data or {}).get(header, "")) for header in headers] for row in rows
+    ]
+    return headers, table
+
+
 def get_master_inventory(session: Session) -> list[MasterInventoryRow]:
     active_import_ids = [
         row.id

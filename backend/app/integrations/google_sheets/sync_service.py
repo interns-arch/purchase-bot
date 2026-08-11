@@ -120,26 +120,38 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
 
     client = _build_client()
     spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
+
+    # EXACT COPY of the vendor's own file: original columns, original order,
+    # original values -- nothing renamed or filtered. Identical rule to the
+    # consolidated Vendor_Inventory.xlsx (one format for both outputs); the
+    # normalized columns remain internal, for comparison/allocation only.
+    raw_headers, raw_rows = inventory_import_service.get_active_raw_table(vendor_id, session)
+    if raw_headers:
+        values = [raw_headers] + raw_rows
+    else:
+        # Legacy rows without captured raw cells: normalized fallback.
+        synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
+        values = [_HEADERS] + [
+            [
+                row.vendor_part_number,
+                _row_description(row.raw_data),
+                str(row.quantity_available),
+                str(row.price) if row.price is not None else "",
+                str(row.mrp) if row.mrp is not None else "",
+                synced_at,
+            ]
+            for row in rows
+        ]
+
     # Canonical worksheet identity is the permanent Vendor Code (MA_CT, DE_CT),
     # exactly like the Excel workbook (`core/services/vendor_inventory_workbook.
     # py:_sheet_title`) -- one identity rule for both outputs, never the
-    # display name.
+    # display name. Created wide enough for however many columns the vendor's
+    # file actually has.
     worksheet_title = (vendor.vendor_code or vendor.name or f"V{vendor.id}").strip()
-    worksheet = _get_or_create_worksheet(spreadsheet, worksheet_title, len(_HEADERS))
-
-    # Business timezone is IST -- see core.time_utils.
-    synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
-    values = [_HEADERS] + [
-        [
-            row.vendor_part_number,
-            _row_description(row.raw_data),
-            str(row.quantity_available),
-            str(row.price) if row.price is not None else "",
-            str(row.mrp) if row.mrp is not None else "",
-            synced_at,
-        ]
-        for row in rows
-    ]
+    worksheet = _get_or_create_worksheet(
+        spreadsheet, worksheet_title, max(len(values[0]), len(_HEADERS))
+    )
 
     # Overwrite the data range and re-apply header formatting -- simplest
     # correct way to "update existing rows" when the vendor's inventory can
@@ -148,7 +160,7 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
     # by hand) untouched.
     worksheet.clear()
     worksheet.update(values, "A1")
-    last_column = chr(ord("A") + len(_HEADERS) - 1)
+    last_column = chr(ord("A") + max(len(values[0]), 1) - 1)
     worksheet.format(f"A1:{last_column}1", {"textFormat": {"bold": True}})
 
 

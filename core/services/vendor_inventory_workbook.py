@@ -95,21 +95,33 @@ def build_workbook(session: Session) -> openpyxl.Workbook:
             continue
 
         sheet = workbook.create_sheet(title=_sheet_title(vendor, used_titles))
-        sheet.append(_HEADERS)
+
+        # EXACT COPY of the vendor's own file: original columns, original
+        # order, original values -- nothing renamed or filtered (the
+        # normalized columns remain internal, for comparison/allocation).
+        raw_headers, raw_rows = inventory_import_service.get_active_raw_table(
+            vendor.id, session
+        )
+        if raw_headers:
+            sheet.append(raw_headers)
+            for raw_row in raw_rows:
+                sheet.append(raw_row)
+        else:
+            # Legacy rows without captured raw cells: normalized fallback.
+            sheet.append(_HEADERS)
+            for row in rows:
+                sheet.append(
+                    [
+                        row.vendor_part_number,
+                        _description(row),
+                        str(row.quantity_available),
+                        str(row.price) if row.price is not None else "",
+                        str(row.mrp) if row.mrp is not None else "",
+                        synced_at,
+                    ]
+                )
         for cell in sheet[1]:
             cell.font = Font(bold=True)
-
-        for row in rows:
-            sheet.append(
-                [
-                    row.vendor_part_number,
-                    _description(row),
-                    str(row.quantity_available),
-                    str(row.price) if row.price is not None else "",
-                    str(row.mrp) if row.mrp is not None else "",
-                    synced_at,
-                ]
-            )
 
         for column_cells in sheet.columns:
             width = max((len(str(c.value)) for c in column_cells if c.value is not None), default=10)
