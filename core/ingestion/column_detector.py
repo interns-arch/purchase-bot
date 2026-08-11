@@ -58,9 +58,16 @@ QUANTITY_HEADERS = {
 INVENTORY_PART_NUMBER_HEADERS = PART_NUMBER_HEADERS | {
     "partnumber",  # Part Number / Part_Number
     "partnum",     # Part Num
-    "partno", 
-    "Part Num", 
+    "partno",
+    "Part Num",
     "PartNo",    # PartNo / Part No
+    # Warehouse-management exports (e.g. SAP EWM "EXPORT_*.xlsx") label the
+    # part column simply "Product" (with "Product Description" beside it,
+    # which stays a description alias -- distinct normalised names).
+    "product",
+    "productid",
+    "productno",
+    "productnumber",
 }
 
 # Explicit, curated quantity aliases -- NEVER derived from arbitrary numeric
@@ -89,6 +96,11 @@ INVENTORY_QUANTITY_HEADERS = {
     "closingquantity",     # Closing Quantity
     "closingbalance",      # Closing Balance
     "closingstockqty",     # Closing Stock Qty
+    # Aggregated warehouse exports (pivot-style "Summary" sheets) name the
+    # on-hand total "Sum of Quantity". Unambiguous stock counts -- money
+    # columns remain excluded as always.
+    "sumofquantity",
+    "sumofqty",
 }
 # NOTE: every entry above must already be in `normalise_header` form
 # (lowercase, alphanumeric only). An entry like "Current Stock" can never
