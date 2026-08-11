@@ -118,7 +118,7 @@ def _process_message(message: IncomingEmailMessage) -> None:
             logger.info("Gmail message %s already processed -- skipping.", message.message_id)
             return
 
-    for attachment in attachments:
+    for index, attachment in enumerate(attachments):
         saved_name = _saved_name_for(attachment.filename)
         if saved_name != attachment.filename:
             logger.info(
@@ -126,6 +126,15 @@ def _process_message(message: IncomingEmailMessage) -> None:
                 attachment.filename,
                 saved_name,
             )
+        # `incoming_documents.email_message_id` is UNIQUE, so an email with
+        # SEVERAL attachments must not record the same id twice (that crashed
+        # attachment #2 and silently dropped it). The FIRST attachment keeps
+        # the plain message id -- the re-poll dedupe lookup above matches it
+        # exactly -- and siblings get an ::N suffix: unique, still traceable
+        # to the same email.
+        document_message_id = (
+            message.message_id if index == 0 else f"{message.message_id}::{index + 1}"
+        )
         file_path = staging.save_incoming_bytes(
             attachment.content, saved_name, DocumentSource.EMAIL
         )
@@ -136,7 +145,7 @@ def _process_message(message: IncomingEmailMessage) -> None:
             # misleading.
             metadata = DocumentMetadata(
                 sender=message.sender,
-                external_message_id=message.message_id,
+                external_message_id=document_message_id,
                 original_filename=saved_name,
             )
             result = process_document(DocumentSource.EMAIL, file_path, metadata, session)

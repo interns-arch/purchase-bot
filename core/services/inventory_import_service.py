@@ -44,7 +44,7 @@ from core.models import (
     VendorInventory,
 )
 from core.services.own_stock import is_own_stock_vendor
-from core.services.part_resolution_service import resolve_part
+from core.services.part_resolution_service import resolve_part, resolve_parts_bulk  # noqa: F401 -- resolve_part kept for other callers
 
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
 DEFAULT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
@@ -491,6 +491,7 @@ def run_import(
 
     row_count = 0
     error_count = 0
+    valid_rows: list[tuple[int, dict, str, object]] = []
 
     for row_number, row in enumerate(rows, start=2):
         raw_part_number = row.get(part_column, "").strip()
@@ -539,7 +540,17 @@ def run_import(
             error_count += 1
             continue
 
-        part = resolve_part(vendor_id, raw_part_number, session)
+        # Row is valid -- part resolution happens in ONE bulk pass below
+        # (per-row resolve_part cost 2-3 DB round-trips each; a 6,800-line
+        # file spent minutes on them against a hosted database).
+        valid_rows.append((row_number, row, raw_part_number, quantity))
+
+    parts_by_norm = resolve_parts_bulk(
+        vendor_id, [raw for _, _, raw, _ in valid_rows], session
+    )
+
+    for row_number, row, raw_part_number, quantity in valid_rows:
+        part = parts_by_norm[normalise_part_number(raw_part_number)]
 
         price = None
         if price_column and is_parseable_quantity(row.get(price_column, "")):
