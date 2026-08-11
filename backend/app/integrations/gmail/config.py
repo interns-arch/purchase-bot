@@ -37,6 +37,18 @@ class GmailSettings:
     # How often the background scheduler polls the mailbox for unread mail.
     poll_interval_seconds: int = int(os.environ.get("GMAIL_POLL_INTERVAL_SECONDS", "300"))
 
+    # Sender whitelist: comma-separated email addresses. When set, ONLY unread
+    # mails FROM these addresses are fetched and processed -- everything else
+    # in the inbox is completely ignored (never read, never marked, never
+    # imported). Empty/unset keeps the historical behaviour (all unread mails
+    # with attachments are processed). Matching is on the address part only,
+    # case-insensitive ("Rahul <rahul@acme.com>" matches "rahul@acme.com").
+    allowed_senders: tuple[str, ...] = tuple(
+        address.strip().lower()
+        for address in os.environ.get("GMAIL_ALLOWED_SENDERS", "").split(",")
+        if address.strip()
+    )
+
     # Business rule: when a message has more than this many attachments, the
     # trailing ones (typically signature images/logos, per the purchase
     # team) are ignored.

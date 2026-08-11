@@ -34,23 +34,44 @@ def publish_document_result(source: str, result) -> None:
 
         if status in _SUCCESS_STATUSES:
             errors = getattr(result, "error_count", 0) or 0
+            is_invoice = doc_type == "VENDOR_INVOICE"
             lines = []
             if vendor:
                 lines.append(f"Vendor: {vendor}")
             lines.append(f"Source: {source}")
-            lines.append(
-                f"Order Lines: {rows}" if doc_type == "CUSTOMER_ORDER" else f"Records Imported: {rows}"
-            )
+            if is_invoice:
+                # An invoice is VERIFIED against allocations, not imported as
+                # stock -- say what the numbers actually mean.
+                lines.append(f"Lines Matched: {rows}")
+            elif doc_type == "CUSTOMER_ORDER":
+                lines.append(f"Order Lines: {rows}")
+            else:
+                lines.append(f"Records Imported: {rows}")
             if status == "PROCESSED_WITH_ERRORS" or errors:
-                # Partial import: never report a plain success -- expose the
-                # real Imported/Rejected split and the reason when one exists.
-                lines.append(f"Rows Rejected: {errors}")
+                # Partial result: never report a plain success -- expose the
+                # real split and the reason when one exists.
+                lines.append(f"Discrepancies: {errors}" if is_invoice else f"Rows Rejected: {errors}")
                 reason = getattr(result, "message", None)
                 if reason:
                     lines.append(f"Reason: {reason}")
-                lines.append("See Import History for row-level details.")
-                broker.publish("warning", f"{label} imported with errors.", "\n".join(lines))
+                lines.append(
+                    "See the Vendor Invoices page for line-level verification."
+                    if is_invoice
+                    else "See Import History for row-level details."
+                )
+                broker.publish(
+                    "warning",
+                    f"{label} verified with discrepancies." if is_invoice
+                    else f"{label} imported with errors.",
+                    "\n".join(lines),
+                )
             else:
+                # A clean success may still carry a note worth showing -- e.g.
+                # "New vendor onboarded with code X" or the AI-assisted
+                # column-mapping provenance.
+                note = getattr(result, "message", None)
+                if note:
+                    lines.append(str(note))
                 broker.publish("success", f"{label} imported successfully.", "\n".join(lines))
         elif status in _FAILURE_STATUSES:
             reason = getattr(result, "message", None) or "Unknown error."

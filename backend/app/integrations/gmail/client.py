@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from email.header import decode_header
 from email.message import Message
+from email.utils import parseaddr
 
 from core.logging_setup import get_logger
 
@@ -59,6 +60,29 @@ class GmailClient(ABC):
     @abstractmethod
     def mark_processed(self, message: IncomingEmailMessage) -> None:
         raise NotImplementedError
+
+
+def build_search_query(settings: GmailSettings) -> str:
+    """The Gmail search used by the OAuth client. With GMAIL_ALLOWED_SENDERS
+    set, the query itself is narrowed with a `from:(a OR b)` clause so
+    non-whitelisted mail is never even fetched from the API."""
+    query = "is:unread has:attachment"
+    if settings.allowed_senders:
+        senders = " OR ".join(settings.allowed_senders)
+        query += f" from:({senders})"
+    return query
+
+
+def sender_allowed(sender: str | None, settings: GmailSettings) -> bool:
+    """True when this From header may be processed. An empty whitelist keeps
+    the historical accept-all behaviour. Matching uses only the address part
+    ("Rahul Traders <rahul@acme.com>" -> "rahul@acme.com"), case-insensitive."""
+    if not settings.allowed_senders:
+        return True
+    if not sender:
+        return False
+    address = parseaddr(sender)[1].strip().lower()
+    return address in settings.allowed_senders
 
 
 def _decode_mime_words(value: str | None) -> str | None:
@@ -113,10 +137,18 @@ class ImapGmailClient(GmailClient):
                 raw_email = msg_data[0][1]
                 parsed = email.message_from_bytes(raw_email)
                 message_id = parsed.get("Message-ID") or f"imap-uid-{uid.decode()}"
+                sender = _decode_mime_words(parsed.get("From"))
+                if not sender_allowed(sender, self._settings):
+                    logger.info(
+                        "Gmail (IMAP): skipping message from %r -- sender is not "
+                        "in GMAIL_ALLOWED_SENDERS.",
+                        sender,
+                    )
+                    continue
                 messages.append(
                     IncomingEmailMessage(
                         message_id=message_id,
-                        sender=_decode_mime_words(parsed.get("From")),
+                        sender=sender,
                         subject=_decode_mime_words(parsed.get("Subject")),
                         provider_ref=uid.decode(),
                         attachments=_extract_attachments(parsed),
@@ -178,7 +210,7 @@ class OAuthGmailClient(GmailClient):
         response = (
             service.users()
             .messages()
-            .list(userId="me", q="is:unread has:attachment", maxResults=25)
+            .list(userId="me", q=build_search_query(self._settings), maxResults=25)
             .execute()
         )
         messages: list[IncomingEmailMessage] = []
@@ -186,10 +218,21 @@ class OAuthGmailClient(GmailClient):
             full = service.users().messages().get(userId="me", id=ref["id"], format="full").execute()
             payload = full.get("payload", {})
             headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
+            sender = headers.get("From")
+            # Defense in depth: even if the Gmail query matched more broadly
+            # than intended, a sender outside the whitelist is never processed
+            # (and never marked read -- the message stays untouched).
+            if not sender_allowed(sender, self._settings):
+                logger.info(
+                    "Gmail: skipping message from %r -- sender is not in "
+                    "GMAIL_ALLOWED_SENDERS.",
+                    sender,
+                )
+                continue
             messages.append(
                 IncomingEmailMessage(
                     message_id=headers.get("Message-ID") or ref["id"],
-                    sender=headers.get("From"),
+                    sender=sender,
                     subject=headers.get("Subject"),
                     provider_ref=ref["id"],
                     attachments=self._extract_attachments(service, ref["id"], payload),
