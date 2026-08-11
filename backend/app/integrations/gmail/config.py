@@ -49,6 +49,22 @@ class GmailSettings:
         if address.strip()
     )
 
+    # Attachment-name filter: when set, ONLY attachments whose file name
+    # STARTS WITH this prefix (case-insensitive) are extracted -- anything may
+    # follow the prefix (e.g. "purchase_order" matches
+    # "purchase_order_B-110826-6000045265-147.xlsx"). One matching file is
+    # extracted alone; three or four matching files are ALL extracted. Other
+    # attachments in the same email are ignored. Empty = extract every usable
+    # Excel/PDF attachment (historical behaviour).
+    attachment_prefix: str = os.environ.get("GMAIL_ATTACHMENT_PREFIX", "").strip().lower()
+
+    # When set, every extracted attachment is imported UNDER THIS NAME instead
+    # of its original file name (the original is still logged). If the value
+    # has no file extension, the attachment's own extension is appended so an
+    # .xlsx never turns into an extensionless file. Empty = keep original
+    # names.
+    save_attachment_as: str = os.environ.get("GMAIL_SAVE_ATTACHMENT_AS", "").strip()
+
     # Business rule: when a message has more than this many attachments, the
     # trailing ones (typically signature images/logos, per the purchase
     # team) are ignored.

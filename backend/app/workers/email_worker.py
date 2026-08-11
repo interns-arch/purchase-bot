@@ -40,10 +40,35 @@ _PDF_EXTENSIONS = {".pdf"}
 
 def _usable_attachments(message: IncomingEmailMessage) -> list:
     """Excel attachments (customer orders) and PDF attachments (vendor
-    purchase bills). Only the Excel set is subject to the trailing-attachment
-    trim rule -- that heuristic (signature images/letterhead follow the order
-    sheet) is specific to order emails and is left exactly as it was; PDF
-    purchase bills are taken as-is."""
+    purchase bills), optionally narrowed to a file-name prefix.
+
+    With GMAIL_ATTACHMENT_PREFIX set (e.g. "purchase_order"), ONLY attachments
+    whose name starts with that prefix are extracted -- one match is taken
+    alone, several matches are ALL taken -- and the trailing-attachment trim
+    heuristic below is skipped entirely (the prefix already excludes the
+    signature/letterhead junk that heuristic guards against, and it must
+    never drop a genuine purchase_order file)."""
+    prefix = gmail_settings.attachment_prefix
+    if prefix:
+        matching = [
+            attachment
+            for attachment in message.attachments
+            if attachment.filename
+            and attachment.filename.strip().lower().startswith(prefix)
+            and Path(attachment.filename).suffix.lower() in (_EXCEL_EXTENSIONS | _PDF_EXTENSIONS)
+        ]
+        skipped = len(message.attachments) - len(matching)
+        if skipped:
+            logger.info(
+                "Gmail message from %s: %d attachment(s) ignored (name does not "
+                "start with %r); %d extracted.",
+                message.sender,
+                skipped,
+                prefix,
+                len(matching),
+            )
+        return matching
+
     excel_only = [
         attachment
         for attachment in message.attachments
@@ -64,6 +89,20 @@ def _usable_attachments(message: IncomingEmailMessage) -> list:
     return excel_only + pdf_only
 
 
+def _saved_name_for(original_filename: str) -> str:
+    """The name an extracted attachment is imported under. With
+    GMAIL_SAVE_ATTACHMENT_AS set, every attachment gets that fixed name (the
+    original's extension is appended when the configured name has none, so a
+    .xlsx can never become extensionless); otherwise the original name is
+    kept."""
+    configured = gmail_settings.save_attachment_as
+    if not configured:
+        return original_filename
+    if not Path(configured).suffix:
+        return configured + Path(original_filename).suffix.lower()
+    return configured
+
+
 def _process_message(message: IncomingEmailMessage) -> None:
     attachments = _usable_attachments(message)
     if not attachments:
@@ -80,8 +119,15 @@ def _process_message(message: IncomingEmailMessage) -> None:
             return
 
     for attachment in attachments:
+        saved_name = _saved_name_for(attachment.filename)
+        if saved_name != attachment.filename:
+            logger.info(
+                "Gmail attachment %r will be imported as %r (GMAIL_SAVE_ATTACHMENT_AS).",
+                attachment.filename,
+                saved_name,
+            )
         file_path = staging.save_incoming_bytes(
-            attachment.content, attachment.filename, DocumentSource.EMAIL
+            attachment.content, saved_name, DocumentSource.EMAIL
         )
         with get_session() as session:
             # No document_type_hint: EMAIL documents are routed by source +
@@ -91,7 +137,7 @@ def _process_message(message: IncomingEmailMessage) -> None:
             metadata = DocumentMetadata(
                 sender=message.sender,
                 external_message_id=message.message_id,
-                original_filename=attachment.filename,
+                original_filename=saved_name,
             )
             result = process_document(DocumentSource.EMAIL, file_path, metadata, session)
         # The session above has now committed -- announce the result only
