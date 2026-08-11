@@ -84,6 +84,16 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS", "20")
     )
 
+    # Conversation grouping window (minutes): after a sender's routing command
+    # and (for vendor files) supplied vendor name, FURTHER files from the same
+    # number within this window are grouped automatically -- same command,
+    # same vendor -- with no "please send a command" / "which vendor?"
+    # re-asking per file. Expired window -> fresh conversation as before.
+    # 0 disables grouping (legacy per-file behaviour).
+    grouping_window_minutes: float = float(
+        os.environ.get("WHATSAPP_GROUPING_WINDOW_MINUTES", "10")
+    )
+
     @property
     def graph_api_base_url(self) -> str:
         return f"https://graph.facebook.com/{self.graph_api_version}"

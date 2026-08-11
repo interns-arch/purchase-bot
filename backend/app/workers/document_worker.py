@@ -26,7 +26,12 @@ from pathlib import Path
 
 from backend.app.documents import service as documents_service
 from backend.app.documents.models import DocumentSource, IncomingDocumentType
-from backend.app.integrations.whatsapp import command_store, commands, pending_vendor_files
+from backend.app.integrations.whatsapp import (
+    command_store,
+    commands,
+    pending_vendor_files,
+    vendor_memory,
+)
 from backend.app.integrations.whatsapp.client import WhatsAppClient
 from backend.app.integrations.whatsapp.commands import WhatsAppCommand
 from backend.app.integrations.whatsapp.config import whatsapp_settings
@@ -102,6 +107,10 @@ def _process_pending_vendor_files(sender: str, vendor_name: str, held) -> None:
         sender,
         f"Importing {len(held)} file(s) for vendor '{vendor_name}'.",
     )
+    # Remember the supplied name so further files within the grouping window
+    # are grouped under this vendor automatically.
+    with get_session() as session:
+        vendor_memory.remember(sender, vendor_name, session)
     for row in held:
         file_path = Path(row.staged_path)
         try:
@@ -145,10 +154,13 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     )
 
     # Routing: which import to run is decided by this sender's last text
-    # command. No command -> do not import; reply with the instruction
-    # (requirement 5).
+    # command. Within the grouping window a previously-used command stays
+    # valid (multiple files minutes apart group automatically); an expired
+    # one is cleared. No valid command -> do not import; reply with the
+    # instruction (requirement 5).
+    window = whatsapp_settings.grouping_window_minutes
     with get_session() as session:
-        command_key = command_store.get_command(message.sender, session)
+        command_key = command_store.get_fresh_command(message.sender, window, session)
     command = commands.get_command(command_key)
     if command is None:
         logger.info(
@@ -168,23 +180,25 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     try:
         _download_and_process(message, command)
     finally:
-        if command.persistent:
-            # Multiple Customer Order files, one after another, must all
-            # route the same way without resending "Customer" -- each file
-            # still identifies its own customer independently from its
-            # filename (see detector._classify_customer_order), so leaving
-            # the command active never merges files into one order. Only
-            # cleared by the sender switching to a different command
-            # (`set_command` overwrites the pending row in place).
+        if command.persistent or window > 0:
+            # Grouping: the command stays valid for the next file(s) from
+            # this sender, and each file RESTARTS the window -- so a batch
+            # spread over several minutes routes the same way with no
+            # re-asking. Cleared automatically on expiry (get_fresh_command)
+            # or when the sender sends a different command.
+            with get_session() as session:
+                command_store.touch_command(message.sender, session)
             logger.info(
-                "Pending WhatsApp command '%s' for %s left active for additional files.",
+                "Pending WhatsApp command '%s' for %s left active "
+                "(grouping window %.0f min restarted).",
                 command.key,
                 message.sender,
+                window,
             )
         else:
-            # Requirement 4: clear the stored command once the file has been
-            # processed -- whether it succeeded or failed -- so the next file
-            # requires a fresh command.
+            # Legacy behaviour (window disabled): clear the stored command
+            # once the file has been processed so the next file requires a
+            # fresh command.
             with get_session() as session:
                 command_store.clear_command(message.sender, session)
             logger.info("Cleared pending WhatsApp command for %s after processing.", message.sender)
@@ -224,25 +238,47 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
 
     # Vendor identity for Vendor Inventory comes from the vendor NAME the
     # sender supplies -- the file caption, or a follow-up text message. The
-    # filename is audit metadata only. No caption -> hold the staged file and
-    # ASK for the vendor name instead of guessing.
+    # filename is audit metadata only. No caption -> first try the grouping
+    # window (the name this sender supplied minutes ago groups this file
+    # under the SAME vendor automatically); only with no fresh memory is the
+    # file held and the sender asked.
     vendor_name = (message.caption or "").strip()
-    if command.document_type == IncomingDocumentType.VENDOR_INVENTORY and not vendor_name:
-        with get_session() as session:
-            pending_vendor_files.add(message.sender, str(file_path), message.filename, session)
-        logger.info(
-            "WhatsApp vendor file '%s' from %s staged WITHOUT a vendor name -- "
-            "held at %s; asking the sender for the vendor name.",
-            message.filename,
-            message.sender,
-            file_path,
-        )
-        send_reply_safe(
-            message.sender,
-            f"Got '{message.filename}'. Which vendor is this inventory from? "
-            "Reply with the vendor name (e.g. MAHINDRA).",
-        )
-        return
+    if command.document_type == IncomingDocumentType.VENDOR_INVENTORY:
+        window = whatsapp_settings.grouping_window_minutes
+        if not vendor_name:
+            with get_session() as session:
+                remembered = vendor_memory.recall(message.sender, window, session)
+            if remembered:
+                vendor_name = remembered
+                logger.info(
+                    "WhatsApp vendor file '%s' from %s has no caption -- grouped "
+                    "under vendor %r supplied within the last %.0f min.",
+                    message.filename,
+                    message.sender,
+                    remembered,
+                    window,
+                )
+        if vendor_name:
+            # Every file (captioned OR grouped) RESTARTS the window, exactly
+            # like each file restarts the command window.
+            with get_session() as session:
+                vendor_memory.remember(message.sender, vendor_name, session)
+        if not vendor_name:
+            with get_session() as session:
+                pending_vendor_files.add(message.sender, str(file_path), message.filename, session)
+            logger.info(
+                "WhatsApp vendor file '%s' from %s staged WITHOUT a vendor name -- "
+                "held at %s; asking the sender for the vendor name.",
+                message.filename,
+                message.sender,
+                file_path,
+            )
+            send_reply_safe(
+                message.sender,
+                f"Got '{message.filename}'. Which vendor is this inventory from? "
+                "Reply with the vendor name (e.g. MAHINDRA).",
+            )
+            return
 
     metadata = DocumentMetadata(
         sender=message.sender,

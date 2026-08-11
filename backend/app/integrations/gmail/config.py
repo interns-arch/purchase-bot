@@ -65,6 +65,15 @@ class GmailSettings:
     # names.
     save_attachment_as: str = os.environ.get("GMAIL_SAVE_ATTACHMENT_AS", "").strip()
 
+    # Only process emails RECEIVED TODAY (business timezone, IST): an unread
+    # mail left over from a previous day is never imported -- it simply stays
+    # unread and untouched. Enforced both in the Gmail search query and again
+    # per message (defense in depth). Set to false to process any unread mail
+    # regardless of age (historical behaviour).
+    today_only: bool = (
+        os.environ.get("GMAIL_PROCESS_TODAY_ONLY", "true").strip().lower() == "true"
+    )
+
     # Business rule: when a message has more than this many attachments, the
     # trailing ones (typically signature images/logos, per the purchase
     # team) are ignored.

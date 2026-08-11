@@ -41,7 +41,7 @@ from backend.app.integrations.google_sheets.sync_service import sync_vendor_inve
 from backend.app.services.document_processor.detector import Classification
 from core.logging_setup import get_logger
 from core.models import ImportStatus
-from core.services import customer_code_service
+from core.services import customer_code_service, format_memory
 from core.services import customer_order_service as order_service
 from core.services import customer_service
 from core.services import inventory_import_service as import_service
@@ -215,11 +215,31 @@ def _dispatch_inventory(
     result = import_service.run_import(vendor.id, file_path, session)
 
     if result.status == ImportStatus.FAILED and ai_fallback.rescue_eligible(result.message):
-        # AI-assisted rescue (gated by AI_FALLBACK_ENABLED): the model proposes
-        # a column mapping, which is strictly validated + cross-checked against
-        # the file; the import below re-reads the WHOLE file deterministically
-        # with that mapping through the unchanged run_import. The deterministic
-        # FAILED attempt above stays in Import History as the audit trail.
+        # Step 1 -- LEARNED FORMATS first (zero model calls): if this header
+        # layout was analysed before (by the model, or defined manually), its
+        # saved mapping is reused deterministically.
+        cached = format_memory.find_mapping(file_path, session)
+        if cached is not None:
+            mapping, note = cached
+            retry = import_service.run_import(
+                vendor.id, file_path, session, column_mapping=mapping, mapping_note=note
+            )
+            if retry.status != ImportStatus.FAILED:
+                logger.info(
+                    "Saved format imported '%s' for vendor %s (%s rows) -- no AI call.",
+                    file_path.name,
+                    vendor.name,
+                    retry.row_count,
+                )
+                result = retry
+
+    if result.status == ImportStatus.FAILED and ai_fallback.rescue_eligible(result.message):
+        # Step 2 -- AI-assisted rescue (gated by AI_FALLBACK_ENABLED): the
+        # model proposes a column mapping, which is strictly validated +
+        # cross-checked against the file; the import below re-reads the WHOLE
+        # file deterministically with that mapping through the unchanged
+        # run_import. The deterministic FAILED attempt above stays in Import
+        # History as the audit trail.
         rescue = ai_fallback.discover_inventory_mapping(file_path, result.message)
         if rescue is not None:
             mapping, note = rescue
@@ -234,6 +254,20 @@ def _dispatch_inventory(
                     retry.row_count,
                 )
                 result = retry
+                # Remember this format so the NEXT file with the same header
+                # layout imports without any model call.
+                try:
+                    headers, _rows, _pc, _qc = import_service.read_table_with_mapping(
+                        file_path, mapping
+                    )
+                    format_memory.save_mapping(
+                        headers, mapping, ai_fallback.provenance_label(), session
+                    )
+                except Exception:  # noqa: BLE001 -- learning is best-effort
+                    logger.exception(
+                        "Could not save the learned format for %s (import unaffected).",
+                        file_path.name,
+                    )
 
     if result.status == ImportStatus.AWAITING_CONFIRMATION:
         # Same auto-skip behavior as the original manual-upload glue: an

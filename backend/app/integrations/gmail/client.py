@@ -62,14 +62,28 @@ class GmailClient(ABC):
         raise NotImplementedError
 
 
+def ist_midnight_epoch() -> int:
+    """Epoch seconds of TODAY 00:00 in the business timezone (IST). Gmail's
+    `after:` operator accepts an epoch timestamp, making the boundary exact
+    regardless of the Google account's own timezone setting."""
+    from core.time_utils import now_ist
+
+    midnight = now_ist().replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(midnight.timestamp())
+
+
 def build_search_query(settings: GmailSettings) -> str:
     """The Gmail search used by the OAuth client. With GMAIL_ALLOWED_SENDERS
     set, the query itself is narrowed with a `from:(a OR b)` clause so
-    non-whitelisted mail is never even fetched from the API."""
+    non-whitelisted mail is never even fetched from the API. With
+    GMAIL_PROCESS_TODAY_ONLY (default), only mail received TODAY (IST) is
+    fetched -- an unread mail from a previous day stays unread and untouched."""
     query = "is:unread has:attachment"
     if settings.allowed_senders:
         senders = " OR ".join(settings.allowed_senders)
         query += f" from:({senders})"
+    if settings.today_only:
+        query += f" after:{ist_midnight_epoch()}"
     return query
 
 
@@ -229,6 +243,17 @@ class OAuthGmailClient(GmailClient):
                     sender,
                 )
                 continue
+            # Same defense for the received-today rule: `internalDate` is
+            # Gmail's authoritative receive time in epoch milliseconds.
+            if self._settings.today_only:
+                received_ms = int(full.get("internalDate") or 0)
+                if received_ms and received_ms < ist_midnight_epoch() * 1000:
+                    logger.info(
+                        "Gmail: skipping message from %r -- received before "
+                        "today (IST); it stays unread and untouched.",
+                        sender,
+                    )
+                    continue
             messages.append(
                 IncomingEmailMessage(
                     message_id=headers.get("Message-ID") or ref["id"],

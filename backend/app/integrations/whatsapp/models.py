@@ -60,6 +60,23 @@ class WhatsAppPendingVendorFile(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class WhatsAppVendorMemory(Base):
+    """The vendor name a WhatsApp number most recently supplied (caption or
+    follow-up text), remembered so that MORE files from the same sender
+    within the grouping window (`WHATSAPP_GROUPING_WINDOW_MINUTES`) are
+    grouped under the SAME vendor automatically -- no re-asking per file.
+    One row per number; `updated_at` is the freshness clock."""
+
+    __tablename__ = "whatsapp_vendor_memory"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(unique=True, index=True)
+    vendor_name: Mapped[str] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
+
+
 class WhatsAppIntegrationStatus(Base):
     __tablename__ = "whatsapp_integration_status"
 

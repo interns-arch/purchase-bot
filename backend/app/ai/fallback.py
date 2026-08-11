@@ -55,6 +55,16 @@ def rescue_eligible(message: str | None) -> bool:
     return any(fragment in text for fragment in _RESCUE_ELIGIBLE_FRAGMENTS)
 
 
+def provenance_label() -> str:
+    """Short "who taught us this" label stored with a learned format."""
+    try:
+        provider = get_provider()
+        model = getattr(provider, "_model", None) or ""
+        return f"ai:{provider.name}{'/' + model if model else ''}"
+    except Exception:  # noqa: BLE001
+        return "ai"
+
+
 def _read_grid(file_path: Path) -> list[list[str]] | None:
     suffix = file_path.suffix.lower()
     try:

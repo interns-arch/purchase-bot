@@ -147,6 +147,29 @@ class Part(Base):
     )
 
 
+class LearnedFileFormat(Base):
+    """A vendor-file column format the system has LEARNED (usually from one
+    successful AI rescue) or that was defined manually. Keyed by the header
+    row's fingerprint (normalized non-empty header cells, in order), so the
+    NEXT file with the same header layout maps deterministically with ZERO
+    model calls -- the LLM analyses a given format at most once."""
+
+    __tablename__ = "learned_file_formats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # "|"-joined normalise_header() of the header row's non-empty cells.
+    header_fingerprint: Mapped[str] = mapped_column(unique=True, index=True)
+    # Exact source header texts to map (as read_table_with_mapping expects).
+    part_column: Mapped[str] = mapped_column(nullable=False)
+    quantity_column: Mapped[str] = mapped_column(nullable=False)
+    # Where the mapping came from: "ai:<provider>/<model>" or "manual".
+    learned_from: Mapped[str] = mapped_column(default="manual")
+    sample_headers: Mapped[dict] = mapped_column(JSON, nullable=False)
+    use_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
 class PartAlias(Base):
     __tablename__ = "part_aliases"
 
