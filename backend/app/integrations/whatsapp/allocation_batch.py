@@ -36,6 +36,7 @@ from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.notifications import broker
 from core.db import get_session
 from core.logging_setup import get_logger
+from core.models import Customer, CustomerOrder
 from core.services import vendor_selection_service
 from core.services.rules.engine import run_automatic_vendor_selection
 from core.time_utils import now_ist
@@ -92,6 +93,17 @@ def _process_batch() -> None:
         _run_batch(orders)
 
 
+def _order_label(order_id: int, session) -> str:
+    """'Order 12 — Karol Bagh' (customer display name, never the code) so the
+    Founder's WhatsApp caption says WHOSE orders were allocated."""
+    order = session.get(CustomerOrder, order_id)
+    if order is not None and order.customer_id is not None:
+        customer = session.get(Customer, order.customer_id)
+        if customer is not None and customer.name:
+            return f"Order {order_id} — {customer.name}"
+    return f"Order {order_id}"
+
+
 def _run_batch(order_ids: list[int]) -> None:
     """Auto-select every order sequentially, then send one ZIP of reports."""
     logger.info(
@@ -100,6 +112,7 @@ def _run_batch(order_ids: list[int]) -> None:
         order_ids,
     )
     reports: list[tuple[str, list]] = []  # (worksheet title, export rows)
+    order_labels: list[str] = []  # 'Order 12 — Karol Bagh' per report
     done: list[int] = []
     failed: list[int] = []
 
@@ -110,7 +123,9 @@ def _run_batch(order_ids: list[int]) -> None:
             with get_session() as session:
                 run_automatic_vendor_selection(order_id, session)
                 rows = vendor_selection_service.list_selections_for_export(order_id, session)
+                label = _order_label(order_id, session)
             reports.append((f"Order_{order_id}", rows))
+            order_labels.append(label)
             done.append(order_id)
         except Exception:  # noqa: BLE001 -- one bad order must not block the batch
             logger.exception(
@@ -147,9 +162,15 @@ def _run_batch(order_ids: list[int]) -> None:
     workbook.save(buffer)
     file_name = f"vendor_allocations_{now_ist().strftime('%Y%m%d_%H%M')}.xlsx"
 
-    detail = f"Orders: {done}"
+    detail = "\n".join(order_labels) if order_labels else f"Orders: {done}"
     if failed:
         detail += f"\nFailed (see logs): {failed}"
+    caption = (
+        f"Automatic vendor allocation completed for {len(reports)} customer "
+        f"order(s). One worksheet per order inside."
+    )
+    if order_labels:
+        caption += "\n" + "\n".join(order_labels)
     sent = False
     for to in recipients:
         delivered = outbound.send_document_safe(
@@ -157,10 +178,7 @@ def _run_batch(order_ids: list[int]) -> None:
             buffer.getvalue(),
             file_name,
             XLSX_MIME_TYPE,
-            caption=(
-                f"Automatic vendor allocation completed for {len(reports)} customer "
-                f"order(s). One worksheet per order inside."
-            ),
+            caption=caption,
         )
         sent = sent or delivered
     if sent:

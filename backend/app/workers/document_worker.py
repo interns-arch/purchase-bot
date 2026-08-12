@@ -604,7 +604,7 @@ def _process_staged_file(
     # workbook (sent after the batch goes quiet), not one per file. Fully
     # best-effort -- it opens its own session and cannot affect the import.
     if _is_successful_inventory_import(result):
-        inventory_output.request_consolidated_send()
+        inventory_output.request_consolidated_send(getattr(result, "vendor_name", None))
 
     # Founder automation ("Combined ZIP" mode): a successfully imported
     # customer order is queued for automatic vendor selection; the batch runs

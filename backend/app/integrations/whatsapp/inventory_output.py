@@ -31,15 +31,23 @@ logger = get_logger(__name__)
 # every import that landed during the batch.
 _debounce_lock = threading.Lock()
 _debounce_timer: threading.Timer | None = None
+# Vendors whose imports triggered the pending send -- named (no codes) in the
+# workbook caption so the Founder sees WHO updated without opening the file.
+_pending_vendor_names: set[str] = set()
 
 
-def request_consolidated_send() -> None:
+def request_consolidated_send(vendor_name: str | None = None) -> None:
     """Debounced entry point for the consolidated workbook. Call after every
     successful Vendor Inventory import; sends ONE workbook once imports have
     been quiet for `WHATSAPP_WORKBOOK_DEBOUNCE_SECONDS` (each new request
-    within the window restarts the countdown). A delay of 0 sends immediately."""
+    within the window restarts the countdown). A delay of 0 sends immediately.
+    `vendor_name` (display name, never the code) is collected across the
+    batch and listed in the send's caption."""
     global _debounce_timer
     delay = whatsapp_settings.workbook_debounce_seconds
+    with _debounce_lock:
+        if vendor_name and vendor_name.strip():
+            _pending_vendor_names.add(vendor_name.strip())
     if delay <= 0:
         send_consolidated_inventory_to_founder()
         return
@@ -66,6 +74,12 @@ def _fire_debounced_send() -> None:
 def send_consolidated_inventory_to_founder() -> None:
     """Generate the consolidated workbook and send it to the Founder. Safe to
     call after any successful WhatsApp Vendor Inventory import; never raises."""
+    # Who triggered this batch (named in the caption); cleared atomically so
+    # the NEXT batch starts fresh even if this send fails.
+    with _debounce_lock:
+        updated_by = sorted(_pending_vendor_names, key=str.lower)
+        _pending_vendor_names.clear()
+
     recipients = whatsapp_settings.admin_phone_numbers
     if not recipients:
         logger.info(
@@ -94,7 +108,12 @@ def send_consolidated_inventory_to_founder() -> None:
         )
         return
 
-    # Stage 3: WhatsApp delivery -- every configured admin number.
+    # Stage 3: WhatsApp delivery -- every configured admin number. The
+    # caption names the vendor(s) whose files triggered this batch (display
+    # names only, never codes).
+    caption = "Vendor Inventory updated successfully."
+    if updated_by:
+        caption += f"\nUpdated by: {', '.join(updated_by)}"
     sent = False
     for to in recipients:
         delivered = outbound.send_document_safe(
@@ -102,7 +121,7 @@ def send_consolidated_inventory_to_founder() -> None:
             content,
             workbook_service.WORKBOOK_FILENAME,
             workbook_service.XLSX_MIME_TYPE,
-            caption="Vendor Inventory updated successfully.",
+            caption=caption,
         )
         sent = sent or delivered
     if sent:

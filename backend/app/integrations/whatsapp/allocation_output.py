@@ -53,6 +53,15 @@ def send_allocation_report_to_founder(order_id: int) -> None:
         with get_session() as session:
             rows = vendor_selection_service.list_selections_for_export(order_id, session)
             workbook = vendor_selection_service.to_export_workbook(rows)
+            # Customer display name (never the code) for the caption, so the
+            # Founder sees WHOSE order this report belongs to.
+            from core.models import Customer, CustomerOrder
+
+            customer_name = None
+            order = session.get(CustomerOrder, order_id)
+            if order is not None and order.customer_id is not None:
+                customer = session.get(Customer, order.customer_id)
+                customer_name = customer.name if customer is not None else None
         buffer = io.BytesIO()
         workbook.save(buffer)
         content = buffer.getvalue()
@@ -66,6 +75,10 @@ def send_allocation_report_to_founder(order_id: int) -> None:
         )
         return
 
+    caption = f"Vendor allocation report for Customer Order {order_id}"
+    if customer_name:
+        caption += f" — {customer_name}"
+    caption += "."
     sent = False
     for to in recipients:
         delivered = outbound.send_document_safe(
@@ -73,7 +86,7 @@ def send_allocation_report_to_founder(order_id: int) -> None:
             content,
             file_name,
             XLSX_MIME_TYPE,
-            caption=f"Vendor allocation report for Customer Order {order_id}.",
+            caption=caption,
         )
         sent = sent or delivered
     if sent:
