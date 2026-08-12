@@ -25,11 +25,15 @@ heuristic classifier:
 Vendor Inventory and Customer Order files are NOT distinguishable by column
 headers alone (both only require Part Number + Quantity per
 `core.ingestion.column_detector.find_required_columns`) -- which is why
-source, not file structure, is the primary signal. Sender identity is
-deliberately NEVER used to identify a vendor or a customer: every vendor (and
-every customer) messages the same shared WhatsApp Business number, so a
-sender's phone number cannot tell them apart (see
-`core.services.vendor_code_service` / `core.services.customer_code_service`).
+source, not file structure, is the primary signal.
+
+Sender identity: a number REGISTERED in the WhatsApp number registry
+(`integrations.whatsapp.registry`) is authoritative -- the worker passes the
+registered party in as `vendor_id_hint` / `customer_id_hint` and the fast
+paths below use it directly. UNREGISTERED senders share the one WhatsApp
+Business number-agnostic flow: their phone number can never tell parties
+apart, so identity still comes from the supplied name / Customer Code
+exactly as before the registry existed.
 """
 
 from __future__ import annotations
@@ -153,6 +157,20 @@ def classify(
     if source == DocumentSource.WHATSAPP:
         hint = metadata.document_type_hint
         if hint is None or hint == IncomingDocumentType.VENDOR_INVENTORY:
+            # REGISTERED NUMBER fast path (number registry): the sender's
+            # WhatsApp number already identifies the vendor -- pass the id
+            # straight through. No name resolution, no caption, no filename.
+            if metadata.vendor_id_hint is not None:
+                logger.info(
+                    "WHATSAPP document '%s' routed to VENDOR_INVENTORY by the "
+                    "sender's registered number (vendor_id=%s).",
+                    file_path.name,
+                    metadata.vendor_id_hint,
+                )
+                return Classification(
+                    IncomingDocumentType.VENDOR_INVENTORY,
+                    vendor_id=metadata.vendor_id_hint,
+                )
             # Vendor Inventory: identity comes from the vendor NAME the
             # sender supplied (caption or follow-up text), resolved by the
             # dispatcher against the existing Vendor master. The filename is
@@ -171,6 +189,20 @@ def classify(
             )
             return classification
         if hint == IncomingDocumentType.CUSTOMER_ORDER:
+            # REGISTERED NUMBER fast path: the sender's number already
+            # identifies the customer -- mirrors the vendor fast path above.
+            if metadata.customer_id_hint is not None:
+                logger.info(
+                    "WHATSAPP document '%s' routed to CUSTOMER_ORDER by the "
+                    "sender's registered number (customer_id=%s).",
+                    file_path.name,
+                    metadata.customer_id_hint,
+                )
+                return Classification(
+                    IncomingDocumentType.CUSTOMER_ORDER,
+                    customer_id=metadata.customer_id_hint,
+                    resolve_customer=True,
+                )
             # Customer Order (see `_classify_customer_order`): resolve which
             # customer this file belongs to from its filename's Customer
             # Code, exactly as Vendor Inventory resolves its vendor above --

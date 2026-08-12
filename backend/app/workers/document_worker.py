@@ -29,7 +29,10 @@ from backend.app.documents.models import DocumentSource, IncomingDocumentType
 from backend.app.integrations.whatsapp import (
     command_store,
     commands,
+    contact_import,
+    daily_stock,
     pending_vendor_files,
+    registry,
     vendor_memory,
 )
 from backend.app.integrations.whatsapp.client import WhatsAppClient
@@ -59,6 +62,44 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
        every held file for that vendor (identity from the NAME, never the
        filename).
     3. Otherwise -> reply with the instruction (requirement 6)."""
+    # Founder command "send reminder" (daily participation follow-up): only
+    # honoured from an admin number, checked before anything else so it can
+    # never be mistaken for a vendor name.
+    if daily_stock.is_reminder_command(message.sender, message.text):
+        daily_stock.handle_reminder_command(message.sender)
+        return
+
+    # Founder command "register" / "update numbers": the NEXT Excel from this
+    # admin number is a vendor contact list that updates the number registry.
+    if daily_stock.is_admin_sender(message.sender) and contact_import.is_update_command_text(
+        message.text
+    ):
+        with get_session() as session:
+            command_store.set_command(
+                message.sender, contact_import.REGISTER_COMMAND_KEY, session
+            )
+        send_reply_safe(
+            message.sender,
+            "Send the contact list Excel now — one row per vendor: "
+            "Vendor Name + WhatsApp number(s).",
+        )
+        return
+
+    # A REGISTERED number's texts are never commands or vendor names -- the
+    # number itself is the identity, so "good morning sir" etc. is simply
+    # ignored (no instruction spam back at a vendor).
+    with get_session() as session:
+        registered = registry.lookup(message.sender, session)
+    if registered is not None:
+        logger.info(
+            "WhatsApp text from registered %s number %s (%s) ignored: %r",
+            registered.party_type,
+            message.sender,
+            registered.name,
+            message.text,
+        )
+        return
+
     command = commands.parse_command(message.text)
     if command is None:
         vendor_name = (message.text or "").strip()
@@ -153,6 +194,32 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
         message.message_id,
     )
 
+    # Founder contact-list upload: an admin file captioned "register"/
+    # "contacts" (or following a "register" text) UPDATES THE NUMBER REGISTRY
+    # instead of importing as stock.
+    if daily_stock.is_admin_sender(message.sender):
+        if contact_import.is_update_caption(message.caption):
+            _handle_contact_update_upload(message)
+            return
+        with get_session() as session:
+            pending_register = contact_import.has_pending_register_command(
+                message.sender, whatsapp_settings.grouping_window_minutes, session
+            )
+        if pending_register:
+            _handle_contact_update_upload(message)
+            return
+
+    # REGISTERED NUMBER fast path (the permanent identity layer): the
+    # sender's number alone identifies the party -- no command, no caption,
+    # no filename convention, no grouping window. Commands/captions from
+    # registered numbers are deliberately IGNORED so a stray caption can
+    # never misfile a registered party's stock.
+    with get_session() as session:
+        registered = registry.lookup(message.sender, session)
+    if registered is not None:
+        _handle_registered_upload(message, registered)
+        return
+
     # Routing: which import to run is decided by this sender's last text
     # command. Within the grouping window a previously-used command stays
     # valid (multiple files minutes apart group automatically); an expired
@@ -202,6 +269,204 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
             with get_session() as session:
                 command_store.clear_command(message.sender, session)
             logger.info("Cleared pending WhatsApp command for %s after processing.", message.sender)
+
+
+_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+
+
+def _handle_contact_update_upload(message: IncomingWhatsAppMessage) -> None:
+    """A vendor contact list from an admin number: parse it and update the
+    number registry (see `contact_import`), then reply with the summary."""
+    logger.info(
+        "WhatsApp file '%s' from admin %s taken as a VENDOR CONTACT LIST "
+        "(registry update, not a stock import).",
+        message.filename,
+        message.sender,
+    )
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+    except Exception:
+        logger.exception(
+            "Could not download the contact list %s from %s.",
+            message.media_id,
+            message.sender,
+        )
+        send_reply_safe(
+            message.sender, "❌ Could not receive the contact list. Please send it again."
+        )
+        return
+
+    try:
+        rows = contact_import.parse_contact_rows(Path(file_path))
+        if not rows:
+            send_reply_safe(
+                message.sender,
+                "⚠️ No vendor rows found in that file. Expected one row per "
+                "vendor: Vendor Name + WhatsApp number(s).",
+            )
+            return
+        with get_session() as session:
+            reply, stats = contact_import.apply_contact_update(rows, session)
+        logger.info("Founder contact update applied: %s", stats)
+    except Exception:
+        logger.exception("Founder contact update failed for %s.", message.filename)
+        send_reply_safe(
+            message.sender,
+            "❌ Could not read that contact list. Please send an Excel with "
+            "Vendor Name and WhatsApp number columns.",
+        )
+        return
+    finally:
+        # One list per "register" command -- the next file from this admin is
+        # a normal upload again unless they text "register" first.
+        with get_session() as session:
+            command_store.clear_command(message.sender, session)
+
+    send_reply_safe(message.sender, reply)
+
+
+def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
+    """A file from a REGISTERED number: identity comes from the registry.
+    Vendors: spreadsheet -> Vendor Inventory, PDF -> Vendor Invoice.
+    Customers: spreadsheet -> Customer Order (PDFs politely rejected).
+    The sender gets a simple result reply; full detail reaches the admin via
+    the notification mirror as with every import."""
+    suffix = Path(message.filename or "").suffix.lower()
+    if party.party_type == "vendor":
+        document_type = (
+            IncomingDocumentType.VENDOR_INVOICE
+            if suffix == ".pdf"
+            else IncomingDocumentType.VENDOR_INVENTORY
+        )
+    else:
+        if suffix == ".pdf":
+            send_reply_safe(
+                message.sender,
+                "Please send your order as an Excel file (.xlsx) with Part Number "
+                "and Quantity columns.",
+            )
+            return
+        document_type = IncomingDocumentType.CUSTOMER_ORDER
+
+    logger.info(
+        "WhatsApp file '%s' from REGISTERED %s number %s -> %s for '%s' "
+        "(no command/caption needed; registry is the identity).",
+        message.filename,
+        party.party_type,
+        message.sender,
+        document_type.value,
+        party.name,
+    )
+
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+    except Exception:
+        logger.exception(
+            "WhatsApp pipeline: FAILED downloading media %s from registered number %s",
+            message.media_id,
+            message.sender,
+        )
+        with get_session() as session:
+            document = documents_service.record_received(
+                DocumentSource.WHATSAPP,
+                message.filename,
+                session,
+                sender=message.sender,
+                whatsapp_message_id=message.message_id,
+            )
+            if document.status.value == "RECEIVED":
+                documents_service.mark_download_failed(
+                    document, "Could not download this attachment from WhatsApp.", session
+                )
+        notifications.publish_download_failure(
+            "WhatsApp", message.filename, "Could not download this attachment from WhatsApp."
+        )
+        send_reply_safe(
+            message.sender,
+            "❌ We could not receive this file. Please send it again.",
+        )
+        return
+
+    metadata = DocumentMetadata(
+        sender=message.sender,
+        caption=message.caption,  # audit only -- identity comes from the registry
+        external_message_id=message.message_id,
+        original_filename=message.filename,
+        document_type_hint=document_type,
+        vendor_id_hint=party.party_id if party.party_type == "vendor" else None,
+        customer_id_hint=party.party_id if party.party_type == "customer" else None,
+    )
+    try:
+        result = _process_staged_file(file_path, metadata, message.filename, message.media_id)
+    except Exception:
+        # process_document reports normal failures via the result status; an
+        # exception here is infrastructure-level. The admin already got the
+        # error toast/mirror -- the sender still deserves a reply.
+        send_reply_safe(
+            message.sender,
+            "❌ Something went wrong while processing this file. Our team has "
+            "been notified -- please try again later.",
+        )
+        raise
+    send_reply_safe(message.sender, _registered_result_reply(party, result, document_type))
+
+
+def _registered_result_reply(party, result, document_type: IncomingDocumentType) -> str:
+    """The short, non-technical reply a registered sender receives. Full
+    technical detail (reasons, rejected rows) goes to the admin only."""
+    status = getattr(getattr(result, "status", None), "value", None)
+    rows = getattr(result, "row_count", 0) or 0
+    errors = getattr(result, "error_count", 0) or 0
+
+    if document_type == IncomingDocumentType.VENDOR_INVOICE:
+        if status == "PROCESSED":
+            return f"✅ Invoice received and verified. {rows} line(s) checked."
+        if status == "PROCESSED_WITH_ERRORS":
+            return (
+                f"⚠️ Invoice received. {rows} line(s) checked, "
+                f"{errors} discrepancy(ies) found -- our team will review."
+            )
+        if status == "SKIPPED_DUPLICATE":
+            return "ℹ️ This invoice was already received earlier. Nothing changed."
+        if status == "NEEDS_REVIEW":
+            return "⚠️ Invoice received -- our team will review it."
+        return "❌ We could not read this invoice PDF. Please check the file and resend."
+
+    if document_type == IncomingDocumentType.CUSTOMER_ORDER:
+        if status == "PROCESSED":
+            return f"✅ Order received successfully. {rows} line(s) imported."
+        if status == "PROCESSED_WITH_ERRORS":
+            return (
+                f"⚠️ Order received. {rows} line(s) imported, {errors} rejected -- "
+                "our team will follow up if anything is missing."
+            )
+        if status == "SKIPPED_DUPLICATE":
+            return "ℹ️ This order file was already received earlier. Nothing changed."
+        if status == "NEEDS_REVIEW":
+            return (
+                "⚠️ We received the file but could not find a quantity column. "
+                "Please check the file and resend."
+            )
+        return (
+            "❌ We could not read this file. Please send an Excel order with "
+            "Part Number and Quantity columns."
+        )
+
+    # Vendor Inventory (the everyday case).
+    if status == "PROCESSED":
+        return f"✅ Stock received successfully. {rows} item(s) imported."
+    if status == "PROCESSED_WITH_ERRORS":
+        return f"⚠️ Stock received. {rows} item(s) imported, {errors} row(s) skipped."
+    if status == "SKIPPED_DUPLICATE":
+        return "ℹ️ This stock file was already received earlier. Nothing changed."
+    if status == "NEEDS_REVIEW":
+        return "⚠️ File received -- our team will review it."
+    return (
+        "❌ We could not read this file. Please send an Excel file containing "
+        "Part Number and Quantity columns."
+    )
 
 
 def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCommand) -> None:
@@ -347,6 +612,8 @@ def _process_staged_file(
     order_id = _successful_customer_order_id(result)
     if order_id is not None:
         allocation_batch.request_order_allocation(order_id)
+
+    return result
 
 
 def _is_successful_inventory_import(result) -> bool:

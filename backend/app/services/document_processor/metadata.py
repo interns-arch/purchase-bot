@@ -20,5 +20,10 @@ class DocumentMetadata:
     # WhatsApp Vendor Inventory uploads; resolved against the existing Vendor
     # master by the dispatcher.
     vendor_name: str | None = None
+    # Set by the WhatsApp worker when the SENDER'S NUMBER is registered in
+    # the number registry (`integrations.whatsapp.registry`): the number IS
+    # the identity, so the customer is passed straight through -- no code
+    # parsing, no filename involvement. Mirrors `vendor_id_hint`.
+    customer_id_hint: int | None = None
     external_message_id: str | None = None
     original_filename: str | None = None

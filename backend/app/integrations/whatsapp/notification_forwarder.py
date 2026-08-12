@@ -37,17 +37,22 @@ def format_notification(note: broker.Notification) -> str:
 
 
 def forward_notification(note: broker.Notification) -> None:
-    """Broker forwarder: mirror one toast to WhatsApp (fire-and-forget)."""
+    """Broker forwarder: mirror one toast to WhatsApp (fire-and-forget).
+    Every configured admin number receives it."""
     if not whatsapp_settings.forward_notifications:
         return
-    to = whatsapp_settings.admin_phone_number
-    if not to:
+    recipients = whatsapp_settings.admin_phone_numbers
+    if not recipients:
         return
+    body = format_notification(note)
+
+    def _send_all() -> None:
+        for to in recipients:
+            send_reply_safe(to, body)
+
     # Own thread: broker.publish is called from import workers mid-flow; an
     # HTTP round-trip to the Graph API must not slow those down.
-    threading.Thread(
-        target=send_reply_safe, args=(to, format_notification(note)), daemon=True
-    ).start()
+    threading.Thread(target=_send_all, daemon=True).start()
 
 
 def register() -> None:

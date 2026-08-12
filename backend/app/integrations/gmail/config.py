@@ -65,6 +65,18 @@ class GmailSettings:
     # names.
     save_attachment_as: str = os.environ.get("GMAIL_SAVE_ATTACHMENT_AS", "").strip()
 
+    # Process emails even after a human has OPENED them (OAuth mode). The
+    # historical `is:unread` filter silently skipped any mail someone read
+    # before the poller got to it (e.g. the server was asleep at arrival and
+    # the founder checked the inbox manually). Duplicate protection does NOT
+    # depend on read-state: every processed email's id is recorded in the
+    # database (`incoming_documents.email_message_id`, unique) and known ids
+    # are skipped before importing -- so with the whitelist + today-only
+    # rules this is strictly safer. Set to false to restore unread-only.
+    process_read_emails: bool = (
+        os.environ.get("GMAIL_PROCESS_READ_EMAILS", "true").strip().lower() == "true"
+    )
+
     # Only process emails RECEIVED TODAY (business timezone, IST): an unread
     # mail left over from a previous day is never imported -- it simply stays
     # unread and untouched. Enforced both in the Gmail search query and again

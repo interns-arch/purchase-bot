@@ -188,17 +188,21 @@ def normalise_part_number(value: Any) -> str:
     Matching is:
     - case-insensitive
     - unaffected by leading/trailing spaces
-    - unaffected by spaces, hyphens, underscores and dots
+    - unaffected by EVERY special character (spaces, - _ . / $ # & * ...):
+      vendor files routinely write part numbers with separators while
+      customer files write them bare (or vice versa), so only the letters
+      and digits count for comparison/mapping/allocation.
 
     Examples:
-        ABC-123  -> ABC123
-        abc 123  -> ABC123
+        ABC-123     -> ABC123
+        abc 123     -> ABC123
+        AB_C/12$3   -> ABC123
     """
     if value is None:
         return ""
 
     cleaned = str(value).strip().upper()
-    return re.sub(r"[\s\-_.]+", "", cleaned)
+    return re.sub(r"[^A-Z0-9]+", "", cleaned)
 
 
 def parse_quantity(value: Any) -> Decimal:

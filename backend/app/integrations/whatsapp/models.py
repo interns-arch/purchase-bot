@@ -14,12 +14,55 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func
+from sqlalchemy import CheckConstraint, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models import Base
 
 STATUS_ROW_ID = 1
+
+
+class WhatsAppRegisteredNumber(Base):
+    """The permanent identity layer for direct vendor/customer uploads:
+    WhatsApp number -> Vendor (or Customer). A file from a registered number
+    needs NO command, NO caption, and NO filename convention -- the number
+    alone identifies the party (see `registry.py` / the document worker).
+
+    Rules enforced here:
+    - one identity per number (`whatsapp_number` unique; the CheckConstraint
+      guarantees the row points at EXACTLY one of vendor/customer -- the
+      business rule that a number never sends both kinds of files);
+    - many numbers per party are fine (owner + staff numbers both map to the
+      same vendor).
+
+    Numbers are stored NORMALIZED (digits only, with country code -- e.g.
+    "919212552626"), matching the wa_id format Meta delivers in webhooks;
+    `registry.normalize_number` is the single place that shapes them."""
+
+    __tablename__ = "whatsapp_registered_numbers"
+    __table_args__ = (
+        CheckConstraint(
+            "(vendor_id IS NOT NULL AND customer_id IS NULL) OR "
+            "(vendor_id IS NULL AND customer_id IS NOT NULL)",
+            name="ck_whatsapp_registered_number_one_party",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(unique=True, index=True)
+    vendor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vendors.id", ondelete="CASCADE"), default=None, index=True
+    )
+    customer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), default=None, index=True
+    )
+    # Free-text label for the admin ("owner", "staff - Ramesh") -- never used
+    # for identity.
+    note: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
 
 
 class WhatsAppPendingCommand(Base):

@@ -66,8 +66,8 @@ def _fire_debounced_send() -> None:
 def send_consolidated_inventory_to_founder() -> None:
     """Generate the consolidated workbook and send it to the Founder. Safe to
     call after any successful WhatsApp Vendor Inventory import; never raises."""
-    to = whatsapp_settings.admin_phone_number
-    if not to:
+    recipients = whatsapp_settings.admin_phone_numbers
+    if not recipients:
         logger.info(
             "WHATSAPP_ADMIN_PHONE_NUMBER not set -- skipping consolidated Vendor Inventory "
             "workbook send (import already saved; this output is optional)."
@@ -94,14 +94,17 @@ def send_consolidated_inventory_to_founder() -> None:
         )
         return
 
-    # Stage 3: WhatsApp delivery.
-    sent = outbound.send_document_safe(
-        to,
-        content,
-        workbook_service.WORKBOOK_FILENAME,
-        workbook_service.XLSX_MIME_TYPE,
-        caption="Vendor Inventory updated successfully.",
-    )
+    # Stage 3: WhatsApp delivery -- every configured admin number.
+    sent = False
+    for to in recipients:
+        delivered = outbound.send_document_safe(
+            to,
+            content,
+            workbook_service.WORKBOOK_FILENAME,
+            workbook_service.XLSX_MIME_TYPE,
+            caption="Vendor Inventory updated successfully.",
+        )
+        sent = sent or delivered
     if sent:
         broker.publish(
             "success",

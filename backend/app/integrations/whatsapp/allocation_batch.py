@@ -128,8 +128,8 @@ def _run_batch(order_ids: list[int]) -> None:
         )
         return
 
-    to = whatsapp_settings.admin_phone_number
-    if not to:
+    recipients = whatsapp_settings.admin_phone_numbers
+    if not recipients:
         logger.info(
             "WHATSAPP_ADMIN_PHONE_NUMBER not set -- allocations for orders %s are "
             "saved; skipping the consolidated report send (this output is optional).",
@@ -150,16 +150,19 @@ def _run_batch(order_ids: list[int]) -> None:
     detail = f"Orders: {done}"
     if failed:
         detail += f"\nFailed (see logs): {failed}"
-    sent = outbound.send_document_safe(
-        to,
-        buffer.getvalue(),
-        file_name,
-        XLSX_MIME_TYPE,
-        caption=(
-            f"Automatic vendor allocation completed for {len(reports)} customer "
-            f"order(s). One worksheet per order inside."
-        ),
-    )
+    sent = False
+    for to in recipients:
+        delivered = outbound.send_document_safe(
+            to,
+            buffer.getvalue(),
+            file_name,
+            XLSX_MIME_TYPE,
+            caption=(
+                f"Automatic vendor allocation completed for {len(reports)} customer "
+                f"order(s). One worksheet per order inside."
+            ),
+        )
+        sent = sent or delivered
     if sent:
         broker.publish(
             "success",

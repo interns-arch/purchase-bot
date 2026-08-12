@@ -77,8 +77,15 @@ def build_search_query(settings: GmailSettings) -> str:
     set, the query itself is narrowed with a `from:(a OR b)` clause so
     non-whitelisted mail is never even fetched from the API. With
     GMAIL_PROCESS_TODAY_ONLY (default), only mail received TODAY (IST) is
-    fetched -- an unread mail from a previous day stays unread and untouched."""
-    query = "is:unread has:attachment"
+    fetched -- an unread mail from a previous day stays unread and untouched.
+
+    With GMAIL_PROCESS_READ_EMAILS (default), read-state is IGNORED: a mail
+    someone opened before the poller ran still imports. Duplicates are
+    impossible either way -- the worker skips every message id already
+    recorded in `incoming_documents.email_message_id` before importing."""
+    query = "has:attachment"
+    if not settings.process_read_emails:
+        query = "is:unread " + query
     if settings.allowed_senders:
         senders = " OR ".join(settings.allowed_senders)
         query += f" from:({senders})"

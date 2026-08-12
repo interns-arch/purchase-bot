@@ -138,6 +138,58 @@ class WhatsAppClient:
 
         _with_retries(f"send_text_message({to})", _call)
 
+    def send_template_message(
+        self,
+        to: str,
+        template_name: str,
+        language_code: str = "en",
+        body_parameters: list[str] | None = None,
+    ) -> None:
+        """Send a PRE-APPROVED template message (Meta requirement for
+        business-initiated messages outside the 24h customer-service window
+        -- e.g. the fixed-time morning stock request and pending-vendor
+        reminders). `body_parameters` fills the template's {{1}}, {{2}}, ...
+        placeholders in order; omit for templates with fixed text.
+        https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-message-templates"""
+        access_token = self._require_access_token()
+        if not self._settings.phone_number_id:
+            raise WhatsAppNotConfiguredError(
+                "WHATSAPP_PHONE_NUMBER_ID is not configured -- cannot send a template message."
+            )
+
+        url = f"{self._settings.graph_api_base_url}/{self._settings.phone_number_id}/messages"
+        template: dict[str, Any] = {
+            "name": template_name,
+            "language": {"code": language_code},
+        }
+        if body_parameters:
+            template["components"] = [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": value} for value in body_parameters
+                    ],
+                }
+            ]
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "template",
+            "template": template,
+        }
+
+        def _call() -> None:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+
+        _with_retries(f"send_template_message({template_name} -> {to})", _call)
+
     def upload_media(self, content: bytes, filename: str, mime_type: str) -> str:
         """Upload a document to WhatsApp's media store and return its media id
         (step 1 of sending a document -- the Cloud API needs the file

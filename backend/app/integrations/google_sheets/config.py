@@ -30,6 +30,15 @@ class GoogleSheetsSettings:
     sheet_id: str | None = os.environ.get("GOOGLE_SHEET_ID") or None
     project_id: str | None = os.environ.get("GOOGLE_PROJECT_ID") or None
 
+    # Daily reset: every morning (IST) vendor-code worksheets whose vendor
+    # has NOT uploaded stock TODAY are removed, so the Sheet only ever shows
+    # same-day inventory. Hand-made tabs (titles that aren't a Vendor Code)
+    # are never touched. Runs only when the sync itself is enabled.
+    daily_reset_enabled: bool = (
+        os.environ.get("GOOGLE_SHEETS_DAILY_RESET_ENABLED", "true").strip().lower() == "true"
+    )
+    daily_reset_time: str = os.environ.get("GOOGLE_SHEETS_DAILY_RESET_TIME", "06:00").strip()
+
     # OAuth credentials are shared with the Gmail integration (same Google
     # account) -- read through `gmail_settings` rather than re-reading the
     # env, so both integrations can never drift apart.

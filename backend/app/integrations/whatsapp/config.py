@@ -52,12 +52,21 @@ class WhatsAppSettings:
     )
     webhook_callback_url: str | None = os.environ.get("WHATSAPP_WEBHOOK_CALLBACK_URL") or None
 
-    # Founder/admin destination for outbound documents (e.g. the temporary
-    # consolidated Vendor Inventory workbook). In WhatsApp international format
-    # without '+', e.g. 919876543210. If unset, outbound document sending is
-    # skipped (logged, never an error). Reuses the same WHATSAPP_ACCESS_TOKEN /
-    # WHATSAPP_PHONE_NUMBER_ID above -- no separate auth.
-    admin_phone_number: str | None = os.environ.get("WHATSAPP_ADMIN_PHONE_NUMBER") or None
+    # Founder/admin destination(s) for outbound documents, notifications and
+    # daily summaries. COMMA-SEPARATED for several numbers (e.g.
+    # "919876543210, 919812345678") -- every listed number receives every
+    # founder-facing message, and each may text "send reminder" / manage the
+    # contact registry. WhatsApp international format without '+'. If unset,
+    # founder-facing sends are skipped (logged, never an error). Reuses the
+    # same WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID -- no separate
+    # auth. `admin_phone_number` stays as the FIRST number for any legacy
+    # single-recipient use.
+    admin_phone_numbers: list[str] = [
+        part.strip()
+        for part in os.environ.get("WHATSAPP_ADMIN_PHONE_NUMBER", "").split(",")
+        if part.strip()
+    ]
+    admin_phone_number: str | None = admin_phone_numbers[0] if admin_phone_numbers else None
 
     # Mirror every UI toast notification (import results, workbook/Sheet
     # updates, allocation outcomes, failures) as a WhatsApp text to
@@ -92,6 +101,38 @@ class WhatsAppSettings:
     allocation_batch_debounce_seconds: float = float(
         os.environ.get("WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS", "20")
     )
+
+    # --- Daily vendor stock automation (number registry) -----------------
+    # Morning stock request: at this IST time, the PRE-APPROVED template
+    # below is sent to every registered vendor number ("please share your
+    # stock"). Disabled by default -- enable ONLY after the template is
+    # approved in the Meta dashboard, or every send will fail.
+    daily_request_enabled: bool = (
+        os.environ.get("WHATSAPP_DAILY_REQUEST_ENABLED", "false").strip().lower() == "true"
+    )
+    daily_request_time: str = os.environ.get("WHATSAPP_DAILY_REQUEST_TIME", "09:00").strip()
+    # Daily participation summary to WHATSAPP_ADMIN_PHONE_NUMBER at this IST
+    # time: "Received: X of Y vendors. Pending: ..." -- plain text, no
+    # template needed (the admin messages the bot daily).
+    daily_summary_enabled: bool = (
+        os.environ.get("WHATSAPP_DAILY_SUMMARY_ENABLED", "true").strip().lower() == "true"
+    )
+    daily_summary_time: str = os.environ.get("WHATSAPP_DAILY_SUMMARY_TIME", "11:00").strip()
+    # Optional automatic reminder to STILL-PENDING vendors at this IST time
+    # (e.g. "11:30"). Empty = disabled; the admin's manual "send reminder"
+    # text works either way.
+    auto_reminder_time: str = os.environ.get("WHATSAPP_AUTO_REMINDER_TIME", "").strip()
+    # Meta template names (must be approved in the Meta dashboard) + their
+    # language code. The reminder template defaults to the stock-request
+    # template -- one approved template can serve both.
+    stock_request_template: str = os.environ.get(
+        "WHATSAPP_STOCK_REQUEST_TEMPLATE", "stock_request"
+    ).strip()
+    reminder_template: str = (
+        os.environ.get("WHATSAPP_REMINDER_TEMPLATE", "").strip()
+        or os.environ.get("WHATSAPP_STOCK_REQUEST_TEMPLATE", "stock_request").strip()
+    )
+    template_language: str = os.environ.get("WHATSAPP_TEMPLATE_LANGUAGE", "en").strip()
 
     # Conversation grouping window (minutes): after a sender's routing command
     # and (for vendor files) supplied vendor name, FURTHER files from the same

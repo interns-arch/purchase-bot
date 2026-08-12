@@ -154,10 +154,13 @@ app.include_router(whatsapp_router)
 app.include_router(notifications_router)
 
 
-@app.get("/health", tags=["health"])
-@app.get("/api/health", tags=["health"])
+# HEAD is accepted alongside GET: free uptime pingers (UptimeRobot's free
+# plan, notably) probe with HEAD, and a 405 there reads as "site down".
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
+@app.api_route("/api/health", methods=["GET", "HEAD"], tags=["health"])
 def health_check() -> dict[str, str]:
-    """Used by Render to determine whether the service is up."""
+    """Used by Render (and the keep-alive pinger) to determine whether the
+    service is up."""
     return {"status": "ok"}
 
 

@@ -76,6 +76,41 @@ Success notifications are published **only after the database transaction has co
 
 ## 3. Vendor Inventory Flow (WhatsApp)
 
+### 3a. Registered numbers — the permanent identity layer (`integrations/whatsapp/registry.py`)
+
+**A vendor's (or customer's) own WhatsApp number can be registered once; from then on the NUMBER alone is the identity:**
+
+```
+WhatsApp number  ->  Vendor (or Customer)  ->  Vendor/Customer Code
+917XXXXXXXXX     ->  MAHINDRA              ->  MA_CT
+```
+
+- The vendor just sends the file — **no command, no caption, no filename rules, no grouping window**. `stock.xlsx`, `final.xlsx`, `abc123.xlsx` all import as MAHINDRA.
+- A stray caption is **ignored** for registered numbers (the registry always wins) — it can never create or misfile a vendor. Texts ("good morning sir") are ignored too.
+- Vendor numbers: spreadsheet → Vendor Inventory, PDF → Vendor Invoice. Customer numbers: spreadsheet → Customer Order (feeds automatic vendor selection exactly as today).
+- Multiple numbers per party are supported; each number belongs to exactly ONE party (DB-enforced) — a number never sends both vendor and customer files.
+- The sender gets a simple reply (✅ imported / ⚠️ partial / ❌ could-not-read); the admin gets the full technical detail through the notification mirror.
+- Unregistered numbers are untouched — they keep the command/caption flow below. The Founder/admin number can never be registered as a party (it uploads on behalf of many vendors).
+- Bulk-register from a contact list: `python -m backend.scripts.register_vendor_numbers contacts.xlsx [--dry-run]`.
+- **Founder-managed over WhatsApp** (`integrations/whatsapp/contact_import.py`): an admin texts `register` (or captions a file `contacts`) and sends an Excel of Vendor Name + WhatsApp number(s). The list is AUTHORITATIVE: each listed vendor's numbers are REPLACED, a number owned by another vendor is re-pointed, rows sharing one number are ONE vendor (first row wins, no duplicate vendor), unknown names are onboarded with a code — and the bot replies with exactly what changed. A column headed "updated …" wins over an old PHONE column.
+- **Several admin numbers**: `WHATSAPP_ADMIN_PHONE_NUMBER` is comma-separated — every listed number receives all founder-facing messages (workbook, allocation reports, mirrored notifications, daily summary) and may use the admin commands.
+- **Part-number matching ignores ALL special characters** (`column_detector.normalise_part_number`): a vendor's `DM-BP/1001$` and a customer's `DMBP1001` are the same part for comparison/mapping/allocation — only letters and digits count.
+- **Google Sheet daily reset** (`sync_service.reset_sheet_for_new_day`, `GOOGLE_SHEETS_DAILY_RESET_*`): every morning, vendor tabs without a same-day upload are removed — the Sheet only ever shows today's stock. Hand-made tabs are never touched.
+
+**Daily cycle on top of the registry** (`integrations/whatsapp/daily_stock.py`, all times IST via `workers/scheduler.py`):
+
+| When | What |
+|---|---|
+| `WHATSAPP_DAILY_REQUEST_TIME` (09:00) | Approved template ("please share your stock") to every registered vendor number; needs `WHATSAPP_DAILY_REQUEST_ENABLED=true` + an approved Meta template |
+| all day | files auto-import by number; sheet/workbook update as usual |
+| `WHATSAPP_DAILY_SUMMARY_TIME` (11:00) | "📊 Received: X / Y + pending list" to the admin number (plain text, no template) |
+| admin texts `send reminder` | reminder template to still-pending vendors only, then a confirmation listing who was nudged |
+| `WHATSAPP_AUTO_REMINDER_TIME` (optional) | the same reminder, automatically |
+
+"Submitted today" = an `InventoryImport` since IST midnight with status COMPLETED / COMPLETED_WITH_ERRORS / SUPERSEDED — a FAILED attempt keeps the vendor on the pending list.
+
+### 3b. Unregistered numbers — supplied-name flow
+
 **Vendor identity comes from the NAME the sender supplies — never from the filename.** The same vendor may send `stock.xlsx`, `August_Final.xlsx`, `abc.xlsx`: all belong to one vendor record with one permanent Vendor Code.
 
 ```
@@ -252,6 +287,7 @@ The **grouping window** (`WHATSAPP_GROUPING_WINDOW_MINUTES`, default 10): all fi
 | Database | `DATABASE_URL` |
 | Auth | `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `JWT_SECRET_KEY` |
 | WhatsApp | `WHATSAPP_ENABLED`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ADMIN_PHONE_NUMBER`, `WHATSAPP_FORWARD_NOTIFICATIONS`, `WHATSAPP_GROUPING_WINDOW_MINUTES`, `WHATSAPP_WORKBOOK_DEBOUNCE_SECONDS`, `WHATSAPP_AUTO_ALLOCATION_ENABLED`, `WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS` |
+| Daily stock cycle | `WHATSAPP_DAILY_REQUEST_ENABLED`, `WHATSAPP_DAILY_REQUEST_TIME`, `WHATSAPP_DAILY_SUMMARY_ENABLED`, `WHATSAPP_DAILY_SUMMARY_TIME`, `WHATSAPP_AUTO_REMINDER_TIME`, `WHATSAPP_STOCK_REQUEST_TEMPLATE`, `WHATSAPP_REMINDER_TEMPLATE`, `WHATSAPP_TEMPLATE_LANGUAGE` |
 | Gmail | `GMAIL_ENABLED`, `GMAIL_AUTH_MODE=oauth`, `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` (one matching trio!), `GMAIL_ALLOWED_SENDERS`, `GMAIL_ATTACHMENT_PREFIX`, `GMAIL_SAVE_ATTACHMENT_AS`, `GMAIL_PROCESS_TODAY_ONLY` |
 | Google Sheets | `ENABLE_GOOGLE_SHEETS_SYNC`, `GOOGLE_SHEET_ID` (credentials shared with Gmail) |
 | AI | `AI_PROVIDER=nvidia`, `AI_MODEL`, `NVIDIA_API_KEY`, `AI_FALLBACK_ENABLED`, `AI_SHADOW_MODE`, `AI_TIMEOUT_SECONDS` |

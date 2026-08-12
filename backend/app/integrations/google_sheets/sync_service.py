@@ -164,6 +164,62 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
     worksheet.format(f"A1:{last_column}1", {"textFormat": {"bold": True}})
 
 
+def reset_sheet_for_new_day() -> None:
+    """Daily reset (Founder rule: ONLY same-day uploads count): delete every
+    worksheet whose title is a registered Vendor Code but whose vendor has
+    not submitted stock since IST midnight. A vendor's tab reappears the
+    moment their file imports today. Worksheet titles that are not a Vendor
+    Code (the Founder's hand-made hub tabs) are never touched."""
+    if not (google_sheets_settings.enabled and google_sheets_settings.is_configured()):
+        logger.info("Sheet daily reset: sync not enabled/configured -- skipping.")
+        return
+
+    # WhatsApp's daily-cycle helper defines "submitted today"; imported
+    # lazily to keep integration packages decoupled at import time.
+    from backend.app.integrations.whatsapp.daily_stock import vendors_submitted_today
+    from core.models import Vendor
+    from sqlalchemy import select
+
+    with get_session() as session:
+        submitted = vendors_submitted_today(session)
+        stale_codes = {
+            code.strip()
+            for vendor_id_, code in session.execute(
+                select(Vendor.id, Vendor.vendor_code).where(Vendor.vendor_code.is_not(None))
+            )
+            if vendor_id_ not in submitted and code and code.strip()
+        }
+
+    client = _build_client()
+    spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
+    removed = []
+    for worksheet in spreadsheet.worksheets():
+        title = worksheet.title.strip()
+        if title not in stale_codes:
+            continue
+        try:
+            spreadsheet.del_worksheet(worksheet)
+            removed.append(title)
+        except Exception:  # noqa: BLE001 -- one stubborn tab must not stop the rest
+            logger.exception("Sheet daily reset: could not delete worksheet %r.", title)
+
+    logger.info("Sheet daily reset: removed %d stale vendor tab(s): %s", len(removed), removed)
+    if removed:
+        notifications.broker.publish(
+            "info",
+            "Google Sheet daily reset completed.",
+            f"Removed {len(removed)} vendor tab(s) with no upload today: {', '.join(removed)}",
+        )
+
+
+def reset_sheet_for_new_day_safe() -> None:
+    """Scheduler entry point -- never raises."""
+    try:
+        reset_sheet_for_new_day()
+    except Exception:  # noqa: BLE001 -- a reset failure must never hurt anything else
+        logger.exception("Google Sheet daily reset failed.")
+
+
 def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> None:
     if not google_sheets_settings.enabled:
         return
