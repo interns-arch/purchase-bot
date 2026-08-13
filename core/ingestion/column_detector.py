@@ -69,6 +69,7 @@ INVENTORY_PART_NUMBER_HEADERS = PART_NUMBER_HEADERS | {
     "productno",
     "productnumber",
     "Part-number",
+    "Part #",
     
 }
 
@@ -123,6 +124,8 @@ INVENTORY_QUANTITY_HEADERS = {
     "balancequantity",
     "Net Stock",
     "Free Stock",
+    "Available Quantity",
+    "Available Qty",
 }
 # NOTE: every entry above must already be in `normalise_header` form
 # (lowercase, alphanumeric only). An entry like "Current Stock" can never
