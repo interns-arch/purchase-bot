@@ -32,12 +32,17 @@ def publish_document_result(source: str, result) -> None:
         vendor = getattr(result, "vendor_name", None)
         rows = getattr(result, "row_count", 0) or 0
 
+        customer = getattr(result, "customer_name", None)
+        sender = getattr(result, "sender", None)
+
         if status in _SUCCESS_STATUSES:
             errors = getattr(result, "error_count", 0) or 0
             is_invoice = doc_type == "VENDOR_INVOICE"
             lines = []
             if vendor:
                 lines.append(f"Vendor: {vendor}")
+            if customer:
+                lines.append(f"Customer: {customer}")
             lines.append(f"Source: {source}")
             if is_invoice:
                 # An invoice is VERIFIED against allocations, not imported as
@@ -74,17 +79,44 @@ def publish_document_result(source: str, result) -> None:
                     lines.append(str(note))
                 broker.publish("success", f"{label} imported successfully.", "\n".join(lines))
         elif status in _FAILURE_STATUSES:
+            # WHOSE file failed: vendor/customer when known (WhatsApp caption
+            # or number registry resolves them before the import runs), and
+            # always the sender's number/address so no failure is anonymous.
             reason = getattr(result, "message", None) or "Unknown error."
-            broker.publish("error", f"{label} import failed.", f"Source: {source}\nReason: {reason}")
+            lines = []
+            if vendor:
+                lines.append(f"Vendor: {vendor}")
+            if customer:
+                lines.append(f"Customer: {customer}")
+            if sender:
+                lines.append(f"Sender: {sender}")
+            file_name = getattr(result, "file_name", None)
+            if file_name:
+                lines.append(f"File: {file_name}")
+            lines.append(f"Source: {source}")
+            lines.append(f"Reason: {reason}")
+            broker.publish("error", f"{label} import failed.", "\n".join(lines))
         elif status == "NEEDS_REVIEW":
             reason = getattr(result, "message", None) or "Needs manual review."
-            broker.publish("warning", f"{label} needs review.", f"Source: {source}\n{reason}")
+            lines = []
+            if vendor:
+                lines.append(f"Vendor: {vendor}")
+            if customer:
+                lines.append(f"Customer: {customer}")
+            if sender:
+                lines.append(f"Sender: {sender}")
+            lines.append(f"Source: {source}")
+            lines.append(reason)
+            broker.publish("warning", f"{label} needs review.", "\n".join(lines))
         elif status == "SKIPPED_DUPLICATE":
-            broker.publish(
-                "info",
-                f"{label} already imported.",
-                f"Source: {source}\n(Duplicate file — skipped.)",
-            )
+            lines = []
+            if vendor:
+                lines.append(f"Vendor: {vendor}")
+            if customer:
+                lines.append(f"Customer: {customer}")
+            lines.append(f"Source: {source}")
+            lines.append("(Duplicate file — skipped.)")
+            broker.publish("info", f"{label} already imported.", "\n".join(lines))
     except Exception:  # noqa: BLE001 -- a toast failure must never affect the import
         logger.exception("Failed to publish document-result notification")
 

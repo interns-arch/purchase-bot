@@ -48,6 +48,11 @@ class ProcessingResult:
     message: str | None = None
     vendor_id: int | None = None
     vendor_name: str | None = None
+    customer_name: str | None = None
+    # WHO sent the file (WhatsApp number / email address) -- always known,
+    # even when the vendor/customer could not be resolved. Notifications show
+    # it on failures so a "STOCK.xlsx failed" toast is never anonymous.
+    sender: str | None = None
     inventory_import_id: int | None = None
     customer_order_id: int | None = None
     delivery_import_id: int | None = None
@@ -56,7 +61,14 @@ class ProcessingResult:
     core_status: str | None = None
 
 
-def _early_result(document, message: str | None = None, *, is_duplicate: bool = False) -> ProcessingResult:
+def _early_result(
+    document,
+    message: str | None = None,
+    *,
+    is_duplicate: bool = False,
+    vendor_name: str | None = None,
+    customer_name: str | None = None,
+) -> ProcessingResult:
     return ProcessingResult(
         document_id=document.id,
         status=document.status,
@@ -64,7 +76,30 @@ def _early_result(document, message: str | None = None, *, is_duplicate: bool = 
         file_name=document.filename,
         message=message if message is not None else document.error_message,
         is_duplicate=is_duplicate,
+        vendor_name=vendor_name,
+        customer_name=customer_name,
+        sender=document.sender,
     )
+
+
+def _classified_identity(classification, session: Session) -> tuple[str | None, str | None]:
+    """(vendor_name, customer_name) as known from classification alone --
+    what lets a FAILED import still say WHOSE file failed. The WhatsApp
+    caption/registry supplies the vendor name before any import runs; a
+    registered customer's id resolves the same way."""
+    vendor_name = classification.vendor_name
+    if vendor_name is None and classification.vendor_id is not None:
+        from core.services import vendor_service
+
+        vendor = vendor_service.get_vendor(classification.vendor_id, session)
+        vendor_name = vendor.name if vendor is not None else None
+    customer_name = None
+    if classification.customer_id is not None:
+        from core.services import customer_service
+
+        customer = customer_service.get_customer(classification.customer_id, session)
+        customer_name = customer.name if customer is not None else None
+    return vendor_name, customer_name
 
 
 def process_document(
@@ -164,12 +199,20 @@ def process_document(
     except NotImplementedYetError as exc:
         documents_service.mark_unsupported(document, str(exc), session)
         staging.mark_failed_location(file_path)
-        return _early_result(document, str(exc))
+        vendor_name, customer_name = _classified_identity(classification, session)
+        return _early_result(
+            document, str(exc), vendor_name=vendor_name, customer_name=customer_name
+        )
     except Exception as exc:  # noqa: BLE001 -- one bad document must not crash the caller
         logger.exception("Failed to process document '%s'", file_path.name)
         documents_service.mark_failed(document, str(exc), session)
         staging.mark_failed_location(file_path)
-        return _early_result(document, str(exc))
+        # The failure toast must still say WHOSE file failed -- the caption/
+        # registry told us the vendor before the import ever ran.
+        vendor_name, customer_name = _classified_identity(classification, session)
+        return _early_result(
+            document, str(exc), vendor_name=vendor_name, customer_name=customer_name
+        )
 
     if result.is_duplicate:
         documents_service.mark_skipped_duplicate(document, result.message or "Duplicate.", session)
@@ -251,6 +294,10 @@ def process_document(
                 result.vendor_id,
             )
 
+    # Identity for the notification: the dispatch result's names when it got
+    # far enough to resolve them, else whatever classification knew -- so
+    # even a FAILED/NEEDS_REVIEW toast names the vendor/customer.
+    fallback_vendor, fallback_customer = _classified_identity(classification, session)
     return ProcessingResult(
         document_id=document.id,
         status=document.status,
@@ -260,7 +307,9 @@ def process_document(
         error_count=result.error_count,
         message=result.message,
         vendor_id=result.vendor_id,
-        vendor_name=result.vendor_name,
+        vendor_name=result.vendor_name or fallback_vendor,
+        customer_name=result.customer_name or fallback_customer,
+        sender=document.sender,
         inventory_import_id=result.inventory_import_id,
         customer_order_id=result.customer_order_id,
         delivery_import_id=result.delivery_import_id,
