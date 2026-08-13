@@ -134,7 +134,7 @@ def send_morning_requests() -> None:
 def _summary_text(received: list[str], pending: list[str]) -> str:
     total = len(received) + len(pending)
     lines = [
-        f"📊 Today's Vendor Stock Status — {datetime.now(_IST).strftime('%d %b')}",
+        f" Today's Vendor Stock Status — {datetime.now(_IST).strftime('%d %b')}",
         f"Received: {len(received)} / {total}",
     ]
     if received:
