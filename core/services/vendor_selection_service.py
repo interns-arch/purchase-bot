@@ -430,9 +430,17 @@ def _export_row_cells(row: SelectionExportRow) -> list[str]:
     ]
 
 
-def _fill_export_sheet(sheet, rows: list[SelectionExportRow]) -> None:
+def _fill_export_sheet(sheet, rows: list[SelectionExportRow], heading: str | None = None) -> None:
+    if heading:
+        # Whose order this is, INSIDE the sheet -- a worksheet tab caps at 31
+        # characters, so a long customer name can only be read here.
+        sheet.append([heading])
+        sheet["A1"].font = Font(bold=True, size=12)
+        sheet.append([])
+
+    header_row_index = sheet.max_row + 1 if heading else 1
     sheet.append(EXPORT_HEADERS)
-    for cell in sheet[1]:
+    for cell in sheet[header_row_index]:
         cell.font = Font(bold=True)
 
     for row in rows:
@@ -455,6 +463,7 @@ def to_export_workbook(rows: list[SelectionExportRow]) -> openpyxl.Workbook:
 
 def to_batch_export_workbook(
     reports: list[tuple[str, list[SelectionExportRow]]],
+    headings: dict[str, str] | None = None,
 ) -> openpyxl.Workbook:
     """ONE workbook holding every customer order's allocation report as its
     own worksheet -- the batched counterpart of `to_export_workbook`, used by
@@ -474,7 +483,11 @@ def to_batch_export_workbook(
             candidate = f"{base[:28]}_{suffix}"
             suffix += 1
         used.add(candidate.lower())
-        _fill_export_sheet(workbook.create_sheet(title=candidate), rows)
+        _fill_export_sheet(
+            workbook.create_sheet(title=candidate),
+            rows,
+            heading=(headings or {}).get(title),
+        )
     if not workbook.sheetnames:  # an empty workbook is invalid
         workbook.create_sheet(title="No Allocations")
     return workbook

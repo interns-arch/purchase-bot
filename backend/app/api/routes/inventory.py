@@ -4,12 +4,21 @@ is `core.services.inventory_import_service`, reused unchanged."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from backend.app.auth.dependencies import get_current_user
 from backend.app.auth.models import User
 from backend.app.database.session import get_db
+from backend.app.services.topup_runner import run_topup_for_vendor
 from backend.app.schemas.inventory import ImportErrorOut, ImportHistoryOut, ImportResultOut
 from backend.app.services.inventory_service import process_uploads
 from core.services import inventory_import_service as import_service
@@ -24,6 +33,7 @@ router = APIRouter(
 @router.post("/imports", response_model=list[ImportResultOut])
 def upload_inventory_files(
     files: list[UploadFile],
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[ImportResultOut]:
@@ -33,6 +43,16 @@ def upload_inventory_files(
         )
 
     outcomes = process_uploads(files, db, sender=current_user.username)
+
+    # AUTO TOP-UP: this vendor's new stock fills the still-unfilled parts of
+    # recent customer orders (adds only -- existing allocations never move).
+    # Scheduled as a background task so it runs AFTER this request's session
+    # has committed and the new stock is actually visible.
+    for outcome in outcomes:
+        if outcome.vendor_id and not outcome.error and not outcome.is_duplicate:
+            background_tasks.add_task(
+                run_topup_for_vendor, outcome.vendor_id, outcome.vendor_name
+            )
 
     results: list[ImportResultOut] = []
     for outcome in outcomes:

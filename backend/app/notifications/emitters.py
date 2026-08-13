@@ -126,6 +126,25 @@ def publish_document_result(source: str, result) -> None:
         logger.exception("Failed to publish document-result notification")
 
 
+def publish_topup(result) -> None:
+    """Emit a toast when newly-imported vendor stock filled shortfalls on
+    existing customer orders (auto top-up). Silent when nothing changed --
+    the common case, and the Founder should not get a message per import.
+    Never raises."""
+    try:
+        if not getattr(result, "lines", None):
+            return
+        vendor = getattr(result, "vendor_name", None) or "the new stock"
+        detail = "\n".join(result.summary_lines())
+        broker.publish(
+            "success",
+            f"New stock from {vendor} filled {len(result.order_ids)} pending order(s).",
+            f"{detail}\n\nExisting allocations were not changed.",
+        )
+    except Exception:  # noqa: BLE001 -- a toast failure must never affect the import
+        logger.exception("Failed to publish top-up notification")
+
+
 def publish_download_failure(source: str, filename: str, reason: str) -> None:
     """Emit a toast when a file couldn't even be downloaded/staged. Never raises."""
     try:

@@ -48,6 +48,7 @@ from backend.app.integrations.whatsapp.parser import (
 from backend.app.notifications import emitters as notifications
 from backend.app.services.document_processor.metadata import DocumentMetadata
 from backend.app.services.document_processor.processor import process_document
+from backend.app.services.topup_runner import run_topup_for_vendor
 from core.db import get_session
 from core.logging_setup import get_logger
 
@@ -608,6 +609,14 @@ def _process_staged_file(
     # workbook (sent after the batch goes quiet), not one per file. Fully
     # best-effort -- it opens its own session and cannot affect the import.
     if _is_successful_inventory_import(result):
+        # AUTO TOP-UP (Founder's rule): this vendor's new stock fills the
+        # still-unfilled parts of recent customer orders -- adding only,
+        # never moving an allocation that already exists. Runs here, after
+        # the import transaction has COMMITTED, so the new stock is visible;
+        # in its own session/transaction, and never fails the import.
+        run_topup_for_vendor(
+            getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
+        )
         inventory_output.request_consolidated_send(getattr(result, "vendor_name", None))
 
     # Founder automation ("Combined ZIP" mode): a successfully imported

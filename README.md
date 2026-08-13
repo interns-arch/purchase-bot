@@ -259,6 +259,19 @@ Example: V01 has P-1001 x10, V02 has P-1001 x5
 ```
 
 - `vendor_comparison_service.compare_vendors_for_order()` — every vendor holding the part, showing live REMAINING stock.
+**When allocation runs** (important): automatically **once per customer order, at import time** (batched — see `allocation_batch`), and whenever someone clicks **Auto-Select** on the web. Orders arriving in one batch are allocated **in arrival order**, each committing before the next, so every customer consumes stock the previous one left. A later vendor upload never re-runs a full allocation — saved `VendorSelection` rows stand until a human clicks Auto-Select (which clears and recomputes that order).
+
+**Auto top-up on new stock** (`core/services/rules/topup.py`, `TOPUP_ON_NEW_STOCK`): a vendor uploading fresh stock **adds** to recent orders that are still short — never moves, reduces or re-points an allocation that already exists, so anything already communicated to a vendor stays valid.
+
+```
+order line: requested 10, allocated 4 (APEX)   -> short 6
+BHARAT uploads 5                               -> +5 BHARAT  (APEX's 4 untouched)
+CARBO uploads 50                               -> +1 CARBO   (never more than requested)
+```
+Only orders newer than `TOPUP_WINDOW_DAYS` (default 7) qualify; every write goes through the same `upsert_selection` guards and row lock, so two orders can never share the same stock. The Founder gets ONE notification listing `Order 12 — Karol Bagh: +5 P-1001 (still short 1)` — and nothing at all when there was nothing to fill.
+
+**Which sheet is whose** (`allocation_batch._order_identity`): each worksheet in the batch workbook is titled `O<order id> <Customer Name>` (Excel caps titles at 31 chars) and its **first row spells out the identity in full** — `Customer Order 12 — Karol Bagh Auto Spares & Sons  (file: kb.xlsx)` — with the column headers below it. Orders whose customer was never identified (Gmail attachments carry no Customer Code) fall back to `Order_<id>` plus the same in-sheet heading with the source file name. The WhatsApp caption lists the same `Order N — Customer` mapping.
+
 - `rules/engine.run_automatic_vendor_selection()` — Own-Stock vendors first (`OWN_STOCK_VENDOR_NAME`, comma-separated — e.g. `Bijwasan,Mansarovar`; among them, biggest available stock first), then the `combination` strategy: vendors ranked by stock, each draw capped at live remaining, splitting across vendors as needed; partial fulfilment allowed (never all-or-nothing).
 - `vendor_selection_service.upsert_selection()` — takes a database row lock BEFORE computing remaining, so two orders processed at the same instant can never over-allocate (stock 10 + two orders of 6 = 6+4, never 12 — verified on production Postgres).
 - Unfulfilled lines always show `Selected Qty 0` with the reason ("Insufficient vendor stock (short N)") — never blank.

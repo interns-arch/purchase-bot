@@ -93,15 +93,38 @@ def _process_batch() -> None:
         _run_batch(orders)
 
 
-def _order_label(order_id: int, session) -> str:
-    """'Order 12 — Karol Bagh' (customer display name, never the code) so the
-    Founder's WhatsApp caption says WHOSE orders were allocated."""
+def _order_identity(order_id: int, session) -> tuple[str, str, str]:
+    """(worksheet_title, caption_label, sheet_heading) for one order.
+
+    Identity is the CUSTOMER NAME plus the order id -- so a worksheet is
+    never an anonymous "Order_12":
+
+      worksheet title : "O12 Karol Bagh"      (Excel caps titles at 31 chars)
+      caption label   : "Order 12 — Karol Bagh"
+      sheet heading   : "Customer Order 12 — Karol Bagh (file: kb.xlsx)"
+                        written INSIDE the sheet, where nothing is truncated
+
+    Orders whose customer could not be identified (Gmail attachments with no
+    Customer Code) fall back to the order id + source file name, which still
+    ties the sheet to a real file."""
     order = session.get(CustomerOrder, order_id)
+    file_name = getattr(order, "file_name", None) if order is not None else None
+    customer_name = None
     if order is not None and order.customer_id is not None:
         customer = session.get(Customer, order.customer_id)
-        if customer is not None and customer.name:
-            return f"Order {order_id} — {customer.name}"
-    return f"Order {order_id}"
+        customer_name = customer.name if customer is not None else None
+
+    if customer_name:
+        title = f"O{order_id} {customer_name}"[:31]
+        label = f"Order {order_id} — {customer_name}"
+        heading = f"Customer Order {order_id} — {customer_name}"
+    else:
+        title = f"Order_{order_id}"
+        label = f"Order {order_id}"
+        heading = f"Customer Order {order_id}"
+    if file_name:
+        heading += f"  (file: {file_name})"
+    return title, label, heading
 
 
 def _run_batch(order_ids: list[int]) -> None:
@@ -113,6 +136,7 @@ def _run_batch(order_ids: list[int]) -> None:
     )
     reports: list[tuple[str, list]] = []  # (worksheet title, export rows)
     order_labels: list[str] = []  # 'Order 12 — Karol Bagh' per report
+    headings: dict[str, str] = {}  # worksheet title -> in-sheet heading
     done: list[int] = []
     failed: list[int] = []
 
@@ -123,9 +147,10 @@ def _run_batch(order_ids: list[int]) -> None:
             with get_session() as session:
                 run_automatic_vendor_selection(order_id, session)
                 rows = vendor_selection_service.list_selections_for_export(order_id, session)
-                label = _order_label(order_id, session)
-            reports.append((f"Order_{order_id}", rows))
+                title, label, heading = _order_identity(order_id, session)
+            reports.append((title, rows))
             order_labels.append(label)
+            headings[title] = heading
             done.append(order_id)
         except Exception:  # noqa: BLE001 -- one bad order must not block the batch
             logger.exception(
@@ -163,7 +188,7 @@ def _run_batch(order_ids: list[int]) -> None:
         )
         return
 
-    workbook = vendor_selection_service.to_batch_export_workbook(reports)
+    workbook = vendor_selection_service.to_batch_export_workbook(reports, headings)
     buffer = io.BytesIO()
     workbook.save(buffer)
     file_name = f"vendor_allocations_{now_ist().strftime('%Y%m%d_%H%M')}.xlsx"
