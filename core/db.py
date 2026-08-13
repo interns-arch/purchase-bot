@@ -53,8 +53,37 @@ engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
+# Additive columns introduced after a table already existed in production.
+# `create_all` creates missing TABLES but never adds columns to existing
+# ones, so each (table, column, DDL type) here is applied with a guarded
+# ALTER TABLE once per process. Additive-only -- nothing is ever dropped.
+_SCHEMA_UPGRADES = (
+    ("incoming_documents", "stored_path", "VARCHAR"),
+)
+_upgrades_applied = False
+
+
+def _apply_schema_upgrades() -> None:
+    global _upgrades_applied
+    if _upgrades_applied:
+        return
+    _upgrades_applied = True
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    for table, column, ddl_type in _SCHEMA_UPGRADES:
+        if table not in inspector.get_table_names():
+            continue  # create_all just made it, with all columns
+        existing = {col["name"] for col in inspector.get_columns(table)}
+        if column in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _apply_schema_upgrades()
 
 
 @contextmanager

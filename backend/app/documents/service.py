@@ -34,6 +34,44 @@ def find_by_email_message_id(message_id: str, session: Session) -> IncomingDocum
     ).scalar_one_or_none()
 
 
+def list_recent(
+    session: Session, *, status: IncomingDocumentStatus | None = None, limit: int = 50
+) -> list[IncomingDocument]:
+    """Newest-first inbox of every received file (File Inbox page).
+    Optionally narrowed to one status (e.g. FAILED for 'what broke today')."""
+    statement = select(IncomingDocument).order_by(IncomingDocument.id.desc()).limit(limit)
+    if status is not None:
+        statement = statement.where(IncomingDocument.status == status)
+    return list(session.execute(statement).scalars())
+
+
+def resolve_stored_file(document: IncomingDocument):
+    """The on-disk Path of the EXACT file this document was created from, or
+    None when it is no longer available (server restarts/redeploys clear the
+    stored files -- Render's disk is ephemeral).
+
+    The staged path recorded at receipt time points under uploads/incoming/;
+    after handling, housekeeping moves the file to processed/ or failed/
+    KEEPING the same relative path -- so all three roots are checked."""
+    from pathlib import Path
+
+    from backend.app.services.document_processor import staging
+
+    if not document.stored_path:
+        return None
+    stored = Path(document.stored_path)
+    candidates = [stored]
+    try:
+        relative = stored.relative_to(staging.INCOMING_ROOT)
+        candidates += [staging.PROCESSED_ROOT / relative, staging.FAILED_ROOT / relative]
+    except ValueError:
+        pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def record_received(
     source: DocumentSource,
     filename: str,
@@ -42,6 +80,7 @@ def record_received(
     sender: str | None = None,
     whatsapp_message_id: str | None = None,
     email_message_id: str | None = None,
+    stored_path: str | None = None,
 ) -> IncomingDocument:
     """Creates the initial `RECEIVED` row. If `whatsapp_message_id` (or
     `email_message_id`) is given and already recorded, returns the existing
@@ -65,6 +104,7 @@ def record_received(
         whatsapp_message_id=whatsapp_message_id,
         email_message_id=email_message_id,
         status=IncomingDocumentStatus.RECEIVED,
+        stored_path=stored_path,
     )
     session.add(document)
     session.flush()  # assign document.id

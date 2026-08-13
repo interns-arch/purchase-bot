@@ -38,12 +38,49 @@ from core.ingestion.column_detector import decimal_to_string, normalise_part_num
 from core.models import (
     CustomerOrderItem,
     InventoryImport,
+    Part,
+    PartAlias,
     Vendor,
     VendorInventory,
     VendorSelection,
 )
 from core.services import vendor_stock_service
 from core.services.vendor_comparison_service import compare_vendors_for_order
+
+
+def _matchable_part_numbers(normalized_part_number: str, session: Session) -> list[str]:
+    """Every normalized number that denotes the SAME part as the input: the
+    input itself, the part's canonical number, and all of its `PartAlias`
+    numbers (any vendor). This is what lets an order line written against a
+    vendor's ALTERNATE number ("Root Part Num" / OEM number) lock and consume
+    the very same inventory row the primary number would -- one part, one
+    reservation ledger, whichever number the customer wrote."""
+    part_ids = set(
+        session.execute(
+            select(Part.id).where(Part.canonical_part_number == normalized_part_number)
+        ).scalars()
+    )
+    part_ids.update(
+        session.execute(
+            select(PartAlias.part_id).where(
+                PartAlias.normalized_part_number == normalized_part_number
+            )
+        ).scalars()
+    )
+    if not part_ids:
+        return [normalized_part_number]
+    numbers = {normalized_part_number}
+    numbers.update(
+        session.execute(
+            select(Part.canonical_part_number).where(Part.id.in_(part_ids))
+        ).scalars()
+    )
+    numbers.update(
+        session.execute(
+            select(PartAlias.normalized_part_number).where(PartAlias.part_id.in_(part_ids))
+        ).scalars()
+    )
+    return list(numbers)
 
 
 def _find_active_vendor_offer(
@@ -55,17 +92,29 @@ def _find_active_vendor_offer(
     SQLite -- which has no row-level lock -- its own single-writer file lock
     still serializes concurrent writers, just at a coarser grain, which is
     fine for dev/tests). The lock is released on commit/rollback of the
-    caller's transaction, right after `upsert_selection` finishes writing."""
-    return session.execute(
-        select(VendorInventory)
-        .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
-        .where(
-            VendorInventory.vendor_id == vendor_id,
-            VendorInventory.normalized_part_number == normalized_part_number,
-            InventoryImport.is_active.is_(True),
+    caller's transaction, right after `upsert_selection` finishes writing.
+
+    Matching is alias-aware (`_matchable_part_numbers`): the offer is found
+    whichever of the part's known numbers the order line used. `.limit(1)` +
+    a stable order keep the single-row lock semantics unchanged."""
+    return (
+        session.execute(
+            select(VendorInventory)
+            .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+            .where(
+                VendorInventory.vendor_id == vendor_id,
+                VendorInventory.normalized_part_number.in_(
+                    _matchable_part_numbers(normalized_part_number, session)
+                ),
+                InventoryImport.is_active.is_(True),
+            )
+            .order_by(VendorInventory.id)
+            .limit(1)
+            .with_for_update()
         )
-        .with_for_update()
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
 
 
 def _selections_for_item(

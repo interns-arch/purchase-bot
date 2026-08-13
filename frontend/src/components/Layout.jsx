@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { to: "/vendor-invoices", label: "Vendor Invoices" },
   { to: "/purchase-orders", label: "Purchase Orders" },
   { to: "/vendor-performance", label: "Vendor Performance" },
+  { to: "/file-inbox", label: "File Inbox" },
   { to: "/settings", label: "Settings" },
 ];
 

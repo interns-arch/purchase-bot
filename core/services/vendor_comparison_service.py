@@ -20,7 +20,10 @@ from decimal import Decimal, InvalidOperation
 
 import openpyxl
 from openpyxl.styles import Font
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from core.models import PartAlias
 
 from core.ingestion.column_detector import (
     DISCOUNT_HEADERS,
@@ -193,10 +196,21 @@ def compare_vendors(
     then reflects every reservation in the system, since there's no "this
     line's own row" to exclude.
     """
-    offer_index = {
-        part_row.canonical_part_number: part_row
-        for part_row in get_master_inventory(session)
-    }
+    master_rows = get_master_inventory(session)
+    offer_index = {part_row.canonical_part_number: part_row for part_row in master_rows}
+    # ALIAS-AWARE matching: a part ordered under ANY of its known numbers --
+    # a vendor's alternate column ("Root Part Num" / "OEM Part No"), or a
+    # different vendor's spelling -- must find the same offers. Every
+    # PartAlias of an in-stock part is added as an extra lookup key;
+    # `setdefault` keeps canonical numbers authoritative on collision.
+    by_part_id = {part_row.part_id: part_row for part_row in master_rows}
+    if by_part_id:
+        for alias_norm, alias_part_id in session.execute(
+            select(PartAlias.normalized_part_number, PartAlias.part_id).where(
+                PartAlias.part_id.in_(list(by_part_id))
+            )
+        ):
+            offer_index.setdefault(alias_norm, by_part_id[alias_part_id])
 
     result = VendorComparisonResult()
     result.summary.customer_order_items = len(input_rows)

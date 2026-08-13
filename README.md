@@ -187,6 +187,18 @@ Header text still matters, but only as a score hint and as a **veto**: any colum
 
 The same profiling also finds the real header row in files whose header names are all unrecognised (`detect_header_row_by_data`), skipping company/date metadata rows above the table — and a candidate row containing bare numbers is never mistaken for a header.
 
+### Dual part-number columns (`find_secondary_part_columns`)
+
+Some vendor files carry **two part numbers per row for the same physical item** — e.g. Maruti DMS exports with `Part Num` + `Root Part Num`, or `Part Number` + `Old Part No` / `OEM Part Number`. The importer:
+
+- stores the row ONCE under the primary number (stock is never double-counted);
+- registers every distinct secondary number as a `PartAlias` of the same Part;
+- keeps both columns verbatim in `raw_data`, so the Google Sheet / workbook exact copies show them unchanged.
+
+Matching is **alias-aware end to end**: Vendor Comparison (`compare_vendors`' offer index) and allocation locking (`vendor_selection_service._matchable_part_numbers`) both resolve an ordered number through the Part graph — so a customer may write **either** number (any spelling, any special characters) and hits the same inventory row and the same reservation ledger. Ordering 20 by the root number leaves only 6 for the next customer ordering by the primary number.
+
+Spacer rows (a `' '` row between the header and the first data row, common in dealer "Part search Details" exports) are skipped; a blank row **after** data still ends the table as before.
+
 ---
 
 ## 4. Outputs After a Vendor Import
@@ -320,6 +332,17 @@ Registered **customer** numbers work the same with Excel = customer order ("✅ 
 | any other text | instruction reply listing the commands |
 
 The **grouping window** (`WHATSAPP_GROUPING_WINDOW_MINUTES`, default 10): all files from the same number within the window keep the same command and vendor automatically; every file restarts the window; a new caption switches vendors; after expiry the conversation starts fresh.
+
+---
+
+## 8b. File Inbox (web)
+
+**Every file ever received — WhatsApp, Gmail, manual upload — with a Download button for the EXACT bytes the sender uploaded.** (`backend/app/api/routes/documents.py`, `frontend/src/pages/FileInboxPage.jsx`)
+
+- Filter by status: Failed / Needs review / Duplicates / Processed…
+- Each row: received time, file name, source, type, sender, status, exact failure reason.
+- **Download a FAILED file to open it yourself** and see what the vendor actually sent — no need to ask them to re-share.
+- Honest availability: files live on the app server's disk, which Render clears on restart/redeploy — rows whose bytes are gone show a disabled Download button instead of erroring. (`IncomingDocument.stored_path`; the resolver checks `uploads/incoming|processed|failed/`.)
 
 ---
 

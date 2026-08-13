@@ -42,6 +42,9 @@ const VendorPerformanceDetailPage = lazy(() =>
     default: m.VendorPerformanceDetailPage,
   }))
 );
+const FileInboxPage = lazy(() =>
+  import("./pages/FileInboxPage").then((m) => ({ default: m.FileInboxPage }))
+);
 
 function App() {
   return (
@@ -121,6 +124,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <VendorPerformanceDetailPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/file-inbox"
+              element={
+                <ProtectedRoute>
+                  <FileInboxPage />
                 </ProtectedRoute>
               }
             />

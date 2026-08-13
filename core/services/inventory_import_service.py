@@ -27,6 +27,7 @@ from core.ingestion.column_detector import (
     detect_header_row,
     find_inventory_columns,
     find_optional_column,
+    find_secondary_part_columns,
     is_parseable_quantity,
     normalise_header,
     normalise_part_number,
@@ -40,11 +41,16 @@ from core.models import (
     ImportErrorRecord,
     ImportStatus,
     InventoryImport,
+    PartAlias,
     Vendor,
     VendorInventory,
 )
 from core.services.own_stock import is_own_stock_vendor
-from core.services.part_resolution_service import resolve_part, resolve_parts_bulk  # noqa: F401 -- resolve_part kept for other callers
+from core.services.part_resolution_service import (  # noqa: F401 -- resolve_part kept for other callers
+    _insert_ignore_conflicts,
+    resolve_part,
+    resolve_parts_bulk,
+)
 
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
 DEFAULT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
@@ -243,7 +249,12 @@ def read_table_with_mapping(
         padded = list(data_row) + [""] * max(0, column_count - len(data_row))
         cells = [str(padded[i]).strip() for i in range(column_count)]
         if not any(cells):
-            break  # blank row -> end of the inventory section
+            if not rows:
+                # Spacer row(s) BETWEEN the header and the first data row --
+                # dealer/DMS exports (e.g. 'Part search Details' files) put a
+                # single-space row there. Skip; the table hasn't started yet.
+                continue
+            break  # blank row after data -> end of the inventory section
         rows.append({headers[i]: cells[i] for i in range(column_count)})
 
     return headers, rows, part_header, quantity_header
@@ -290,7 +301,12 @@ def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, st
         padded = list(data_row) + [""] * max(0, column_count - len(data_row))
         cells = [str(padded[i]).strip() for i in range(column_count)]
         if not any(cells):
-            break  # blank row -> end of the inventory section
+            if not rows:
+                # Spacer row(s) BETWEEN the header and the first data row --
+                # dealer/DMS exports (e.g. 'Part search Details' files) put a
+                # single-space row there. Skip; the table hasn't started yet.
+                continue
+            break  # blank row after data -> end of the inventory section
         rows.append({headers[i]: cells[i] for i in range(column_count)})
 
     return headers, rows
@@ -560,6 +576,43 @@ def run_import(
     parts_by_norm = resolve_parts_bulk(
         vendor_id, [raw for _, _, raw, _ in valid_rows], session
     )
+
+    # SECONDARY part-number columns ("Root Part Num", "OEM Part No", "Old
+    # Part Code", ...): some vendors list TWO numbers per row for the same
+    # physical item. Each distinct secondary number becomes a `PartAlias` of
+    # that row's PRIMARY Part, so a customer order written against EITHER
+    # number resolves to the same part and matches the same stock -- never a
+    # second Part row, never double-counted quantity. Inserted in bulk with
+    # ON CONFLICT DO NOTHING (same race rule as `resolve_parts_bulk`).
+    secondary_columns = find_secondary_part_columns(headers, part_column)
+    if secondary_columns and valid_rows:
+        alias_rows: list[dict] = []
+        seen_secondary: set[str] = set()
+        for _row_number, row, raw_part_number, _quantity in valid_rows:
+            primary_norm = normalise_part_number(raw_part_number)
+            part = parts_by_norm.get(primary_norm)
+            if part is None:
+                continue
+            for column in secondary_columns:
+                raw_secondary = (row.get(column) or "").strip()
+                norm_secondary = normalise_part_number(raw_secondary)
+                if (
+                    not norm_secondary
+                    or norm_secondary == primary_norm  # same number twice
+                    or norm_secondary in parts_by_norm  # already a primary
+                    or norm_secondary in seen_secondary
+                ):
+                    continue
+                seen_secondary.add(norm_secondary)
+                alias_rows.append(
+                    {
+                        "part_id": part.id,
+                        "vendor_id": vendor_id,
+                        "vendor_part_number": raw_secondary,
+                        "normalized_part_number": norm_secondary,
+                    }
+                )
+        _insert_ignore_conflicts(session, PartAlias.__table__, alias_rows)
 
     for row_number, row, raw_part_number, quantity in valid_rows:
         part = parts_by_norm[normalise_part_number(raw_part_number)]

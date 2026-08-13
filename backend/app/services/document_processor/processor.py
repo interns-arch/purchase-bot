@@ -77,6 +77,11 @@ def process_document(
         sender=metadata.sender,
         whatsapp_message_id=metadata.external_message_id if source == DocumentSource.WHATSAPP else None,
         email_message_id=metadata.external_message_id if source == DocumentSource.EMAIL else None,
+        # Where the bytes were staged -- lets the admin download the EXACT
+        # file later (File Inbox), especially a failed one. The file is moved
+        # to processed/ or failed/ after handling; the download endpoint
+        # checks all three roots from this incoming path.
+        stored_path=str(file_path),
     )
 
     # A redelivered WhatsApp message: `record_received` returned the

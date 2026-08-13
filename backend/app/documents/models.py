@@ -68,6 +68,12 @@ class IncomingDocument(Base):
     received_at: Mapped[datetime] = mapped_column(server_default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(default=None)
     error_message: Mapped[str | None] = mapped_column(default=None)
+    # Where the received file's bytes were staged on disk (uploads/incoming/
+    # ...; moved to processed/ or failed/ after handling -- the download
+    # endpoint checks all three roots). Lets the admin DOWNLOAD the exact
+    # file a vendor sent, especially a FAILED one, to inspect it. Nullable:
+    # rows from before this column, and download-failure rows, have none.
+    stored_path: Mapped[str | None] = mapped_column(default=None)
 
     inventory_import_id: Mapped[int | None] = mapped_column(
         ForeignKey("inventory_imports.id", ondelete="SET NULL"), default=None

@@ -121,6 +121,8 @@ INVENTORY_QUANTITY_HEADERS = {
     "balancestock",
     "balanceqty",
     "balancequantity",
+    "Net Stock",
+    "Free Stock",
 }
 # NOTE: every entry above must already be in `normalise_header` form
 # (lowercase, alphanumeric only). An entry like "Current Stock" can never
@@ -422,6 +424,52 @@ def find_inventory_columns(
         f"Available-quantity column not found in '{file_name}' (looked for e.g. "
         f"Quantity / Available Qty / Current Stock / Stock). Headers found: {headers}"
     )
+
+
+# Header substrings that mark a column as an ALTERNATE part identifier when
+# it appears BESIDE the primary part column -- e.g. "Root Part Num" (Maruti
+# DMS), "Old Part No", "OEM Part Number", "Superseded Part Code". Substring
+# matching is safe here because these fragments are identifier-specific
+# ("partnum", never bare "part" -- so "Part Tax Description" can't match).
+_SECONDARY_PART_FRAGMENTS = (
+    "partnum",
+    "partno",
+    "partnumber",
+    "partcode",
+    "itemcode",
+    "itemno",
+    "materialcode",
+    "materialno",
+    "productcode",
+    "productno",
+    "productid",
+    "oem",
+    "sku",
+)
+
+
+def find_secondary_part_columns(headers: list[str], primary_column: str) -> list[str]:
+    """Columns OTHER than `primary_column` that also hold part identifiers
+    for the same row ("Part Num" + "Root Part Num" both naming one physical
+    item). The importer turns every secondary value into a `PartAlias` of the
+    row's primary Part, so a customer may order by EITHER number and match
+    the same stock -- never a second part, never double-counted quantity.
+
+    Descriptive columns ("Part Description", "Part Name") are excluded even
+    though they contain 'part': descriptions are text, not identifiers."""
+    secondary: list[str] = []
+    for header in headers:
+        text = str(header).strip()
+        if not text or header == primary_column:
+            continue
+        normalized = normalise_header(text)
+        if "desc" in normalized or "name" in normalized:
+            continue  # descriptive, never an identifier
+        if normalized in INVENTORY_PART_NUMBER_HEADERS or any(
+            fragment in normalized for fragment in _SECONDARY_PART_FRAGMENTS
+        ):
+            secondary.append(header)
+    return secondary
 
 
 def find_optional_column(headers: list[str], candidate_headers: set[str]) -> str | None:
