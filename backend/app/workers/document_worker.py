@@ -25,12 +25,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.app.documents import service as documents_service
-from backend.app.documents.models import DocumentSource, IncomingDocumentType
+from backend.app.documents.models import (
+    DocumentSource,
+    IncomingDocument,
+    IncomingDocumentType,
+)
 from backend.app.integrations.whatsapp import (
     command_store,
     commands,
     contact_import,
     daily_stock,
+    failed_file,
     pending_vendor_files,
     registry,
     vendor_memory,
@@ -601,6 +606,11 @@ def _process_staged_file(
     # SUCCESS for a transaction that could still fail at commit.
     if result is not None:
         notifications.publish_document_result("WhatsApp", result)
+        # A FAILED file is exactly the one the Founder needs to look at --
+        # send it straight back to the admin chat (best-effort). Processing
+        # has moved it to uploads/failed/ by now, so resolve its real
+        # location rather than assuming the staged path.
+        _send_failed_file_safe(result, "WhatsApp")
 
     # Temporary Google-Sheets replacement (output layer): the import above is
     # now committed, so on a SUCCESSFUL Vendor Inventory import request the
@@ -627,6 +637,30 @@ def _process_staged_file(
         allocation_batch.request_order_allocation(order_id)
 
     return result
+
+
+def _send_failed_file_safe(result, source: str) -> None:
+    """Deliver a failed import's original file to the Founder's WhatsApp.
+    Looks the file up through the inbox record (it has been moved to
+    uploads/failed/ by now). Never raises."""
+    try:
+        status = getattr(getattr(result, "status", None), "value", None)
+        if status not in failed_file.FAILURE_STATUSES:
+            return
+        document_id = getattr(result, "document_id", None)
+        if document_id is None:
+            return
+        with get_session() as session:
+            document = session.get(IncomingDocument, document_id)
+            path = (
+                documents_service.resolve_stored_file(document)
+                if document is not None
+                else None
+            )
+        failed_file.send_failed_file(result, source, path)
+    except Exception:  # noqa: BLE001 -- an output must never affect the import
+        logger.exception("Could not deliver the failed file for document %s.",
+                         getattr(result, "document_id", None))
 
 
 def _is_successful_inventory_import(result) -> bool:

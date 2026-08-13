@@ -45,6 +45,16 @@ def list_recent(
     return list(session.execute(statement).scalars())
 
 
+def find_by_inventory_import_id(import_id: int, session: Session) -> IncomingDocument | None:
+    """The inbox record for an inventory import -- how Import History reaches
+    the ORIGINAL uploaded file, including for imports that stored no rows."""
+    return session.execute(
+        select(IncomingDocument)
+        .where(IncomingDocument.inventory_import_id == import_id)
+        .order_by(IncomingDocument.id.desc())
+    ).scalars().first()
+
+
 def resolve_stored_file(document: IncomingDocument):
     """The on-disk Path of the EXACT file this document was created from, or
     None when it is no longer available (server restarts/redeploys clear the
@@ -142,10 +152,22 @@ def mark_processed(
     return document
 
 
-def mark_failed(document: IncomingDocument, error_message: str, session: Session) -> IncomingDocument:
+def mark_failed(
+    document: IncomingDocument,
+    error_message: str,
+    session: Session,
+    *,
+    inventory_import_id: int | None = None,
+) -> IncomingDocument:
+    """`inventory_import_id` links a FAILED document to the import row it
+    produced (a failed import still creates one, with zero rows) -- that link
+    is what lets Import History offer the ORIGINAL file for download on
+    exactly the rows the Founder cares about most."""
     document.status = IncomingDocumentStatus.FAILED
     document.error_message = error_message
     document.processed_at = _utcnow()
+    if inventory_import_id is not None:
+        document.inventory_import_id = inventory_import_id
     session.flush()
     return document
 

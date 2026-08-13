@@ -15,9 +15,12 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 
+from fastapi.responses import FileResponse
+
 from backend.app.auth.dependencies import get_current_user
 from backend.app.auth.models import User
 from backend.app.database.session import get_db
+from backend.app.documents import service as documents_service
 from backend.app.services.topup_runner import run_topup_for_vendor
 from core.models import InventoryImport
 from backend.app.schemas.inventory import ImportErrorOut, ImportHistoryOut, ImportResultOut
@@ -120,11 +123,21 @@ def download_import_workbook(import_id: int, db: Session = Depends(get_db)) -> R
         )
     workbook = workbook_service.build_import_workbook(import_id, db)
     if workbook is None:
+        # Nothing was stored (a FAILED/cancelled import) -- which is exactly
+        # the row the Founder most wants to inspect. Serve the ORIGINAL file
+        # the sender uploaded instead of refusing.
+        document = documents_service.find_by_inventory_import_id(import_id, db)
+        original = (
+            documents_service.resolve_stored_file(document) if document is not None else None
+        )
+        if original is not None:
+            return FileResponse(path=original, filename=document.filename)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                "This import stored no rows (it failed or was cancelled), so there is "
-                "nothing to export. The original file is on the File Inbox page."
+                "This import stored no rows, and the original file is no longer on "
+                "the server (a restart clears stored files). Ask the sender to "
+                "re-send it."
             ),
         )
     vendor = vendor_service.get_vendor(import_row.vendor_id, db)
@@ -145,6 +158,15 @@ def list_imports(
     else:
         rows = import_service.list_all_import_history(db, limit=limit)
 
+    def _can_download(row) -> bool:
+        if row.row_count:
+            return True  # stored rows -> exportable as a one-vendor workbook
+        document = documents_service.find_by_inventory_import_id(row.id, db)
+        return (
+            document is not None
+            and documents_service.resolve_stored_file(document) is not None
+        )
+
     return [
         ImportHistoryOut(
             id=row.id,
@@ -158,6 +180,7 @@ def list_imports(
             error_count=row.error_count,
             created_at=row.created_at,
             completed_at=row.completed_at,
+            can_download=_can_download(row),
         )
         for row in rows
     ]

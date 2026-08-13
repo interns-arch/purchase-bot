@@ -341,11 +341,13 @@ export function VendorInventoryPage() {
                         type="button"
                         className="btn btn--ghost"
                         onClick={() => handleDownloadImport(row)}
-                        disabled={row.row_count === 0 || downloadingImportId === row.id}
+                        disabled={row.can_download === false || downloadingImportId === row.id}
                         title={
-                          row.row_count === 0
-                            ? "This import stored no rows — the original file is on the File Inbox page"
-                            : `Download only ${row.vendor_name}'s stock from this batch`
+                          row.can_download === false
+                            ? "The original file is no longer stored on the server (cleared by a restart)"
+                            : row.row_count === 0
+                              ? "Download the ORIGINAL file that was sent (this import failed)"
+                              : `Download only ${row.vendor_name}'s stock from this batch`
                         }
                       >
                         {downloadingImportId === row.id ? "Preparing…" : "Download"}

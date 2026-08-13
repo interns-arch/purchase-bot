@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.app.documents import service as documents_service
-from backend.app.documents.models import DocumentSource
+from backend.app.documents.models import DocumentSource, IncomingDocument
 from backend.app.integrations.gmail import status_service
 from backend.app.integrations.gmail.client import (
     GmailNotConfiguredError,
@@ -24,7 +24,7 @@ from backend.app.integrations.gmail.client import (
     get_gmail_client,
 )
 from backend.app.integrations.gmail.config import gmail_settings
-from backend.app.integrations.whatsapp import allocation_batch
+from backend.app.integrations.whatsapp import allocation_batch, failed_file
 from backend.app.notifications import emitters as notifications
 from backend.app.services.document_processor import staging
 from backend.app.services.document_processor.metadata import DocumentMetadata
@@ -152,6 +152,10 @@ def _process_message(message: IncomingEmailMessage) -> None:
         # The session above has now committed -- announce the result only
         # after the transaction is durable, never before.
         notifications.publish_document_result("Gmail", result)
+        # A failed email attachment is delivered back to the Founder's
+        # WhatsApp so it can be opened immediately -- no digging through the
+        # mailbox, and it survives the server's ephemeral disk.
+        _send_failed_file_safe(result)
 
         # Founder automation ("Combined ZIP" mode): queue a successfully
         # imported customer order for automatic vendor selection -- same
@@ -159,6 +163,27 @@ def _process_message(message: IncomingEmailMessage) -> None:
         order_id = _successful_customer_order_id(result)
         if order_id is not None:
             allocation_batch.request_order_allocation(order_id)
+
+
+def _send_failed_file_safe(result) -> None:
+    """Send a failed Gmail attachment to the Founder's WhatsApp. Never raises."""
+    try:
+        status = getattr(getattr(result, "status", None), "value", None)
+        if status not in failed_file.FAILURE_STATUSES:
+            return
+        document_id = getattr(result, "document_id", None)
+        if document_id is None:
+            return
+        with get_session() as session:
+            document = session.get(IncomingDocument, document_id)
+            path = (
+                documents_service.resolve_stored_file(document)
+                if document is not None
+                else None
+            )
+        failed_file.send_failed_file(result, "Gmail", path)
+    except Exception:  # noqa: BLE001 -- an output must never affect the import
+        logger.exception("Could not deliver the failed Gmail attachment to WhatsApp.")
 
 
 def _successful_customer_order_id(result) -> int | None:

@@ -244,7 +244,10 @@ def process_document(
     # PROCESSED with zero errors.
     if result.core_status == "FAILED":
         documents_service.mark_failed(
-            document, result.message or "Import failed -- no valid rows.", session
+            document,
+            result.message or "Import failed -- no valid rows.",
+            session,
+            inventory_import_id=result.inventory_import_id,
         )
         # SHADOW MODE (observation only): the deterministic parser has already
         # failed and the document is already marked FAILED above -- this call

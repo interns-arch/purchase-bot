@@ -30,6 +30,11 @@ class ImportHistoryOut(BaseModel):
     error_count: int
     created_at: IstDateTime
     completed_at: IstDateTime | None = None
+    # True when this row's Download button can produce something: either the
+    # import stored rows (exported as a one-vendor workbook) or the ORIGINAL
+    # uploaded file is still on the server (the case that matters for FAILED
+    # imports -- see `GET /api/inventory/imports/{id}/export`).
+    can_download: bool = False
 
 
 class ImportErrorOut(BaseModel):

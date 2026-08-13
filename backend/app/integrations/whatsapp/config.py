@@ -85,6 +85,16 @@ class WhatsAppSettings:
     send_workbook: bool = (
         os.environ.get("WHATSAPP_SEND_WORKBOOK", "true").strip().lower() == "true"
     )
+    # When an import FAILS (or needs review), send the original file back to
+    # the admin number(s) so it can be opened straight from the chat -- the
+    # file that failed is exactly the one the Founder needs to look at, and
+    # the server's copy may be cleared by a later restart. false = only the
+    # failure message is sent (the file stays downloadable on the web while
+    # it exists).
+    send_failed_file: bool = (
+        os.environ.get("WHATSAPP_SEND_FAILED_FILE", "true").strip().lower() == "true"
+    )
+
     # Send allocation report workbooks to WhatsApp after automatic vendor
     # selection. false = allocations still run and are visible on the web
     # (Vendor Comparison / exports); only the WhatsApp file is skipped.
