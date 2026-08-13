@@ -64,6 +64,8 @@ def publish_document_result(source: str, result) -> None:
                     if is_invoice
                     else "See Import History for row-level details."
                 )
+                if getattr(result, "sheet_synced", False):
+                    lines.append("Google Sheet: updated")
                 broker.publish(
                     "warning",
                     f"{label} verified with discrepancies." if is_invoice
@@ -77,6 +79,9 @@ def publish_document_result(source: str, result) -> None:
                 note = getattr(result, "message", None)
                 if note:
                     lines.append(str(note))
+                if getattr(result, "sheet_synced", False):
+                    # Folded in rather than sent as its own message.
+                    lines.append("Google Sheet: updated")
                 broker.publish("success", f"{label} imported successfully.", "\n".join(lines))
         elif status in _FAILURE_STATUSES:
             # WHOSE file failed: vendor/customer when known (WhatsApp caption
@@ -137,10 +142,15 @@ def publish_sheet_sync(success: bool, vendor_name: str | None, message: str | No
     """Emit a toast for a Google Sheets sync outcome. Never raises."""
     try:
         if success:
+            # Web-only: a SUCCESSFUL sync is already reported as the
+            # "Google Sheet: updated" line inside that vendor's single import
+            # message, so a separate WhatsApp message would just repeat it.
+            # A FAILED sync still goes to WhatsApp -- that one needs action.
             broker.publish(
                 "success",
                 "Google Sheet updated successfully.",
                 f"Vendor: {vendor_name or '-'}",
+                mirror=False,
             )
         else:
             broker.publish(

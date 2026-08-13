@@ -53,6 +53,10 @@ class ProcessingResult:
     # even when the vendor/customer could not be resolved. Notifications show
     # it on failures so a "STOCK.xlsx failed" toast is never anonymous.
     sender: str | None = None
+    # True when this import also refreshed the vendor's Google Sheet tab --
+    # reported as one line inside the import's own message instead of a
+    # separate "Google Sheet updated" notification.
+    sheet_synced: bool = False
     inventory_import_id: int | None = None
     customer_order_id: int | None = None
     delivery_import_id: int | None = None
@@ -279,13 +283,14 @@ def process_document(
     # integration must not hold a DB transaction open across a network call, and
     # its failure must not change the import outcome (the function catches
     # everything itself and records the failure on the integration status row).
+    sheet_synced = False
     if (
         classification.document_type == IncomingDocumentType.VENDOR_INVENTORY
         and result.vendor_id is not None
         and result.core_status != "FAILED"
     ):
         try:
-            sync_vendor_inventory_to_sheet_safe(result.vendor_id, session)
+            sheet_synced = sync_vendor_inventory_to_sheet_safe(result.vendor_id, session)
         except Exception:  # noqa: BLE001 -- an optional integration must never
             # turn an already-committed successful import into a failure.
             logger.exception(
@@ -310,6 +315,7 @@ def process_document(
         vendor_name=result.vendor_name or fallback_vendor,
         customer_name=result.customer_name or fallback_customer,
         sender=document.sender,
+        sheet_synced=sheet_synced,
         inventory_import_id=result.inventory_import_id,
         customer_order_id=result.customer_order_id,
         delivery_import_id=result.delivery_import_id,

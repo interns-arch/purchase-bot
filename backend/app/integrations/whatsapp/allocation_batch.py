@@ -143,12 +143,18 @@ def _run_batch(order_ids: list[int]) -> None:
         )
         return
 
-    recipients = whatsapp_settings.admin_phone_numbers
+    recipients = (
+        whatsapp_settings.admin_phone_numbers
+        if whatsapp_settings.send_allocation_report
+        else []
+    )
     if not recipients:
         logger.info(
-            "WHATSAPP_ADMIN_PHONE_NUMBER not set -- allocations for orders %s are "
-            "saved; skipping the consolidated report send (this output is optional).",
+            "Allocation report not sent to WhatsApp for orders %s (send_allocation_report=%s, "
+            "admin numbers configured=%s) -- allocations are saved and visible on the web.",
             order_ids,
+            whatsapp_settings.send_allocation_report,
+            bool(whatsapp_settings.admin_phone_numbers),
         )
         broker.publish(
             "success",
@@ -182,10 +188,14 @@ def _run_batch(order_ids: list[int]) -> None:
         )
         sent = sent or delivered
     if sent:
+        # Web-only: the allocation workbook itself just arrived in the chat
+        # (with the customer names in its caption) -- a second "it was sent"
+        # message there would just be noise.
         broker.publish(
             "success",
             f"Automatic vendor selection completed -- {file_name} sent to WhatsApp.",
             detail,
+            mirror=False,
         )
     else:
         broker.publish(

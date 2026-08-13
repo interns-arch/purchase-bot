@@ -80,6 +80,13 @@ def send_consolidated_inventory_to_founder() -> None:
         updated_by = sorted(_pending_vendor_names, key=str.lower)
         _pending_vendor_names.clear()
 
+    if not whatsapp_settings.send_workbook:
+        logger.info(
+            "WHATSAPP_SEND_WORKBOOK=false -- consolidated workbook not sent to WhatsApp "
+            "(available on the web: Vendor Inventory -> Download Workbook)."
+        )
+        return
+
     recipients = whatsapp_settings.admin_phone_numbers
     if not recipients:
         logger.info(
@@ -125,14 +132,20 @@ def send_consolidated_inventory_to_founder() -> None:
         )
         sent = sent or delivered
     if sent:
+        # Web-only: the workbook itself has just landed in the WhatsApp chat,
+        # so mirroring "it was sent" back into that same chat is pure noise.
         broker.publish(
             "success",
             "Vendor Inventory workbook sent successfully to WhatsApp.",
             f"File: {workbook_service.WORKBOOK_FILENAME}\nVendor worksheets: {sheet_count}",
+            mirror=False,
         )
     else:
+        # A FAILURE to deliver is worth knowing on WhatsApp -- it means the
+        # file the Founder expects never arrived.
         broker.publish(
             "warning",
             "Vendor Inventory imported successfully, but the workbook could not be sent to WhatsApp.",
-            "The database import is saved and remains the source of truth.",
+            "The database import is saved and remains the source of truth. "
+            "Download it from Vendor Inventory -> Download Workbook.",
         )

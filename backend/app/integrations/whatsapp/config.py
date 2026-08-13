@@ -68,13 +68,28 @@ class WhatsAppSettings:
     ]
     admin_phone_number: str | None = admin_phone_numbers[0] if admin_phone_numbers else None
 
-    # Mirror every UI toast notification (import results, workbook/Sheet
-    # updates, allocation outcomes, failures) as a WhatsApp text to
-    # WHATSAPP_ADMIN_PHONE_NUMBER -- the Founder sees the same events the
-    # web UI shows without keeping it open. Requires the admin number above;
-    # set WHATSAPP_FORWARD_NOTIFICATIONS=false to turn the mirror off.
+    # Mirror every UI toast notification (import results, Sheet/allocation
+    # outcomes, failures) as a WhatsApp text to WHATSAPP_ADMIN_PHONE_NUMBER
+    # -- the Founder sees the same events the web UI shows without keeping it
+    # open. Events flagged web-only (e.g. "the workbook was sent to
+    # WhatsApp") are never mirrored. Requires the admin number above; set
+    # WHATSAPP_FORWARD_NOTIFICATIONS=false to turn the mirror off.
     forward_notifications: bool = (
         os.environ.get("WHATSAPP_FORWARD_NOTIFICATIONS", "true").strip().lower() == "true"
+    )
+
+    # Send the consolidated Vendor_Inventory.xlsx to WhatsApp after vendor
+    # imports. false = keep the chat text-only; the workbook stays available
+    # on the web (Vendor Inventory -> Download Workbook) and the Google Sheet
+    # is updated as usual.
+    send_workbook: bool = (
+        os.environ.get("WHATSAPP_SEND_WORKBOOK", "true").strip().lower() == "true"
+    )
+    # Send allocation report workbooks to WhatsApp after automatic vendor
+    # selection. false = allocations still run and are visible on the web
+    # (Vendor Comparison / exports); only the WhatsApp file is skipped.
+    send_allocation_report: bool = (
+        os.environ.get("WHATSAPP_SEND_ALLOCATION_REPORT", "true").strip().lower() == "true"
     )
 
     # When several vendor files arrive in one WhatsApp batch, each successful

@@ -4,7 +4,7 @@ is `core.services.inventory_import_service`, reused unchanged."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from backend.app.auth.dependencies import get_current_user
@@ -13,6 +13,7 @@ from backend.app.database.session import get_db
 from backend.app.schemas.inventory import ImportErrorOut, ImportHistoryOut, ImportResultOut
 from backend.app.services.inventory_service import process_uploads
 from core.services import inventory_import_service as import_service
+from core.services import vendor_inventory_workbook as workbook_service
 from core.services import vendor_service
 
 router = APIRouter(
@@ -64,6 +65,25 @@ def upload_inventory_files(
                 )
             )
     return results
+
+
+@router.get("/workbook")
+def download_consolidated_workbook(db: Session = Depends(get_db)) -> Response:
+    """The consolidated `Vendor_Inventory.xlsx` -- one worksheet per vendor,
+    each an exact copy of that vendor's own file -- built fresh from the
+    database. Same workbook the WhatsApp output sends, so the Founder always
+    has it on the web even with WHATSAPP_SEND_WORKBOOK=false."""
+    workbook = workbook_service.build_workbook(db)
+    content = workbook_service.workbook_to_bytes(workbook)
+    return Response(
+        content=content,
+        media_type=workbook_service.XLSX_MIME_TYPE,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{workbook_service.WORKBOOK_FILENAME}"'
+            )
+        },
+    )
 
 
 @router.get("/imports", response_model=list[ImportHistoryOut])

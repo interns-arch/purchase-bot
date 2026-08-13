@@ -39,7 +39,11 @@ logger = get_logger(__name__)
 def send_allocation_report_to_founder(order_id: int) -> None:
     """Generate this order's allocation workbook from the database and send it
     to the Founder over WhatsApp. Safe to call after auto-select; never raises."""
-    recipients = whatsapp_settings.admin_phone_numbers
+    recipients = (
+        whatsapp_settings.admin_phone_numbers
+        if whatsapp_settings.send_allocation_report
+        else []
+    )
     if not recipients:
         logger.info(
             "WHATSAPP_ADMIN_PHONE_NUMBER not set -- skipping WhatsApp allocation "
@@ -90,10 +94,12 @@ def send_allocation_report_to_founder(order_id: int) -> None:
         )
         sent = sent or delivered
     if sent:
+        # Web-only -- the report itself is already in the chat.
         broker.publish(
             "success",
             "Vendor allocation report sent to WhatsApp.",
             f"Customer Order: {order_id}\nReport rows: {row_count}",
+            mirror=False,
         )
     else:
         broker.publish(

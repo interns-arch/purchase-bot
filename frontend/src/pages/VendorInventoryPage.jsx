@@ -6,7 +6,12 @@ import { StatusPill } from "../components/StatusPill";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
-import { listImportErrors, listImportHistory, uploadInventoryFiles } from "../api/inventory";
+import {
+  downloadConsolidatedWorkbook,
+  listImportErrors,
+  listImportHistory,
+  uploadInventoryFiles,
+} from "../api/inventory";
 
 const ACCEPTED_EXTENSIONS = [".csv", ".xlsx", ".xlsm", ".xls"];
 
@@ -68,6 +73,18 @@ export function VendorInventoryPage() {
   const [historySearch, setHistorySearch] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [errorsModalImport, setErrorsModalImport] = useState(null);
+  const [isDownloadingWorkbook, setIsDownloadingWorkbook] = useState(false);
+
+  async function handleDownloadWorkbook() {
+    setIsDownloadingWorkbook(true);
+    try {
+      await downloadConsolidatedWorkbook();
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not download the workbook."));
+    } finally {
+      setIsDownloadingWorkbook(false);
+    }
+  }
 
   const loadHistory = useCallback(async () => {
     setIsHistoryLoading(true);
@@ -239,6 +256,15 @@ export function VendorInventoryPage() {
       <section className="panel">
         <div className="panel__header">
           <h2>Import History</h2>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={handleDownloadWorkbook}
+            disabled={isDownloadingWorkbook}
+            title="Download Vendor_Inventory.xlsx — one worksheet per vendor, exact copy of each vendor's file"
+          >
+            {isDownloadingWorkbook ? "Preparing…" : "Download Workbook"}
+          </button>
         </div>
         <div className="toolbar">
           <input

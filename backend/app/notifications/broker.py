@@ -32,6 +32,11 @@ class Notification:
     level: str
     title: str
     message: str
+    # False for events that are meaningless OUTSIDE the web UI -- notably
+    # "the file was sent to WhatsApp" (the file itself is right there in the
+    # chat, so mirroring the confirmation is pure noise). Such events still
+    # appear as toasts and in the web UI; only the WhatsApp mirror skips them.
+    mirror: bool = True
 
 
 _lock = threading.Lock()
@@ -52,13 +57,16 @@ def add_forwarder(forwarder: Callable[[Notification], None]) -> None:
         _forwarders.append(forwarder)
 
 
-def publish(level: str, title: str, message: str = "") -> int:
+def publish(level: str, title: str, message: str = "", *, mirror: bool = True) -> int:
     """Add an event to the buffer. `level` is one of `LEVELS` (falls back to
-    'info' if unrecognised). Returns the new event id."""
+    'info' if unrecognised). `mirror=False` keeps the event web-only (see
+    `Notification.mirror`). Returns the new event id."""
     if level not in LEVELS:
         level = "info"
     with _lock:
-        note = Notification(id=next(_ids), level=level, title=title, message=message)
+        note = Notification(
+            id=next(_ids), level=level, title=title, message=message, mirror=mirror
+        )
         _buffer.append(note)
     # Outside the lock: a slow forwarder must not block other publishers.
     for forwarder in list(_forwarders):

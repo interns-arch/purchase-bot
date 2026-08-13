@@ -220,9 +220,12 @@ def reset_sheet_for_new_day_safe() -> None:
         logger.exception("Google Sheet daily reset failed.")
 
 
-def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> None:
+def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> bool:
+    """Returns True when the vendor's worksheet was updated, False on any
+    failure or when the integration is disabled -- the caller folds this into
+    the import's single result message ("Google Sheet: updated")."""
     if not google_sheets_settings.enabled:
-        return
+        return False
 
     vendor = vendor_service.get_vendor(vendor_id, session)
     vendor_name = vendor.name if vendor else None
@@ -236,7 +239,7 @@ def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> Non
                 status_session, success=False, message=str(exc), vendor_name=vendor_name
             )
         notifications.publish_sheet_sync(False, vendor_name, str(exc))
-        return
+        return False
 
     with get_session() as status_session:
         status_service.record_sync(
@@ -246,3 +249,4 @@ def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> Non
             vendor_name=vendor_name,
         )
     notifications.publish_sheet_sync(True, vendor_name)
+    return True
