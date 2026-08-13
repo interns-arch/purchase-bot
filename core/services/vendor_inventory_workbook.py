@@ -25,6 +25,7 @@ from openpyxl.styles import Font
 from sqlalchemy.orm import Session
 
 from core.ingestion.column_detector import DESCRIPTION_HEADERS, normalise_header
+from core.models import InventoryImport
 from core.services import inventory_import_service, vendor_service
 from core.time_utils import now_ist
 
@@ -133,6 +134,66 @@ def build_workbook(session: Session) -> openpyxl.Workbook:
         workbook.create_sheet(title="Vendor_Inventory")
 
     return workbook
+
+
+def build_import_workbook(import_id: int, session: Session) -> openpyxl.Workbook | None:
+    """ONE vendor, ONE import: that batch's rows as a single-worksheet
+    workbook (same exact-copy rule as the consolidated one). Powers the
+    per-row Download in Import History, so the Founder can pull just one
+    vendor -- including an older, superseded batch -- without opening the
+    full workbook. Returns None when that import stored no rows (e.g. a
+    FAILED import); the caller reports that rather than sending an empty
+    file."""
+    import_row = session.get(InventoryImport, import_id)
+    if import_row is None:
+        return None
+    rows = inventory_import_service.get_import_rows(import_id, session)
+    if not rows:
+        return None
+
+    vendor = vendor_service.get_vendor(import_row.vendor_id, session)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = (
+        _sheet_title(vendor, set()) if vendor is not None else f"Import_{import_id}"
+    )
+
+    raw_headers, raw_rows = inventory_import_service.get_import_raw_table(import_id, session)
+    if raw_headers:
+        sheet.append(raw_headers)
+        for raw_row in raw_rows:
+            sheet.append(raw_row)
+    else:
+        synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
+        sheet.append(_HEADERS)
+        for row in rows:
+            sheet.append(
+                [
+                    row.vendor_part_number,
+                    _description(row),
+                    str(row.quantity_available),
+                    str(row.price) if row.price is not None else "",
+                    str(row.mrp) if row.mrp is not None else "",
+                    synced_at,
+                ]
+            )
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for column_cells in sheet.columns:
+        width = max((len(str(c.value)) for c in column_cells if c.value is not None), default=10)
+        sheet.column_dimensions[column_cells[0].column_letter].width = width + 2
+    return workbook
+
+
+def import_workbook_filename(import_row, vendor) -> str:
+    """`ND_CT_stock_13_import_42.xlsx` -- vendor code + source file + import
+    id, so several downloads never collide in the Downloads folder."""
+    code = (getattr(vendor, "vendor_code", None) or getattr(vendor, "name", None) or "vendor")
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(getattr(import_row, "file_name", "") or "")).rsplit(
+        ".", 1
+    )[0]
+    code = re.sub(r"[^A-Za-z0-9._-]+", "_", str(code))
+    return f"{code}_{stem}_import_{import_row.id}.xlsx" if stem else f"{code}_import_{import_row.id}.xlsx"
 
 
 def workbook_to_bytes(workbook: openpyxl.Workbook) -> bytes:

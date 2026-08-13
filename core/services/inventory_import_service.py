@@ -759,6 +759,38 @@ def get_active_raw_table(vendor_id: int, session: Session) -> tuple[list[str], l
     return headers, table
 
 
+def get_import_rows(import_id: int, session: Session) -> list[VendorInventory]:
+    """Every stored row of ONE import -- including a superseded/older batch,
+    so the Founder can download exactly what a vendor sent at that time."""
+    return list(
+        session.execute(
+            select(VendorInventory)
+            .where(VendorInventory.import_id == import_id)
+            .order_by(VendorInventory.row_number)
+        ).scalars()
+    )
+
+
+def get_import_raw_table(import_id: int, session: Session) -> tuple[list[str], list[list[str]]]:
+    """ONE import reconstructed exactly as its source file's line-item table
+    (original headers/values from `raw_data`) -- the per-import counterpart of
+    `get_active_raw_table`. Returns ([], []) when the import stored no rows or
+    carries no raw cells (legacy data)."""
+    rows = get_import_rows(import_id, session)
+    headers: list[str] = []
+    for row in rows:
+        if isinstance(row.raw_data, dict):
+            for key in row.raw_data:
+                if key not in headers:
+                    headers.append(key)
+    if not headers:
+        return [], []
+    table = [
+        [str((row.raw_data or {}).get(header, "")) for header in headers] for row in rows
+    ]
+    return headers, table
+
+
 def get_master_inventory(session: Session) -> list[MasterInventoryRow]:
     active_import_ids = [
         row.id

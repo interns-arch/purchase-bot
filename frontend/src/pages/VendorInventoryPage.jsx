@@ -8,6 +8,7 @@ import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
 import {
   downloadConsolidatedWorkbook,
+  downloadImportWorkbook,
   listImportErrors,
   listImportHistory,
   uploadInventoryFiles,
@@ -74,6 +75,20 @@ export function VendorInventoryPage() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [errorsModalImport, setErrorsModalImport] = useState(null);
   const [isDownloadingWorkbook, setIsDownloadingWorkbook] = useState(false);
+  const [downloadingImportId, setDownloadingImportId] = useState(null);
+
+  async function handleDownloadImport(row) {
+    setDownloadingImportId(row.id);
+    try {
+      const stem = (row.file_name || "").replace(/\.[^.]+$/, "");
+      const code = row.vendor_code || row.vendor_name || "vendor";
+      await downloadImportWorkbook(row.id, `${code}_${stem}_import_${row.id}.xlsx`);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not download this vendor's file."));
+    } finally {
+      setDownloadingImportId(null);
+    }
+  }
 
   async function handleDownloadWorkbook() {
     setIsDownloadingWorkbook(true);
@@ -293,6 +308,7 @@ export function VendorInventoryPage() {
                   <th>Active batch</th>
                   <th>Status</th>
                   <th>Imported</th>
+                  <th aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
@@ -320,6 +336,21 @@ export function VendorInventoryPage() {
                       <StatusPill status={row.status} />
                     </td>
                     <td>{formatDateTime(row.created_at)}</td>
+                    <td className="data-table__actions">
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => handleDownloadImport(row)}
+                        disabled={row.row_count === 0 || downloadingImportId === row.id}
+                        title={
+                          row.row_count === 0
+                            ? "This import stored no rows — the original file is on the File Inbox page"
+                            : `Download only ${row.vendor_name}'s stock from this batch`
+                        }
+                      >
+                        {downloadingImportId === row.id ? "Preparing…" : "Download"}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

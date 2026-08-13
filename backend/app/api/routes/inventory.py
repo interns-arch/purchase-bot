@@ -19,6 +19,7 @@ from backend.app.auth.dependencies import get_current_user
 from backend.app.auth.models import User
 from backend.app.database.session import get_db
 from backend.app.services.topup_runner import run_topup_for_vendor
+from core.models import InventoryImport
 from backend.app.schemas.inventory import ImportErrorOut, ImportHistoryOut, ImportResultOut
 from backend.app.services.inventory_service import process_uploads
 from core.services import inventory_import_service as import_service
@@ -103,6 +104,35 @@ def download_consolidated_workbook(db: Session = Depends(get_db)) -> Response:
                 f'attachment; filename="{workbook_service.WORKBOOK_FILENAME}"'
             )
         },
+    )
+
+
+@router.get("/imports/{import_id}/export")
+def download_import_workbook(import_id: int, db: Session = Depends(get_db)) -> Response:
+    """ONE vendor's batch as its own workbook -- the per-row Download in
+    Import History. Works for older/superseded batches too, so the Founder
+    can pull exactly what a vendor sent at that time without opening the
+    consolidated workbook."""
+    import_row = db.get(InventoryImport, import_id)
+    if import_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Import {import_id} not found."
+        )
+    workbook = workbook_service.build_import_workbook(import_id, db)
+    if workbook is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "This import stored no rows (it failed or was cancelled), so there is "
+                "nothing to export. The original file is on the File Inbox page."
+            ),
+        )
+    vendor = vendor_service.get_vendor(import_row.vendor_id, db)
+    file_name = workbook_service.import_workbook_filename(import_row, vendor)
+    return Response(
+        content=workbook_service.workbook_to_bytes(workbook),
+        media_type=workbook_service.XLSX_MIME_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
 
 

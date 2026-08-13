@@ -208,7 +208,9 @@ Spacer rows (a `' '` row between the header and the first data row, common in de
 - The workbook and Sheet are **outputs only** — nothing ever reads them back; the database is the single source of truth.
 - **WhatsApp notification mirror** (`backend/app/integrations/whatsapp/notification_forwarder.py`): the toasts worth knowing about away from the web UI — import success/failure (with vendor/customer name, sender and reason), Sheet failures, Gmail poll errors — are also sent as WhatsApp texts (✅/⚠️/❌/ℹ️) to every number in `WHATSAPP_ADMIN_PHONE_NUMBER`. `WHATSAPP_FORWARD_NOTIFICATIONS=false` turns it off.
   - **One message per file, not four.** Events that only make sense in the web UI are published with `mirror=False` (`broker.publish`) and never reach WhatsApp: "workbook sent to WhatsApp" / "allocation report sent" (the file itself is already in the chat) and successful Google Sheet syncs — the sheet result is folded into the import's own message as `Google Sheet: updated`. Failures of those same operations DO reach WhatsApp, since they need action.
-  - **File sends are optional**: `WHATSAPP_SEND_WORKBOOK=false` / `WHATSAPP_SEND_ALLOCATION_REPORT=false` keep the chat text-only. The consolidated workbook is always downloadable on the web (**Vendor Inventory → Download Workbook**, `GET /api/inventory/workbook`).
+  - **File sends are optional**: `WHATSAPP_SEND_WORKBOOK=false` / `WHATSAPP_SEND_ALLOCATION_REPORT=false` keep the chat text-only. Both downloads live on the web:
+  - **Vendor Inventory → Download Workbook** (`GET /api/inventory/workbook`) — all vendors, one worksheet each.
+  - **Download on any Import History row** (`GET /api/inventory/imports/{id}/export`) — just that vendor's batch as its own file, named `ND_CT_stock_13_import_42.xlsx`. Works for older/superseded batches too, so you can pull exactly what a vendor sent on a given day. Rows that stored nothing (failed imports) have the button disabled and point to the File Inbox for the original file.
 
 ---
 
