@@ -88,8 +88,10 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # A REGISTERED number's texts are never commands or vendor names -- the
     # number itself is the identity, so "good morning sir" etc. is simply
     # ignored (no instruction spam back at a vendor).
-    with get_session() as session:
-        registered = registry.lookup(message.sender, session)
+    registered = None
+    if whatsapp_settings.registry_enabled:
+        with get_session() as session:
+            registered = registry.lookup(message.sender, session)
     if registered is not None:
         logger.info(
             "WhatsApp text from registered %s number %s (%s) ignored: %r",
@@ -213,12 +215,14 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     # sender's number alone identifies the party -- no command, no caption,
     # no filename convention, no grouping window. Commands/captions from
     # registered numbers are deliberately IGNORED so a stray caption can
-    # never misfile a registered party's stock.
-    with get_session() as session:
-        registered = registry.lookup(message.sender, session)
-    if registered is not None:
-        _handle_registered_upload(message, registered)
-        return
+    # never misfile a registered party's stock. Suspendable via
+    # WHATSAPP_NUMBER_REGISTRY_ENABLED (registrations are kept).
+    if whatsapp_settings.registry_enabled:
+        with get_session() as session:
+            registered = registry.lookup(message.sender, session)
+        if registered is not None:
+            _handle_registered_upload(message, registered)
+            return
 
     # Routing: which import to run is decided by this sender's last text
     # command. Within the grouping window a previously-used command stays

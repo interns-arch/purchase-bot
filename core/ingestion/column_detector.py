@@ -68,6 +68,8 @@ INVENTORY_PART_NUMBER_HEADERS = PART_NUMBER_HEADERS | {
     "productid",
     "productno",
     "productnumber",
+    "Part-number",
+    
 }
 
 # Explicit, curated quantity aliases -- NEVER derived from arbitrary numeric
@@ -101,6 +103,24 @@ INVENTORY_QUANTITY_HEADERS = {
     # columns remain excluded as always.
     "sumofquantity",
     "sumofqty",
+    # Dealer/DMS stock-valuation exports ("Part_Stock_Valuation_*.xls") label
+    # on-hand stock "Net Stock" / "Free Stock" / "Physical Stock" -- all
+    # unambiguous counts; the money columns beside them (MRP, Net Value) stay
+    # excluded as always.
+    "netstock",
+    "netqty",
+    "freestock",
+    "freeqty",
+    "physicalstock",
+    "onhandstock",
+    "onhandqty",
+    "onhandquantity",
+    "instock",
+    "stockonhand",
+    "stockinhand",
+    "balancestock",
+    "balanceqty",
+    "balancequantity",
 }
 # NOTE: every entry above must already be in `normalise_header` form
 # (lowercase, alphanumeric only). An entry like "Current Stock" can never
@@ -355,26 +375,53 @@ def detect_header_row(
     return fallback
 
 
-def find_inventory_columns(headers: list[str], file_name: str) -> tuple[str, str]:
+def find_inventory_columns(
+    headers: list[str],
+    file_name: str,
+    rows: list[dict[str, str]] | None = None,
+) -> tuple[str, str]:
     """Find the part-number and available-quantity columns for a Vendor
-    Inventory file, using the tolerant inventory alias sets. Quantity is
-    matched ONLY against the curated `INVENTORY_QUANTITY_HEADERS` -- MRP,
-    price, and Float Stock are never treated as quantity. Raises `ValueError`
-    with a clear message if either required column is absent."""
+    Inventory file.
+
+    Two layers, in order:
+      1. KNOWN HEADER NAMES -- the tolerant inventory alias sets (fast, and
+         what nearly every returning vendor file hits). Quantity is matched
+         ONLY against the curated `INVENTORY_QUANTITY_HEADERS`, so MRP, price
+         and Float Stock are never treated as quantity.
+      2. THE DATA ITSELF -- when a header name has never been seen before
+         ("Net Stock", "Article No", an unnamed column), `column_inference`
+         profiles the VALUES and identifies which column holds identifiers
+         and which holds counts. Header text still vetoes money columns.
+
+    `rows` enables layer 2; without it the behaviour is exactly as before.
+    Raises `ValueError` (rescue-eligible for the AI fallback) when neither
+    layer can decide."""
     part_number_column = find_optional_column(headers, INVENTORY_PART_NUMBER_HEADERS)
     quantity_column = find_optional_column(headers, INVENTORY_QUANTITY_HEADERS)
+
+    if part_number_column and quantity_column:
+        return part_number_column, quantity_column
+
+    if rows:
+        # Imported here (not at module top) purely to avoid a circular import:
+        # column_inference builds on this module's alias sets.
+        from core.ingestion.column_inference import infer_inventory_columns
+
+        inferred = infer_inventory_columns(headers, rows)
+        if inferred is not None:
+            return (
+                part_number_column or inferred.part_number,
+                quantity_column or inferred.quantity,
+            )
 
     if not part_number_column:
         raise ValueError(
             f"Part-number column not found in '{file_name}'. Headers found: {headers}"
         )
-    if not quantity_column:
-        raise ValueError(
-            f"Available-quantity column not found in '{file_name}' (looked for e.g. "
-            f"Quantity / Available Qty / Current Stock / Stock). Headers found: {headers}"
-        )
-
-    return part_number_column, quantity_column
+    raise ValueError(
+        f"Available-quantity column not found in '{file_name}' (looked for e.g. "
+        f"Quantity / Available Qty / Current Stock / Stock). Headers found: {headers}"
+    )
 
 
 def find_optional_column(headers: list[str], candidate_headers: set[str]) -> str | None:

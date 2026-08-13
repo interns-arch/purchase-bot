@@ -265,6 +265,14 @@ def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, st
         grid, INVENTORY_PART_NUMBER_HEADERS, quantity_headers=INVENTORY_QUANTITY_HEADERS
     )
     if header_index is None:
+        # No RECOGNISED header name anywhere -- fall back to reading the data:
+        # test each candidate row and keep the one whose values below it look
+        # like an inventory table (identifiers + counts). See
+        # `core.ingestion.column_inference`.
+        from core.ingestion.column_inference import detect_header_row_by_data
+
+        header_index = detect_header_row_by_data(grid)
+    if header_index is None:
         raise ValueError(
             f"Part-number column not found in '{file_path.name}'. "
             f"No inventory header row was detected."
@@ -444,7 +452,11 @@ def run_import(
                 )
 
         try:
-            part_column, quantity_column = find_inventory_columns(headers, file_path.name)
+            # `rows` enables data-driven inference for header names we have
+            # never seen before (column_inference); known aliases still win.
+            part_column, quantity_column = find_inventory_columns(
+                headers, file_path.name, rows
+            )
         except ValueError as exc:
             return _fail_import(
                 import_row, _ImportValidationError("REQUIRED_COLUMNS_NOT_FOUND", str(exc)), session

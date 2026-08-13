@@ -166,6 +166,27 @@ deterministic FAILED
 
 If everything fails, the file stays FAILED with the real reason in the toast and Import History.
 
+### How a column is understood (four layers, cheapest first)
+
+The system does **not** hunt for one fixed header name. Every vendor spells things differently (`Part Number`, `Product`, `Article`, `SKU`, `Material Code`, or nothing at all), so understanding happens in layers:
+
+| # | Layer | What it uses | Cost |
+|---|---|---|---|
+| 1 | **Known header names** (`column_detector.INVENTORY_*_HEADERS`) | header text matched against curated aliases | free, instant |
+| 2 | **Learned formats** (`core/services/format_memory.py`) | a header layout this system has already been taught | free, instant |
+| 3 | **Data-driven inference** (`core/ingestion/column_inference.py`) | the **actual values** in each column | free, instant |
+| 4 | **AI rescue** (`backend/app/ai/fallback.py`) | a model reading a sample of the file | one API call, then remembered by layer 2 |
+
+**Layer 3 is what makes unknown headers work.** It profiles every column's values and asks what the data behaves like, not what it is called:
+
+- **part number** — alphanumeric codes, nearly all distinct, no sentences (`ABC12345`, `1654600Q1FMK`)
+- **description** — words and spaces, repeats across rows (`Bearing Assembly`)
+- **quantity** — numbers, mostly whole, non-negative, values repeat freely (`10`, `0`, `250`)
+
+Header text still matters, but only as a score hint and as a **veto**: any column whose name contains price / MRP / rate / value / amount / tax / discount can never become quantity. On top of that, columns are compared **against each other** — a column that stays at a fixed ratio of a price column (e.g. `Balance` = a steady 86 % of `MRP`) is a disguised price, not stock, and is rejected however "quantity-like" its name sounds. When nothing honest survives, layer 3 declines and layer 4 decides: **the system never guesses stock**.
+
+The same profiling also finds the real header row in files whose header names are all unrecognised (`detect_header_row_by_data`), skipping company/date metadata rows above the table — and a candidate row containing bare numbers is never mistaken for a header.
+
 ---
 
 ## 4. Outputs After a Vendor Import
@@ -257,7 +278,36 @@ A separate manual delivery-file upload exists on the Delivery Tracking tab for w
 
 ---
 
-## 8. WhatsApp Conversation Reference
+## 8. WhatsApp Conversation Reference — what to write in the bot
+
+Who is texting matters: the bot behaves differently for the **Founder/admin numbers** (`WHATSAPP_ADMIN_PHONE_NUMBER`), **registered vendor/customer numbers** (the number registry), and **any other number**.
+
+### 8a. Founder / admin commands (only from an admin number)
+
+| You write | What happens |
+|---|---|
+| `register` (also accepted: `contacts`, `update numbers`, `update contacts`, `update vendor numbers`) | Bot replies "Send the contact list Excel now…". Your NEXT Excel is taken as a vendor contact list. |
+| *(then send the Excel)* — one row per vendor: Vendor Name + WhatsApp number(s) | Adds NEW vendors + numbers, and UPDATES numbers of existing vendors (each listed vendor's numbers are replaced by that row; a number owned by another vendor is moved). Bot replies with exactly what changed. |
+| file + caption `contacts` (or `register`) | Same contact-list import in one step — no text needed first. |
+| `send reminder` (also: `send reminders`, `reminder`, `remind vendors`) | Reminder template goes to ONLY the vendors still pending today; bot replies naming who was nudged. All submitted → "🎉 All registered vendors have already submitted." |
+| `vendor` / `customer` / `invoice` + files | The classic upload flow below — the admin uploads on behalf of any party, so captions/commands still apply to admin numbers. |
+
+Automatic messages you receive without asking: every import result (✅/⚠️/❌ with vendor name), the consolidated workbook captioned `Updated by: <vendor names>`, allocation reports captioned `Order N — <customer name>`, the 11:00 daily summary (`Received X / Y` + pending list), and (when enabled) "Morning stock request sent to N vendors."
+
+### 8b. Registered vendor numbers (added via `register` / the seed script)
+
+| The vendor sends | What happens |
+|---|---|
+| an Excel file — ANY filename, NO caption, NO command | imports as THAT vendor's stock instantly (the number is the identity). Reply: "✅ Stock received successfully. 245 item(s) imported." |
+| a broken/unreadable file | saved formats + AI analysis are tried first; if all fail: "❌ We could not read this file. Please send an Excel with Part Number and Quantity columns." (Founder gets full technical detail.) |
+| the same file twice | "ℹ️ This stock file was already received earlier. Nothing changed." |
+| a PDF | verified as that vendor's INVOICE against allocations |
+| any text (`hi`, `good morning sir`, even `vendor`) | ignored — texts from registered numbers are never commands or names |
+| a caption on the file | ignored — the registry always wins; a stray caption can never misfile stock |
+
+Registered **customer** numbers work the same with Excel = customer order ("✅ Order received successfully…", auto-allocation follows); PDFs get "please send Excel".
+
+### 8c. Unregistered numbers (the classic flow — unchanged)
 
 | You send | System does |
 |---|---|

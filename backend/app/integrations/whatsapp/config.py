@@ -102,6 +102,17 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_ALLOCATION_BATCH_DEBOUNCE_SECONDS", "20")
     )
 
+    # Master switch for the NUMBER REGISTRY fast path: registered vendor/
+    # customer numbers upload files directly (no command/caption). Set to
+    # false to suspend it -- registrations are KEPT in the database, but
+    # every number behaves like an unregistered sender (classic command/
+    # caption flow) until re-enabled. The Founder's "register" contact-list
+    # flow keeps working either way, so the registry can be maintained while
+    # suspended.
+    registry_enabled: bool = (
+        os.environ.get("WHATSAPP_NUMBER_REGISTRY_ENABLED", "true").strip().lower() == "true"
+    )
+
     # --- Daily vendor stock automation (number registry) -----------------
     # Morning stock request: at this IST time, the PRE-APPROVED template
     # below is sent to every registered vendor number ("please share your
