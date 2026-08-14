@@ -93,7 +93,7 @@ def _process_batch() -> None:
         _run_batch(orders)
 
 
-def _order_identity(order_id: int, session) -> tuple[str, str, str]:
+def order_identity(order_id: int, session) -> tuple[str, str, str]:
     """(worksheet_title, caption_label, sheet_heading) for one order.
 
     Identity is the CUSTOMER NAME plus the order id -- so a worksheet is
@@ -147,7 +147,7 @@ def _run_batch(order_ids: list[int]) -> None:
             with get_session() as session:
                 run_automatic_vendor_selection(order_id, session)
                 rows = vendor_selection_service.list_selections_for_export(order_id, session)
-                title, label, heading = _order_identity(order_id, session)
+                title, label, heading = order_identity(order_id, session)
             reports.append((title, rows))
             order_labels.append(label)
             headings[title] = heading

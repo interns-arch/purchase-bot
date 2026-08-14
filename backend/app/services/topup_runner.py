@@ -7,6 +7,7 @@ only when something actually changed, never raise) can't drift between them.
 
 from __future__ import annotations
 
+from backend.app.integrations.whatsapp import topup_output
 from backend.app.notifications import emitters as notifications
 from core.db import get_session
 from core.logging_setup import get_logger
@@ -32,6 +33,11 @@ def run_topup_for_vendor(vendor_id: int | None, vendor_name: str | None = None) 
                 len(result.lines),
                 result.order_ids,
             )
+            # The web UI keeps the full part-by-part detail as a toast; on
+            # WhatsApp that long text is replaced by the reallocation
+            # WORKBOOK below -- same shape as the allocation report the
+            # Founder already reads, one worksheet per affected order.
             notifications.publish_topup(result)
+            topup_output.send_topup_report(result)
     except Exception:  # noqa: BLE001 -- top-up must never affect the import
         logger.exception("Auto top-up failed for vendor %s (import unaffected).", vendor_id)

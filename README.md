@@ -271,7 +271,9 @@ order line: requested 10, allocated 4 (APEX)   -> short 6
 BHARAT uploads 5                               -> +5 BHARAT  (APEX's 4 untouched)
 CARBO uploads 50                               -> +1 CARBO   (never more than requested)
 ```
-Only orders newer than `TOPUP_WINDOW_DAYS` (default 7) qualify; every write goes through the same `upsert_selection` guards and row lock, so two orders can never share the same stock. The Founder gets ONE notification listing `Order 12 — Karol Bagh: +5 P-1001 (still short 1)` — and nothing at all when there was nothing to fill.
+Only orders newer than `TOPUP_WINDOW_DAYS` (default 7) qualify; every write goes through the same `upsert_selection` guards and row lock, so two orders can never share the same stock.
+
+**Output** (`integrations/whatsapp/topup_output.py`): WhatsApp receives a **`vendor_reallocation_<timestamp>.xlsx`** — the same shape as the allocation report, one worksheet per affected order (titled `O12 Karol Bagh`, headed *"Customer Order 12 — Karol Bagh (file: kb.xlsx) — updated from new vendor stock"*), each showing that order's COMPLETE current allocation, old vendors and new together. The caption names the vendor and the affected orders. The part-by-part text list stays web-only (too long to read on a phone). Nothing is sent at all when there was nothing to fill.
 
 **Which sheet is whose** (`allocation_batch._order_identity`): each worksheet in the batch workbook is titled `O<order id> <Customer Name>` (Excel caps titles at 31 chars) and its **first row spells out the identity in full** — `Customer Order 12 — Karol Bagh Auto Spares & Sons  (file: kb.xlsx)` — with the column headers below it. Orders whose customer was never identified (Gmail attachments carry no Customer Code) fall back to `Order_<id>` plus the same in-sheet heading with the source file name. The WhatsApp caption lists the same `Order N — Customer` mapping.
 

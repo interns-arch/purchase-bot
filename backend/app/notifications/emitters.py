@@ -136,10 +136,15 @@ def publish_topup(result) -> None:
             return
         vendor = getattr(result, "vendor_name", None) or "the new stock"
         detail = "\n".join(result.summary_lines())
+        # WEB-ONLY: this part-by-part list is long and hard to read on a
+        # phone. WhatsApp receives the reallocation WORKBOOK instead
+        # (`integrations/whatsapp/topup_output.py`) -- same format as the
+        # allocation report, one worksheet per order.
         broker.publish(
             "success",
             f"New stock from {vendor} filled {len(result.order_ids)} pending order(s).",
             f"{detail}\n\nExisting allocations were not changed.",
+            mirror=False,
         )
     except Exception:  # noqa: BLE001 -- a toast failure must never affect the import
         logger.exception("Failed to publish top-up notification")
