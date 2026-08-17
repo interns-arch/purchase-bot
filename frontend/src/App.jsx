@@ -45,6 +45,9 @@ const VendorPerformanceDetailPage = lazy(() =>
 const FileInboxPage = lazy(() =>
   import("./pages/FileInboxPage").then((m) => ({ default: m.FileInboxPage }))
 );
+const CommandCentrePage = lazy(() =>
+  import("./pages/CommandCentrePage").then((m) => ({ default: m.CommandCentrePage }))
+);
 
 function App() {
   return (
@@ -124,6 +127,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <VendorPerformanceDetailPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/command-centre"
+              element={
+                <ProtectedRoute>
+                  <CommandCentrePage />
                 </ProtectedRoute>
               }
             />

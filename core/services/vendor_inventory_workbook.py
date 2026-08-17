@@ -72,17 +72,58 @@ def _description(row) -> str:
     return ""
 
 
+def _append_streamed_sheet(
+    workbook: openpyxl.Workbook, title: str, headers: list, rows: list
+) -> None:
+    """Add one worksheet to a WRITE-ONLY workbook: bold header, sized
+    columns, then every row streamed straight to disk-backed storage.
+
+    write-only mode is the whole point: the consolidated workbook now spans
+    tens of thousands of rows (26k+ active inventory rows in production),
+    and regular openpyxl keeps a Python cell object per cell -- one build
+    peaked past Render's 512MB memory limit and took the whole service down
+    (OOM restart, losing queued notifications). Streaming keeps the build to
+    the size of ONE row at a time. Column widths must be set BEFORE rows are
+    appended in write-only mode, so they're computed from the data first."""
+    from openpyxl.utils import get_column_letter
+
+    sheet = workbook.create_sheet(title=title)
+
+    widths = [len(str(value)) for value in headers]
+    for row in rows:
+        for index, value in enumerate(row):
+            length = len(str(value)) if value is not None else 0
+            if index >= len(widths):
+                widths.append(length)
+            elif length > widths[index]:
+                widths[index] = length
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = min(width, 80) + 2
+
+    from openpyxl.cell import WriteOnlyCell
+
+    header_cells = []
+    for value in headers:
+        cell = WriteOnlyCell(sheet, value=value)
+        cell.font = Font(bold=True)
+        header_cells.append(cell)
+    sheet.append(header_cells)
+    for row in rows:
+        sheet.append(row)
+
+
 def build_workbook(session: Session) -> openpyxl.Workbook:
     """One workbook, one worksheet per vendor (by Vendor Code), each holding
     that vendor's latest active inventory from the DB. Includes ALL vendors in
     the database -- not only the one that just imported -- so the workbook
-    always represents the current full inventory state."""
-    workbook = openpyxl.Workbook()
-    workbook.remove(workbook.active)  # drop the default blank sheet
+    always represents the current full inventory state. Built in WRITE-ONLY
+    (streaming) mode -- see `_append_streamed_sheet` for why."""
+    workbook = openpyxl.Workbook(write_only=True)
 
     # Business timezone is IST -- see core.time_utils (single source of truth).
     synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
     used_titles: set[str] = set()
+    sheet_count = 0
 
     vendors = vendor_service.list_vendors(session)
     for vendor in vendors:
@@ -95,42 +136,34 @@ def build_workbook(session: Session) -> openpyxl.Workbook:
             # the next generated workbook.
             continue
 
-        sheet = workbook.create_sheet(title=_sheet_title(vendor, used_titles))
-
         # EXACT COPY of the vendor's own file: original columns, original
         # order, original values -- nothing renamed or filtered (the
         # normalized columns remain internal, for comparison/allocation).
         raw_headers, raw_rows = inventory_import_service.get_active_raw_table(
             vendor.id, session
         )
-        if raw_headers:
-            sheet.append(raw_headers)
-            for raw_row in raw_rows:
-                sheet.append(raw_row)
-        else:
+        if not raw_headers:
             # Legacy rows without captured raw cells: normalized fallback.
-            sheet.append(_HEADERS)
-            for row in rows:
-                sheet.append(
-                    [
-                        row.vendor_part_number,
-                        _description(row),
-                        str(row.quantity_available),
-                        str(row.price) if row.price is not None else "",
-                        str(row.mrp) if row.mrp is not None else "",
-                        synced_at,
-                    ]
-                )
-        for cell in sheet[1]:
-            cell.font = Font(bold=True)
-
-        for column_cells in sheet.columns:
-            width = max((len(str(c.value)) for c in column_cells if c.value is not None), default=10)
-            sheet.column_dimensions[column_cells[0].column_letter].width = width + 2
+            raw_headers = list(_HEADERS)
+            raw_rows = [
+                [
+                    row.vendor_part_number,
+                    _description(row),
+                    str(row.quantity_available),
+                    str(row.price) if row.price is not None else "",
+                    str(row.mrp) if row.mrp is not None else "",
+                    synced_at,
+                ]
+                for row in rows
+            ]
+        _append_streamed_sheet(
+            workbook, _sheet_title(vendor, used_titles), raw_headers, raw_rows
+        )
+        sheet_count += 1
 
     # An empty workbook is invalid; guarantee at least one sheet. In practice
     # this path is only ever reached after a successful import (>=1 vendor).
-    if not workbook.sheetnames:
+    if sheet_count == 0:
         workbook.create_sheet(title="Vendor_Inventory")
 
     return workbook
@@ -152,36 +185,27 @@ def build_import_workbook(import_id: int, session: Session) -> openpyxl.Workbook
         return None
 
     vendor = vendor_service.get_vendor(import_row.vendor_id, session)
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = (
-        _sheet_title(vendor, set()) if vendor is not None else f"Import_{import_id}"
-    )
+    title = _sheet_title(vendor, set()) if vendor is not None else f"Import_{import_id}"
 
     raw_headers, raw_rows = inventory_import_service.get_import_raw_table(import_id, session)
-    if raw_headers:
-        sheet.append(raw_headers)
-        for raw_row in raw_rows:
-            sheet.append(raw_row)
-    else:
+    if not raw_headers:
         synced_at = now_ist().strftime("%Y-%m-%d %H:%M IST")
-        sheet.append(_HEADERS)
-        for row in rows:
-            sheet.append(
-                [
-                    row.vendor_part_number,
-                    _description(row),
-                    str(row.quantity_available),
-                    str(row.price) if row.price is not None else "",
-                    str(row.mrp) if row.mrp is not None else "",
-                    synced_at,
-                ]
-            )
-    for cell in sheet[1]:
-        cell.font = Font(bold=True)
-    for column_cells in sheet.columns:
-        width = max((len(str(c.value)) for c in column_cells if c.value is not None), default=10)
-        sheet.column_dimensions[column_cells[0].column_letter].width = width + 2
+        raw_headers = list(_HEADERS)
+        raw_rows = [
+            [
+                row.vendor_part_number,
+                _description(row),
+                str(row.quantity_available),
+                str(row.price) if row.price is not None else "",
+                str(row.mrp) if row.mrp is not None else "",
+                synced_at,
+            ]
+            for row in rows
+        ]
+    # Streaming (write-only) build -- a single vendor batch reaches 9k+ rows
+    # in production; see `_append_streamed_sheet` for the memory rationale.
+    workbook = openpyxl.Workbook(write_only=True)
+    _append_streamed_sheet(workbook, title, raw_headers, raw_rows)
     return workbook
 
 

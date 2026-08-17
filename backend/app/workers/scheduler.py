@@ -103,9 +103,29 @@ def _schedule_google_sheet_daily_reset() -> None:
         )
 
 
+def _schedule_startup_recovery() -> None:
+    """One-shot, shortly after boot: re-queue customer orders whose
+    allocation was lost to a crash/restart (the in-memory batch queue does
+    not survive one -- see workers/recovery.py)."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.workers import recovery
+
+    _scheduler.add_job(
+        lambda: _run_safely(
+            "requeue_unallocated_orders", recovery.requeue_unallocated_recent_orders
+        ),
+        "date",
+        run_date=datetime.now(timezone.utc) + timedelta(seconds=60),
+        id="startup_allocation_recovery",
+        replace_existing=True,
+    )
+
+
 def start_scheduler() -> None:
     _schedule_whatsapp_daily_jobs()
     _schedule_google_sheet_daily_reset()
+    _schedule_startup_recovery()
 
     if gmail_settings.enabled:
         _scheduler.add_job(

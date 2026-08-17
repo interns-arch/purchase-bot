@@ -7,6 +7,7 @@ import { useToast } from "../context/ToastContext";
 // Vendors are never managed manually -- they're identified automatically
 // from each imported inventory file.
 const NAV_ITEMS = [
+  { to: "/command-centre", label: "Command Centre" },
   { to: "/dashboard", label: "Dashboard" },
   { to: "/vendor-inventory", label: "Vendor Inventory" },
   { to: "/customer-orders", label: "Customer Orders" },

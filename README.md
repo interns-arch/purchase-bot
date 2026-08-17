@@ -366,6 +366,17 @@ The **grouping window** (`WHATSAPP_GROUPING_WINDOW_MINUTES`, default 10): all fi
 
 ---
 
+## 8c. Founder Command Centre (web) — Phase 1
+
+**One screen answering "what happened today, what's short, what needs me"** (`backend/app/api/routes/command_centre.py`, `frontend/src/pages/CommandCentrePage.jsx`, nav: **Command Centre**). Everything is a live DB aggregate (never the Sheet/workbook outputs), and every card clicks through to the page holding the records.
+
+- **KPI strip**: vendors expected/received/pending today · orders + lines today · qty ordered/allocated/short + fill rate · at-risk orders (7d) · live remaining stock (imported − reserved, same rule the allocation engine enforces) · active parts/vendors · POs today/MTD · delivery outstanding (reuses Delivery Tracking's computation) · invoice mismatches (7d) · files today.
+- **Action Required**: import failures (file + sender + exact reason), order shortages (customer + short qty + age), vendors who haven't sent stock (with last-submission date), invoice discrepancies, failed PO emails — errors first.
+- **Stock vs Demand table** (spec §8): per short part — vendor stock, reserved, live remaining, demand, allocated, short, gap, and which vendors carry it.
+- Phase 1 shows **quantities and counts, not money** — price data is absent from most vendor files, and an untraceable figure must not be shown (spec §28). Finance KPIs come with the finance phase.
+
+---
+
 ## 9. Settings Page
 
 - Change password; Integration Status (WhatsApp health, Gmail poll state, Sheets test).

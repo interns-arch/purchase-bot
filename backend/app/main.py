@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
+from backend.app.api.routes.command_centre import router as command_centre_router
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
 from backend.app.api.routes.data_management import router as data_management_router
@@ -137,6 +138,7 @@ async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSON
 
 
 app.include_router(auth_router)
+app.include_router(command_centre_router)
 app.include_router(dashboard_router)
 app.include_router(data_management_router)
 app.include_router(documents_router)
