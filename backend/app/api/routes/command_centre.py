@@ -541,7 +541,39 @@ def command_centre_alerts(db: Session = Depends(get_db)) -> list[Alert]:
             )
         )
 
-    # 5. PO emails that failed to reach the purchase team.
+    # 5. OVERDUE POs (Founder's rule: no vendor invoice uploaded within
+    #    PO_INVOICE_DUE_HOURS of PO generation -- the invoice upload is the
+    #    signal the goods actually arrived).
+    due_hours = _po_invoice_due_hours()
+    due_cutoff = now_utc - timedelta(hours=due_hours)
+    aged_pos = db.execute(
+        select(VendorPurchaseOrder, Vendor.name)
+        .join(Vendor, VendorPurchaseOrder.vendor_id == Vendor.id)
+        .where(VendorPurchaseOrder.created_at <= due_cutoff)
+        .order_by(VendorPurchaseOrder.created_at)
+        .limit(30)
+    ).all()
+    for po, vendor_name in aged_pos:
+        if _po_is_invoiced(po, db):
+            continue
+        age = (now_utc - po.created_at).total_seconds() / 3600
+        alerts.append(
+            Alert(
+                type="po_overdue",
+                severity="error",
+                title=f"PO {po.po_number} ({vendor_name}) — no invoice after "
+                f"{round(age)}h",
+                detail=(
+                    f"Generated {po.created_at.strftime('%d %b %H:%M')} UTC; the vendor's "
+                    f"invoice has not been uploaded (due within {due_hours}h). "
+                    "Follow up with the vendor or upload the invoice."
+                ),
+                link="/purchase-orders",
+                age_hours=round(age, 1),
+            )
+        )
+
+    # 6. PO emails that failed to reach the purchase team.
     failed_pos = db.execute(
         select(VendorPurchaseOrder, Vendor.name)
         .join(Vendor, VendorPurchaseOrder.vendor_id == Vendor.id)
@@ -734,6 +766,29 @@ def command_centre_order_tower(days: int = 7, db: Session = Depends(get_db)) -> 
     )
 
 
+def _po_invoice_due_hours() -> int:
+    """The Founder's overdue rule: a PO is OVERDUE when its vendor's invoice
+    has not been uploaded within this many hours of PO generation (the
+    invoice upload is what tells the system the goods actually arrived)."""
+    import os
+
+    try:
+        return max(1, int(os.environ.get("PO_INVOICE_DUE_HOURS", "24")))
+    except ValueError:
+        return 24
+
+
+def _po_is_invoiced(po, db: Session) -> bool:
+    """An invoice from this PO's vendor uploaded AFTER the PO was created."""
+    count = db.execute(
+        select(func.count()).select_from(VendorInvoiceImport).where(
+            VendorInvoiceImport.vendor_id == po.vendor_id,
+            VendorInvoiceImport.created_at >= po.created_at,
+        )
+    ).scalar_one()
+    return count > 0
+
+
 class PoTower(BaseModel):
     created_in_window: int
     generated: int
@@ -742,6 +797,7 @@ class PoTower(BaseModel):
     complete: int
     partial: int
     not_supplied: int
+    overdue: int  # older than PO_INVOICE_DUE_HOURS with no vendor invoice
     ageing: dict[str, int]
 
 
@@ -762,9 +818,13 @@ def command_centre_po_tower(days: int = 30, db: Session = Depends(get_db)) -> Po
     }
 
     status_counts = {"GENERATED": 0, "EMAILED": 0, "EMAIL_FAILED": 0}
-    complete = partial = not_supplied = 0
+    complete = partial = not_supplied = overdue = 0
+    due_hours = _po_invoice_due_hours()
     ageing = {"0-1d": 0, "2-3d": 0, "4-7d": 0, "8-15d": 0, "15d+": 0}
     for po in pos:
+        age_hours_total = (now_utc - po.created_at).total_seconds() / 3600
+        if age_hours_total > due_hours and not _po_is_invoiced(po, db):
+            overdue += 1
         status_counts[po.status.value] = status_counts.get(po.status.value, 0) + 1
         items = db.execute(
             select(VendorPurchaseOrderItem).where(
@@ -805,6 +865,7 @@ def command_centre_po_tower(days: int = 30, db: Session = Depends(get_db)) -> Po
         complete=complete,
         partial=partial,
         not_supplied=not_supplied,
+        overdue=overdue,
         ageing=ageing,
     )
 
@@ -1317,6 +1378,93 @@ def command_centre_price_leakage(days: int = 30, db: Session = Depends(get_db)) 
             + (f" ({coverage}% of allocated quantity)." if coverage is not None else ".")
         ),
     )
+
+
+class TeamActivityRow(BaseModel):
+    number: str
+    name: str  # team member name / vendor / customer / "unknown"
+    kind: str  # "team" | "vendor" | "customer" | "admin" | "unknown"
+    files_sent: int
+    orders_sent: int
+    stock_files_sent: int
+    failed_files: int
+    last_activity: str | None
+
+
+@router.get("/team-activity", response_model=list[TeamActivityRow])
+def command_centre_team_activity(days: int = 30, db: Session = Depends(get_db)) -> list[TeamActivityRow]:
+    """WHO is sending work through WhatsApp (Founder's clarification:
+    number-wise counts per person -- Alam, Rajkumar, ...). Senders are
+    labelled from the purchase-team list, the vendor/customer registry and
+    the admin numbers; the Founder is the only web user, so this page is
+    inherently founder-only today."""
+    from backend.app.integrations.whatsapp.models import PurchaseTeamMember
+
+    since = _window_start(days)
+    documents = db.execute(
+        select(IncomingDocument).where(
+            IncomingDocument.received_at >= since,
+            IncomingDocument.sender.isnot(None),
+        )
+    ).scalars().all()
+
+    team = {
+        registry.normalize_number(member.whatsapp_number): member.name
+        for member in db.execute(select(PurchaseTeamMember)).scalars()
+    }
+    from backend.app.integrations.whatsapp.config import whatsapp_settings
+
+    admin_numbers = {
+        registry.normalize_number(number)
+        for number in whatsapp_settings.admin_phone_numbers
+    }
+
+    stats: dict[str, dict] = {}
+    for document in documents:
+        number = registry.normalize_number(document.sender)
+        if not number:
+            continue
+        entry = stats.setdefault(
+            number,
+            {"files": 0, "orders": 0, "stock": 0, "failed": 0, "last": None},
+        )
+        entry["files"] += 1
+        doc_type = document.document_type.value
+        if doc_type == "CUSTOMER_ORDER":
+            entry["orders"] += 1
+        elif doc_type == "VENDOR_INVENTORY":
+            entry["stock"] += 1
+        if document.status.value in ("FAILED", "DOWNLOAD_FAILED"):
+            entry["failed"] += 1
+        if entry["last"] is None or (
+            document.received_at and document.received_at > entry["last"]
+        ):
+            entry["last"] = document.received_at
+
+    rows: list[TeamActivityRow] = []
+    for number, entry in stats.items():
+        if number in team:
+            name, kind = team[number], "team"
+        elif number in admin_numbers:
+            name, kind = "Founder/Admin", "admin"
+        else:
+            party = registry.lookup(number, db)
+            if party is not None:
+                name, kind = party.name, party.party_type
+            else:
+                name, kind = "unknown", "unknown"
+        rows.append(TeamActivityRow(
+            number=number,
+            name=name,
+            kind=kind,
+            files_sent=entry["files"],
+            orders_sent=entry["orders"],
+            stock_files_sent=entry["stock"],
+            failed_files=entry["failed"],
+            last_activity=entry["last"].isoformat() if entry["last"] else None,
+        ))
+    rows.sort(key=lambda row: -row.files_sent)
+    return rows
 
 
 class AuditRow(BaseModel):

@@ -95,6 +95,18 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_SEND_FAILED_FILE", "true").strip().lower() == "true"
     )
 
+    # Send each generated Purchase Order on WhatsApp (the Founder's rule):
+    # the vendor's registered number (their OWN PO only), every registered
+    # purchase-team member, the number that originally sent the order, and
+    # the admin number(s). WHATSAPP_SEND_PO=false disables all of it;
+    # WHATSAPP_SEND_PO_TO_VENDOR=false keeps it internal (team + admin).
+    send_po: bool = (
+        os.environ.get("WHATSAPP_SEND_PO", "true").strip().lower() == "true"
+    )
+    send_po_to_vendor: bool = (
+        os.environ.get("WHATSAPP_SEND_PO_TO_VENDOR", "true").strip().lower() == "true"
+    )
+
     # Send allocation report workbooks to WhatsApp after automatic vendor
     # selection. false = allocations still run and are visible on the web
     # (Vendor Comparison / exports); only the WhatsApp file is skipped.

@@ -292,14 +292,25 @@ def generate_and_email_purchase_orders(order_id: int, session: Session) -> list[
     if not purchase_orders:
         return []
 
-    if not (settings.enable_po_email and settings.purchase_team_email):
-        return purchase_orders
+    if settings.enable_po_email and settings.purchase_team_email:
+        order = session.get(CustomerOrder, order_id)
+        for po in purchase_orders:
+            _email_purchase_order(po, session, order=order)
+        session.flush()
 
-    order = session.get(CustomerOrder, order_id)
-    for po in purchase_orders:
-        _email_purchase_order(po, session, order=order)
-
+    # WhatsApp distribution (Founder's rule: vendor + purchase team + order
+    # sender + Founder, each vendor receiving ONLY their own PO). Reads
+    # through THIS session (same pattern as the email above) and can never
+    # affect PO generation or the email outcome.
     session.flush()
+    try:
+        from backend.app.integrations.whatsapp import po_output
+
+        for po in purchase_orders:
+            po_output.send_po_on_whatsapp(po.id, session)
+    except Exception:  # noqa: BLE001 -- delivery must never affect generation
+        logger.exception("WhatsApp PO distribution failed (POs are generated and saved).")
+
     return purchase_orders
 
 

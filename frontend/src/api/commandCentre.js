@@ -61,6 +61,13 @@ export async function getPriceLeakage(days) {
   return response.data;
 }
 
+export async function getTeamActivity(days) {
+  const response = await apiClient.get("/api/command-centre/team-activity", {
+    params: { days },
+  });
+  return response.data;
+}
+
 export async function getAuditLog(limit) {
   const response = await apiClient.get("/api/command-centre/audit", { params: { limit } });
   return response.data;

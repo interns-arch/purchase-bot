@@ -91,6 +91,22 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         )
         return
 
+    # Founder command "register team": the NEXT Excel is the purchase-team
+    # list (Name + WhatsApp number) -- these members receive every PO.
+    if daily_stock.is_admin_sender(message.sender) and contact_import.is_team_command_text(
+        message.text
+    ):
+        with get_session() as session:
+            command_store.set_command(
+                message.sender, contact_import.TEAM_COMMAND_KEY, session
+            )
+        send_reply_safe(
+            message.sender,
+            "Send the purchase-team Excel now — one row per member: "
+            "Name + WhatsApp number. The list REPLACES the current team.",
+        )
+        return
+
     # A REGISTERED number's texts are never commands or vendor names -- the
     # number itself is the identity, so "good morning sir" etc. is simply
     # ignored (no instruction spam back at a vendor).
@@ -204,16 +220,21 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
 
     # Founder contact-list upload: an admin file captioned "register"/
     # "contacts" (or following a "register" text) UPDATES THE NUMBER REGISTRY
-    # instead of importing as stock.
+    # instead of importing as stock. "register team" works the same way for
+    # the purchase-team list.
     if daily_stock.is_admin_sender(message.sender):
-        if contact_import.is_update_caption(message.caption):
-            _handle_contact_update_upload(message)
-            return
+        caption_lower = (message.caption or "").strip().lower()
         with get_session() as session:
             pending_register = contact_import.has_pending_register_command(
                 message.sender, whatsapp_settings.grouping_window_minutes, session
             )
-        if pending_register:
+            pending_team = contact_import.has_pending_team_command(
+                message.sender, whatsapp_settings.grouping_window_minutes, session
+            )
+        if caption_lower in contact_import.TEAM_COMMANDS or pending_team:
+            _handle_team_update_upload(message)
+            return
+        if contact_import.is_update_caption(message.caption) or pending_register:
             _handle_contact_update_upload(message)
             return
 
@@ -282,6 +303,41 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
 
 
 _SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+
+
+def _handle_team_update_upload(message: IncomingWhatsAppMessage) -> None:
+    """A purchase-team list from an admin: Name + WhatsApp number rows
+    REPLACE the current team (they receive every generated PO)."""
+    logger.info(
+        "WhatsApp file '%s' from admin %s taken as the PURCHASE TEAM list.",
+        message.filename,
+        message.sender,
+    )
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        rows = contact_import.parse_contact_rows(Path(file_path))
+        if not rows:
+            send_reply_safe(
+                message.sender,
+                "⚠️ No rows found. Expected one row per member: Name + WhatsApp number.",
+            )
+            return
+        with get_session() as session:
+            reply, stats = contact_import.apply_team_update(rows, session)
+        logger.info("Purchase team updated: %s", stats)
+    except Exception:
+        logger.exception("Purchase team update failed for %s.", message.filename)
+        send_reply_safe(
+            message.sender,
+            "❌ Could not read that team list. Please send an Excel with "
+            "Name and WhatsApp number columns.",
+        )
+        return
+    finally:
+        with get_session() as session:
+            command_store.clear_command(message.sender, session)
+    send_reply_safe(message.sender, reply)
 
 
 def _handle_contact_update_upload(message: IncomingWhatsAppMessage) -> None:

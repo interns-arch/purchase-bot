@@ -62,20 +62,30 @@ h1, h2, h3 {
   color: #e5e7eb;
   display: flex;
   flex-direction: column;
-  padding: 20px 12px;
+  padding: 14px 12px;
+  /* The nav has grown past a laptop viewport; keep the brand pinned and let
+     ONLY the nav list scroll when it must, without a page-level scrollbar. */
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow: hidden;
 }
 
 .sidebar__brand {
-  font-size: 1.15rem;
+  font-size: 1.1rem;
   font-weight: 700;
   color: #fff;
-  padding: 8px 12px 24px;
+  padding: 4px 12px 14px;
 }
 
 .sidebar__nav {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #374151 transparent;
 }
 
 .sidebar__link {
@@ -85,9 +95,10 @@ h1, h2, h3 {
   gap: 8px;
   color: #cbd5e1;
   text-decoration: none;
-  padding: 10px 12px;
+  padding: 7px 12px;
   border-radius: var(--radius);
-  font-size: 0.95rem;
+  font-size: 0.88rem;
+  flex-shrink: 0;
 }
 
 .sidebar__link:hover {
@@ -648,6 +659,11 @@ h1, h2, h3 {
     flex-direction: row;
     align-items: center;
     padding: 10px 12px;
+    /* Undo the desktop pinned-column behaviour: as a top bar the sidebar
+       must size to its content, never 100vh. */
+    height: auto;
+    position: static;
+    overflow: visible;
   }
 
   .sidebar__brand {

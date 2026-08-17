@@ -120,6 +120,22 @@ class WhatsAppVendorMemory(Base):
     )
 
 
+class PurchaseTeamMember(Base):
+    """An internal purchase-team member (the Founder's clarification: people
+    like Alam/Rajkumar who send orders on WhatsApp and must receive every
+    generated PO as a CC). Managed by the Founder over WhatsApp: text
+    `register team`, then send an Excel of Name + WhatsApp number -- the
+    list REPLACES the previous one, exactly like the vendor contact flow.
+    Numbers stored normalized (see `registry.normalize_number`)."""
+
+    __tablename__ = "purchase_team_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(nullable=False)
+    whatsapp_number: Mapped[str] = mapped_column(unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class WhatsAppIntegrationStatus(Base):
     __tablename__ = "whatsapp_integration_status"
 

@@ -245,6 +245,68 @@ def is_update_caption(caption: str | None) -> bool:
 
 
 REGISTER_COMMAND_KEY = "register"
+TEAM_COMMAND_KEY = "register_team"
+
+TEAM_COMMANDS = {"register team", "team", "update team", "purchase team"}
+
+
+def is_team_command_text(text: str | None) -> bool:
+    return (text or "").strip().lower() in TEAM_COMMANDS
+
+
+def apply_team_update(rows: list[tuple[str, list[str]]], session) -> tuple[str, dict]:
+    """REPLACE the purchase-team list with the uploaded Name + Number sheet
+    (the Founder's clarification: internal purchasers who receive every PO
+    as a CC). Same parser as the vendor contact flow; audited."""
+    from backend.app.integrations.whatsapp.models import PurchaseTeamMember
+    from backend.app.services import audit_service
+    from sqlalchemy import select as _select
+
+    for existing in session.execute(_select(PurchaseTeamMember)).scalars():
+        session.delete(existing)
+    session.flush()
+
+    added: list[str] = []
+    skipped: list[str] = []
+    seen: set[str] = set()
+    for name, numbers in rows:
+        number = numbers[0] if numbers else ""
+        if not number:
+            skipped.append(f"{name} — no usable number")
+            continue
+        if number in seen:
+            skipped.append(f"{name} — duplicate number")
+            continue
+        seen.add(number)
+        session.add(PurchaseTeamMember(name=name, whatsapp_number=number))
+        added.append(f"{name} ({number})")
+    session.flush()
+
+    lines = [f"✅ Purchase team updated — {len(added)} member(s)."]
+    lines.extend(f"• {entry}" for entry in added)
+    if skipped:
+        lines.append("")
+        lines.append("ℹ️ Skipped:")
+        lines.extend(f"• {entry}" for entry in skipped)
+    lines.append("")
+    lines.append("Every generated PO will now be sent to these members on WhatsApp.")
+
+    audit_service.record(
+        session,
+        actor="founder-whatsapp",
+        action="purchase_team_update",
+        entity_type="purchase_team",
+        new_value=added,
+        reason=f"{len(rows)} row(s) in the uploaded team list",
+    )
+    return "\n".join(lines), {"added": len(added), "skipped": len(skipped)}
+
+
+def has_pending_team_command(sender: str, window_minutes: float, session) -> bool:
+    return (
+        command_store.get_fresh_command(sender, window_minutes, session)
+        == TEAM_COMMAND_KEY
+    )
 
 
 def has_pending_register_command(sender: str, window_minutes: float, session: Session) -> bool:

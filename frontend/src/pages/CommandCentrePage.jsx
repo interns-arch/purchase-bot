@@ -27,6 +27,7 @@ import {
   getCommandCentreTrends,
   getCommandCentreVendorScorecard,
   getPriceLeakage,
+  getTeamActivity,
 } from "../api/commandCentre";
 
 const PERIODS = [
@@ -94,6 +95,7 @@ export function CommandCentrePage() {
   const [scorecard, setScorecard] = useState([]);
   const [trends, setTrends] = useState([]);
   const [leakage, setLeakage] = useState(null);
+  const [teamActivity, setTeamActivity] = useState([]);
   const [days, setDays] = useState(7);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -111,6 +113,7 @@ export function CommandCentrePage() {
         scorecardData,
         trendsData,
         leakageData,
+        teamActivityData,
       ] = await Promise.all([
         getCommandCentreSummary(),
         getCommandCentreAlerts(),
@@ -122,6 +125,7 @@ export function CommandCentrePage() {
         getCommandCentreVendorScorecard(),
         getCommandCentreTrends(windowDays),
         getPriceLeakage(windowDays),
+        getTeamActivity(windowDays),
       ]);
       setSummary(summaryData);
       setAlerts(alertsData);
@@ -133,6 +137,7 @@ export function CommandCentrePage() {
       setScorecard(scorecardData);
       setTrends(trendsData);
       setLeakage(leakageData);
+      setTeamActivity(teamActivityData);
     } catch (error) {
       toast.error(extractErrorMessage(error, "Could not load the Command Centre."));
     } finally {
@@ -580,6 +585,51 @@ export function CommandCentrePage() {
                     <td>{row.delivered_qty}</td>
                     <td style={{ color: row.short_qty ? "#dc2626" : undefined }}>{row.short_qty}</td>
                     <td>{row.submissions_30d}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel__header">
+          <h2>Team Activity ({days === 1 ? "today" : `${days} days`})</h2>
+        </div>
+        {teamActivity.length === 0 ? (
+          <EmptyState
+            title="No WhatsApp activity in this window"
+            description="Counts appear per sender as files arrive."
+          />
+        ) : (
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Who</th>
+                  <th>Number</th>
+                  <th>Type</th>
+                  <th>Files Sent</th>
+                  <th>Orders</th>
+                  <th>Stock Files</th>
+                  <th>Failed</th>
+                  <th>Last Activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {teamActivity.map((row) => (
+                  <tr key={row.number}>
+                    <td style={{ fontWeight: row.kind === "team" ? 700 : 400 }}>{row.name}</td>
+                    <td>{row.number}</td>
+                    <td>{row.kind}</td>
+                    <td style={{ fontWeight: 600 }}>{row.files_sent}</td>
+                    <td>{row.orders_sent}</td>
+                    <td>{row.stock_files_sent}</td>
+                    <td style={{ color: row.failed_files ? "#dc2626" : undefined }}>
+                      {row.failed_files}
+                    </td>
+                    <td>{row.last_activity ? row.last_activity.slice(0, 16).replace("T", " ") : "—"}</td>
                   </tr>
                 ))}
               </tbody>
