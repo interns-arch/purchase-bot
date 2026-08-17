@@ -925,3 +925,21 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
+
+
+class VendorNameAlias(Base):
+    """A REMEMBERED alternative name for a vendor (Founder's rule). Created
+    automatically when a duplicate vendor is merged: the duplicate's name
+    becomes an alias of the keeper, so a future upload captioned with the OLD
+    name (e.g. 'BIJWASHAN STOCK' after merging into 'Bijvasan') resolves to
+    the same vendor instead of onboarding a new duplicate. Keyed by the
+    filler-insensitive normalized name (`vendor_service.normalise_vendor_name`)."""
+
+    __tablename__ = "vendor_name_aliases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized_name: Mapped[str] = mapped_column(unique=True, index=True)
+    vendor_id: Mapped[int] = mapped_column(
+        ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

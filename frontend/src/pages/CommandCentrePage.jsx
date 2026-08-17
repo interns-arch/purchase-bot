@@ -46,6 +46,34 @@ function StatRow({ label, value, tone }) {
   );
 }
 
+function SectionHint({ children }) {
+  return (
+    <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "0 0 12px" }}>
+      {children}
+    </p>
+  );
+}
+
+function ShowMoreList({ items, initial = 5, render }) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, initial);
+  return (
+    <>
+      {render(visible)}
+      {items.length > initial && (
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ marginTop: 8 }}
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? "Show less" : `Show all ${items.length}`}
+        </button>
+      )}
+    </>
+  );
+}
+
 const SEVERITY_COLORS = {
   error: "#dc2626",
   warning: "#d97706",
@@ -309,110 +337,136 @@ export function CommandCentrePage() {
             )}
           </h2>
         </div>
+        <SectionHint>
+          Problems that need a person, worst first — failed files, orders no vendor can cover,
+          vendors who haven't sent stock, POs without an invoice.
+        </SectionHint>
         {alerts.length === 0 ? (
           <EmptyState
             title="Nothing needs you right now"
             description="No failures, shortages, pending vendors or mismatches."
           />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {alerts.map((alert, index) => (
-              <div
-                key={`${alert.type}-${index}`}
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 12,
-                  border: "1px solid var(--color-border, #e5e7eb)",
-                  borderLeft: `4px solid ${SEVERITY_COLORS[alert.severity] || "#6b7280"}`,
-                  borderRadius: 8,
-                  padding: "10px 14px",
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600 }}>{alert.title}</div>
+          <ShowMoreList
+            items={alerts}
+            initial={5}
+            render={(visible) => (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {visible.map((alert, index) => (
                   <div
+                    key={`${alert.type}-${index}`}
                     style={{
-                      fontSize: "0.85rem",
-                      color: "var(--color-text-muted)",
-                      whiteSpace: "normal",
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 12,
+                      border: "1px solid var(--color-border, #e5e7eb)",
+                      borderLeft: `4px solid ${SEVERITY_COLORS[alert.severity] || "#6b7280"}`,
+                      borderRadius: 8,
+                      padding: "10px 14px",
                     }}
                   >
-                    {alert.detail}
-                    {alert.age_hours !== null && alert.age_hours !== undefined && (
-                      <> · {alert.age_hours}h old</>
-                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600 }}>{alert.title}</div>
+                      <div
+                        style={{
+                          fontSize: "0.85rem",
+                          color: "var(--color-text-muted)",
+                          whiteSpace: "normal",
+                        }}
+                      >
+                        {alert.detail}
+                        {alert.age_hours !== null && alert.age_hours !== undefined && (
+                          <> · {alert.age_hours}h old</>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => navigate(alert.link)}
+                    >
+                      Open
+                    </button>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => navigate(alert.link)}
-                >
-                  Open
-                </button>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          />
         )}
       </section>
 
       <section className="panel">
         <div className="panel__header">
-          <h2>Stock vs Demand — parts that cannot be fulfilled</h2>
+          <h2>Parts We Cannot Supply</h2>
         </div>
+        <SectionHint>
+          Order lines still short where NO vendor has enough remaining stock. "Gap" = live
+          remaining minus what's still needed — red means it cannot be filled until a vendor
+          uploads more stock (auto top-up will fill it the moment that happens).
+        </SectionHint>
         {gaps.length === 0 ? (
           <EmptyState
             title="No unfulfillable demand"
             description="Every recent order line is covered by live vendor stock."
           />
         ) : (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Part</th>
-                  <th>Vendor Stock</th>
-                  <th>Reserved</th>
-                  <th>Live Remaining</th>
-                  <th>Demand</th>
-                  <th>Allocated</th>
-                  <th>Short</th>
-                  <th>Gap</th>
-                  <th>Vendors</th>
-                </tr>
-              </thead>
-              <tbody>
-                {gaps.map((row) => (
-                  <tr key={row.part_number}>
-                    <td>{row.part_number}</td>
-                    <td>{row.vendor_stock}</td>
-                    <td>{row.reserved}</td>
-                    <td>{row.live_remaining}</td>
-                    <td>{row.demand}</td>
-                    <td>{row.allocated}</td>
-                    <td>{row.short}</td>
-                    <td
-                      style={{
-                        color: row.gap < 0 ? SEVERITY_COLORS.error : "#16a34a",
-                        fontWeight: 600,
-                      }}
-                    >
-                      {row.gap}
-                    </td>
-                    <td>{row.vendors.join(", ") || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ShowMoreList
+            items={gaps}
+            initial={5}
+            render={(visible) => (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Part</th>
+                      <th>Vendor Stock</th>
+                      <th>Reserved</th>
+                      <th>Live Remaining</th>
+                      <th>Demand</th>
+                      <th>Allocated</th>
+                      <th>Short</th>
+                      <th>Gap</th>
+                      <th>Vendors</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((row) => (
+                      <tr key={row.part_number}>
+                        <td>{row.part_number}</td>
+                        <td>{row.vendor_stock}</td>
+                        <td>{row.reserved}</td>
+                        <td>{row.live_remaining}</td>
+                        <td>{row.demand}</td>
+                        <td>{row.allocated}</td>
+                        <td>{row.short}</td>
+                        <td
+                          style={{
+                            color: row.gap < 0 ? SEVERITY_COLORS.error : "#16a34a",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {row.gap}
+                        </td>
+                        <td>{row.vendors.join(", ") || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          />
         )}
       </section>
 
       <section className="panel">
         <div className="panel__header">
-          <h2>Procurement Funnel ({days === 1 ? "today" : `${days} days`})</h2>
+          <h2>Stock-to-Delivery Journey ({days === 1 ? "today" : `${days} days`})</h2>
         </div>
+        <SectionHint>
+          How much quantity moved through each step: vendors declared stock → customers ordered
+          → the system allocated → POs were created → invoices arrived → goods were delivered.
+          A big drop between two steps shows where quantity is getting stuck.
+        </SectionHint>
         <div className="table-scroll">
           <table className="data-table">
             <thead>
@@ -464,8 +518,12 @@ export function CommandCentrePage() {
 
       <section className="panel">
         <div className="panel__header">
-          <h2>Control Towers</h2>
+          <h2>Today's Status — Orders, POs, Deliveries</h2>
         </div>
+        <SectionHint>
+          Where every order, PO and delivery currently stands. "Overdue" POs follow your rule:
+          the vendor's invoice was not uploaded within 24 hours of the PO.
+        </SectionHint>
         <div
           style={{
             display: "grid",
@@ -541,6 +599,13 @@ export function CommandCentrePage() {
         <div className="panel__header">
           <h2>Vendor Scorecard</h2>
         </div>
+        <SectionHint>
+          Reading the row: <strong>Declared</strong> = quantity in the vendor's current stock
+          file · <strong>Allocated</strong> = how much we booked from them ·{" "}
+          <strong>Delivered</strong> = what actually arrived (from invoices) ·{" "}
+          <strong>Trust</strong> = delivered vs booked (did they supply what they promised?) —
+          "—" means nothing has been booked from them yet, so there is nothing to judge.
+        </SectionHint>
         {scorecard.length === 0 ? (
           <EmptyState title="No vendor activity yet" description="Scores appear once vendors declare stock and receive allocations." />
         ) : (
@@ -597,6 +662,10 @@ export function CommandCentrePage() {
         <div className="panel__header">
           <h2>Team Activity ({days === 1 ? "today" : `${days} days`})</h2>
         </div>
+        <SectionHint>
+          Who sent work on WhatsApp, number-wise — team members in bold. Failed counts show
+          whose files keep breaking.
+        </SectionHint>
         {teamActivity.length === 0 ? (
           <EmptyState
             title="No WhatsApp activity in this window"
@@ -641,8 +710,13 @@ export function CommandCentrePage() {
       {leakage && (
         <section className="panel">
           <div className="panel__header">
-            <h2>Price Leakage ({days === 1 ? "today" : `${days} days`})</h2>
+            <h2>Buying Above the Best Price ({days === 1 ? "today" : `${days} days`})</h2>
           </div>
+          <SectionHint>
+            Only computable where vendors put a Rate/Price column in their stock files. For each
+            allocation, the chosen vendor's price is compared with the cheapest other vendor
+            stocking the same part — the difference × quantity is money that could be saved.
+          </SectionHint>
           <div
             style={{
               display: "grid",

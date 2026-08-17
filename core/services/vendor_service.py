@@ -52,10 +52,54 @@ def list_vendors(session: Session) -> list[Vendor]:
     )
 
 
+import re as _re
+
+# Filler words that do NOT distinguish one vendor from another (the Founder's
+# rule: "Bijwasan" and "Bijwasan Stock" are the SAME entity). Only generic
+# stock-file words are listed -- real name words are never stripped, so
+# distinct vendors (aman vs amit) can never merge.
+_VENDOR_NAME_FILLERS = {"stock", "stocks", "inventory", "stocklist"}
+
+
+def normalise_vendor_name(name: str) -> str:
+    """Identity form of a vendor name: lowercase, alphanumeric words only,
+    with generic filler words ('stock' etc.) removed. 'BIJWASHAN STOCK' ->
+    'bijwashan'; 'Delhi Branch Stock' -> 'delhi branch'."""
+    words = _re.split(r"[^a-z0-9]+", (name or "").strip().lower())
+    kept = [word for word in words if word and word not in _VENDOR_NAME_FILLERS]
+    return " ".join(kept) or (name or "").strip().lower()
+
+
 def get_vendor_by_name(name: str, session: Session) -> Vendor | None:
-    return session.execute(
+    """Match by name, tolerating case and generic filler words: a file
+    captioned 'BIJWASHAN STOCK' reuses the existing 'Bijwasan Stock' /
+    'BIJWASHAN' vendor instead of onboarding a duplicate. Exact
+    (case-insensitive) match wins first; the filler-insensitive match only
+    runs when that finds nothing."""
+    exact = session.execute(
         select(Vendor).where(func.lower(Vendor.name) == name.strip().lower())
     ).scalar_one_or_none()
+    if exact is not None:
+        return exact
+
+    wanted = normalise_vendor_name(name)
+    if not wanted:
+        return None
+    for vendor in session.execute(select(Vendor)).scalars():
+        if normalise_vendor_name(vendor.name) == wanted:
+            return vendor
+
+    # REMEMBERED aliases (Founder's rule): a name that once belonged to a
+    # merged-away duplicate (e.g. 'BIJWASHAN STOCK' after merging into
+    # 'Bijvasan') resolves to the vendor it was merged into -- forever.
+    from core.models import VendorNameAlias
+
+    alias = session.execute(
+        select(VendorNameAlias).where(VendorNameAlias.normalized_name == wanted)
+    ).scalar_one_or_none()
+    if alias is not None:
+        return session.get(Vendor, alias.vendor_id)
+    return None
 
 
 def get_vendor_by_whatsapp_number(number: str, session: Session) -> Vendor | None:
