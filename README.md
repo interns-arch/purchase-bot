@@ -382,6 +382,13 @@ The **grouping window** (`WHATSAPP_GROUPING_WINDOW_MINUTES`, default 10): all fi
 - **Vendor Scorecard + Stock-Trust** (spec §9, §10): per vendor — declared → allocated → invoiced → delivered → short chain, fulfilment %, trust % (did supply match declaration?), 30-day upload discipline, and a composite score /100 using the spec's weights **renormalised over metrics that have data** (price competitiveness and due-date timeliness are omitted until that data exists — a score is never faked; inactive vendors are omitted, not zeroed).
 - **Trends** (spec §21): daily ordered-vs-allocated lines and stock-received/files-failed bars over the selected window.
 
+**Phase 3 additions:**
+
+- **Part Intelligence** (spec §18, nav: **Part Intelligence**, `GET /api/command-centre/part-intelligence?q=`): search ANY spelling of a part (aliases, root/OEM numbers, special characters ignored — the allocation engine's own matching) → canonical number + every known alias, per-vendor declared/reserved/live stock, price & MRP (★ marks the best price), selected-vendor flags, delivered/short history, last upload date, and 30-day demand/allocated/short.
+- **Price Leakage / Finance-lite** (spec §14–15, Command Centre panel, `GET /api/command-centre/price-leakage`): purchase value of priced allocations, best-available-price comparison per selected allocation, potential leakage rows (part · selected vendor/₹ · best vendor/₹ · qty · leakage). **Coverage honesty built in**: every rupee figure states what % of allocated quantity actually carried a price — unpriced allocations are counted and disclosed, never silently valued at ₹0 (spec §28).
+- **Audit Trail** (spec §24, nav: **Audit Log**, `core.models.AuditLog` + `backend/app/services/audit_service.py`): append-only record of every MANUAL, management-impacting action — manual vendor select/deselect (with before/after values and the acting user), Danger-Zone purges, founder WhatsApp contact-registry updates. Recorded on the same transaction as the action itself; automatic pipeline activity stays in Import History / File Inbox.
+- **Deferred with reason**: role-based visibility (§25) and Purchase-Team performance (§16) wait until staff accounts exist (production has a single admin user today); the `role` claim already travels in the JWT, so the groundwork is laid.
+
 ---
 
 ## 9. Settings Page

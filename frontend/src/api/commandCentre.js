@@ -46,3 +46,22 @@ export async function getCommandCentreTrends(days) {
   const response = await apiClient.get("/api/command-centre/trends", { params: { days } });
   return response.data;
 }
+
+export async function getPartIntelligence(query) {
+  const response = await apiClient.get("/api/command-centre/part-intelligence", {
+    params: { q: query },
+  });
+  return response.data;
+}
+
+export async function getPriceLeakage(days) {
+  const response = await apiClient.get("/api/command-centre/price-leakage", {
+    params: { days },
+  });
+  return response.data;
+}
+
+export async function getAuditLog(limit) {
+  const response = await apiClient.get("/api/command-centre/audit", { params: { limit } });
+  return response.data;
+}

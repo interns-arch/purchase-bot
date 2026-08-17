@@ -12,7 +12,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.app.auth.dependencies import get_current_user
+from backend.app.auth.models import User
 from backend.app.database.session import get_db
+from backend.app.services import audit_service
 from backend.app.notifications import broker
 from backend.app.services import data_purge_service
 from core.logging_setup import get_logger
@@ -44,11 +46,25 @@ class PurgeResponse(BaseModel):
 
 
 @router.post("/purge", response_model=PurgeResponse)
-def purge_file_data(payload: PurgeRequest, db: Session = Depends(get_db)) -> PurgeResponse:
+def purge_file_data(
+    payload: PurgeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PurgeResponse:
     try:
         deleted = data_purge_service.purge_files(payload.scope, db)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    audit_service.record(
+        db,
+        actor=current_user.username,
+        action="data_purge",
+        entity_type="database",
+        entity_id=payload.scope,
+        previous_value=deleted,
+        new_value=None,
+        reason=f"Danger Zone purge, scope={payload.scope}",
+    )
     db.commit()
 
     total = sum(deleted.values())

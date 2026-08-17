@@ -220,6 +220,19 @@ def apply_contact_update(
         "skipped": len(skipped),
         "no_number": len(no_number),
     }
+    # Management audit (spec §24): registry changes alter who can upload
+    # stock directly, so every founder update is recorded with its outcome.
+    from backend.app.services import audit_service
+
+    audit_service.record(
+        session,
+        actor="founder-whatsapp",
+        action="contact_registry_update",
+        entity_type="whatsapp_registry",
+        previous_value=None,
+        new_value={"updated": updated, "repointed": repointed, "skipped": skipped},
+        reason=f"{len(rows)} row(s) in the uploaded contact list",
+    )
     return "\n".join(lines), stats
 
 

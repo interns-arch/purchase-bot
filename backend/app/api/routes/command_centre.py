@@ -1057,6 +1057,301 @@ def command_centre_trends(days: int = 30, db: Session = Depends(get_db)) -> list
     return points
 
 
+# ===========================================================================
+# Phase 3 -- Part Intelligence (§18), Price Leakage / Finance-lite (§14-§15),
+# Audit trail viewer (§24). Money figures are shown ONLY where the vendor's
+# own file carried a price, always with explicit coverage so a partially-
+# priced total can never masquerade as a complete one (spec §28).
+# ===========================================================================
+
+
+class PartVendorRow(BaseModel):
+    vendor_id: int
+    vendor: str
+    vendor_code: str | None
+    vendor_part_number: str
+    declared: float
+    reserved: float
+    live_remaining: float
+    price: float | None
+    mrp: float | None
+    is_selected: bool
+    delivered: float
+    delivery_short: float
+    last_upload: str | None
+
+
+class PartIntelligence(BaseModel):
+    query: str
+    canonical_part_number: str | None
+    aliases: list[str]
+    description: str | None
+    brand: str | None
+    vendors: list[PartVendorRow]
+    demand_30d: float
+    allocated_30d: float
+    short_30d: float
+    best_price: float | None
+    selected_price_max: float | None
+    price_note: str
+
+
+@router.get("/part-intelligence", response_model=PartIntelligence)
+def command_centre_part_intelligence(q: str, db: Session = Depends(get_db)) -> PartIntelligence:
+    """One consolidated intelligence page for any part number (spec §18):
+    identity + aliases, every vendor's stock/reservations/price, open
+    demand, and price positioning -- all through the same alias-aware
+    matching the allocation engine uses."""
+    normalized = normalise_part_number(q)
+    numbers = _matchable_part_numbers(normalized, db)
+
+    from core.models import Part, PartAlias
+
+    parts = db.execute(
+        select(Part).where(Part.canonical_part_number.in_(numbers))
+    ).scalars().all()
+    part_ids = [part.id for part in parts]
+    aliases = sorted({
+        alias for alias in db.execute(
+            select(PartAlias.vendor_part_number).where(PartAlias.part_id.in_(part_ids))
+        ).scalars()
+    }) if part_ids else []
+
+    stock_rows = db.execute(
+        select(VendorInventory, Vendor, InventoryImport)
+        .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+        .join(Vendor, VendorInventory.vendor_id == Vendor.id)
+        .where(
+            VendorInventory.normalized_part_number.in_(numbers),
+            InventoryImport.is_active.is_(True),
+        )
+    ).all()
+
+    selected_vendor_ids = set(db.execute(
+        select(func.distinct(VendorSelection.vendor_id)).where(
+            VendorSelection.part_id.in_(part_ids)
+        )
+    ).scalars()) if part_ids else set()
+
+    tracking_by_key = {
+        (row.vendor_id, row.part_id): row
+        for row in delivery_tracking_service.compute_rows(db)
+        if row.part_id in part_ids
+    }
+
+    vendors: list[PartVendorRow] = []
+    for inventory_row, vendor, import_row in stock_rows:
+        reserved = db.execute(
+            select(func.coalesce(func.sum(VendorSelection.quantity_selected), 0)).where(
+                VendorSelection.vendor_id == inventory_row.vendor_id,
+                VendorSelection.part_id == inventory_row.part_id,
+            )
+        ).scalar_one()
+        tracking = tracking_by_key.get((vendor.id, inventory_row.part_id))
+        vendors.append(PartVendorRow(
+            vendor_id=vendor.id,
+            vendor=vendor.name,
+            vendor_code=vendor.vendor_code,
+            vendor_part_number=inventory_row.vendor_part_number,
+            declared=float(inventory_row.quantity_available),
+            reserved=float(reserved),
+            live_remaining=float(Decimal(inventory_row.quantity_available) - Decimal(reserved)),
+            price=float(inventory_row.price) if inventory_row.price is not None else None,
+            mrp=float(inventory_row.mrp) if inventory_row.mrp is not None else None,
+            is_selected=vendor.id in selected_vendor_ids,
+            delivered=float(tracking.delivered_qty) if tracking else 0.0,
+            delivery_short=float(tracking.short_qty) if tracking else 0.0,
+            last_upload=import_row.created_at.strftime("%d %b %Y") if import_row.created_at else None,
+        ))
+    vendors.sort(key=lambda row: -row.declared)
+
+    month_ago = datetime.utcnow() - timedelta(days=30)
+    demand = allocated = Decimal(0)
+    items = db.execute(
+        select(CustomerOrderItem)
+        .join(CustomerOrder, CustomerOrderItem.customer_order_id == CustomerOrder.id)
+        .where(CustomerOrder.created_at >= month_ago)
+    ).scalars().all()
+    for item in items:
+        if normalise_part_number(item.part_number_raw) not in numbers:
+            continue
+        demand += Decimal(item.quantity_requested)
+        allocated += db.execute(
+            select(func.coalesce(func.sum(VendorSelection.quantity_selected), 0)).where(
+                VendorSelection.customer_order_item_id == item.id
+            )
+        ).scalar_one()
+
+    priced = [row.price for row in vendors if row.price is not None]
+    selected_prices = [
+        row.price for row in vendors if row.is_selected and row.price is not None
+    ]
+    price_note = (
+        f"Prices known for {len(priced)} of {len(vendors)} vendor(s)."
+        if vendors
+        else "No vendor currently stocks this part."
+    )
+
+    part = parts[0] if parts else None
+    return PartIntelligence(
+        query=q,
+        canonical_part_number=part.canonical_part_number if part else None,
+        aliases=aliases,
+        description=part.description if part else None,
+        brand=part.brand if part else None,
+        vendors=vendors,
+        demand_30d=float(demand),
+        allocated_30d=float(allocated),
+        short_30d=float(demand - allocated),
+        best_price=min(priced) if priced else None,
+        selected_price_max=max(selected_prices) if selected_prices else None,
+        price_note=price_note,
+    )
+
+
+class LeakageRow(BaseModel):
+    part_number: str
+    selected_vendor: str
+    selected_price: float
+    best_vendor: str
+    best_price: float
+    quantity: float
+    variance: float
+    leakage: float
+
+
+class PriceLeakage(BaseModel):
+    window_days: int
+    allocated_qty_total: float
+    allocated_qty_priced: float
+    priced_coverage_pct: float | None
+    purchase_value_priced: float
+    potential_leakage: float
+    rows: list[LeakageRow]
+    note: str
+
+
+@router.get("/price-leakage", response_model=PriceLeakage)
+def command_centre_price_leakage(days: int = 30, db: Session = Depends(get_db)) -> PriceLeakage:
+    """Spec §15: for allocations where the SELECTED vendor's price is known,
+    compare against the best-priced ACTIVE alternative for the same part.
+    Every rupee figure carries its coverage -- allocations without price data
+    are counted and reported, never silently included at ₹0."""
+    since = _window_start(days)
+
+    selections = db.execute(
+        select(VendorSelection, Vendor)
+        .join(Vendor, VendorSelection.vendor_id == Vendor.id)
+        .join(CustomerOrderItem,
+              VendorSelection.customer_order_item_id == CustomerOrderItem.id)
+        .join(CustomerOrder, CustomerOrderItem.customer_order_id == CustomerOrder.id)
+        .where(CustomerOrder.created_at >= since)
+    ).all()
+
+    # Active price per (vendor, part) + best price per part -- two passes
+    # over one query.
+    price_rows = db.execute(
+        select(VendorInventory.vendor_id, VendorInventory.part_id,
+               VendorInventory.price, VendorInventory.vendor_part_number, Vendor.name)
+        .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+        .join(Vendor, VendorInventory.vendor_id == Vendor.id)
+        .where(InventoryImport.is_active.is_(True))
+    ).all()
+    price_by_vendor_part: dict[tuple[int, int], Decimal] = {}
+    part_number_by_part: dict[int, str] = {}
+    best_by_part: dict[int, tuple[Decimal, str]] = {}
+    for vendor_id, part_id, price, raw_number, vendor_name in price_rows:
+        part_number_by_part.setdefault(part_id, raw_number)
+        if price is None:
+            continue
+        price_by_vendor_part[(vendor_id, part_id)] = Decimal(price)
+        best = best_by_part.get(part_id)
+        if best is None or Decimal(price) < best[0]:
+            best_by_part[part_id] = (Decimal(price), vendor_name)
+
+    total_qty = priced_qty = Decimal(0)
+    purchase_value = leakage_total = Decimal(0)
+    rows: list[LeakageRow] = []
+    for selection, vendor in selections:
+        qty = Decimal(selection.quantity_selected)
+        total_qty += qty
+        selected_price = price_by_vendor_part.get((selection.vendor_id, selection.part_id))
+        if selected_price is None:
+            continue
+        priced_qty += qty
+        purchase_value += selected_price * qty
+        best = best_by_part.get(selection.part_id)
+        if best is None:
+            continue
+        best_price, best_vendor = best
+        if selected_price > best_price:
+            variance = selected_price - best_price
+            leakage = variance * qty
+            leakage_total += leakage
+            rows.append(LeakageRow(
+                part_number=part_number_by_part.get(selection.part_id, str(selection.part_id)),
+                selected_vendor=vendor.name,
+                selected_price=float(selected_price),
+                best_vendor=best_vendor,
+                best_price=float(best_price),
+                quantity=float(qty),
+                variance=float(variance),
+                leakage=float(leakage),
+            ))
+
+    rows.sort(key=lambda row: -row.leakage)
+    coverage = (
+        round(float(priced_qty / total_qty * 100), 1) if total_qty else None
+    )
+    return PriceLeakage(
+        window_days=days,
+        allocated_qty_total=float(total_qty),
+        allocated_qty_priced=float(priced_qty),
+        priced_coverage_pct=coverage,
+        purchase_value_priced=float(purchase_value),
+        potential_leakage=float(leakage_total),
+        rows=rows[:25],
+        note=(
+            "Value figures cover ONLY allocations whose selected vendor "
+            "declared a price in their stock file"
+            + (f" ({coverage}% of allocated quantity)." if coverage is not None else ".")
+        ),
+    )
+
+
+class AuditRow(BaseModel):
+    id: int
+    actor: str
+    action: str
+    entity_type: str
+    entity_id: str | None
+    previous_value: str | None
+    new_value: str | None
+    reason: str | None
+    created_at: str
+
+
+@router.get("/audit", response_model=list[AuditRow])
+def command_centre_audit(limit: int = 100, db: Session = Depends(get_db)) -> list[AuditRow]:
+    """Spec §24: the manual-override trail, newest first."""
+    from backend.app.services import audit_service
+
+    return [
+        AuditRow(
+            id=row.id,
+            actor=row.actor,
+            action=row.action,
+            entity_type=row.entity_type,
+            entity_id=row.entity_id,
+            previous_value=row.previous_value,
+            new_value=row.new_value,
+            reason=row.reason,
+            created_at=row.created_at.isoformat() if row.created_at else "",
+        )
+        for row in audit_service.list_recent(db, limit=min(limit, 500))
+    ]
+
+
 @router.get("/stock-gaps", response_model=list[StockGapRow])
 def command_centre_stock_gaps(db: Session = Depends(get_db)) -> list[StockGapRow]:
     """Spec §8: per part -- imported stock, live reservations, live

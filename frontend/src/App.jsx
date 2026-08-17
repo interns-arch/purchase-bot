@@ -48,6 +48,12 @@ const FileInboxPage = lazy(() =>
 const CommandCentrePage = lazy(() =>
   import("./pages/CommandCentrePage").then((m) => ({ default: m.CommandCentrePage }))
 );
+const PartIntelligencePage = lazy(() =>
+  import("./pages/PartIntelligencePage").then((m) => ({ default: m.PartIntelligencePage }))
+);
+const AuditLogPage = lazy(() =>
+  import("./pages/AuditLogPage").then((m) => ({ default: m.AuditLogPage }))
+);
 
 function App() {
   return (
@@ -135,6 +141,22 @@ function App() {
               element={
                 <ProtectedRoute>
                   <CommandCentrePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/part-intelligence"
+              element={
+                <ProtectedRoute>
+                  <PartIntelligencePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/audit-log"
+              element={
+                <ProtectedRoute>
+                  <AuditLogPage />
                 </ProtectedRoute>
               }
             />

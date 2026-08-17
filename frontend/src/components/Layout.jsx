@@ -8,6 +8,7 @@ import { useToast } from "../context/ToastContext";
 // from each imported inventory file.
 const NAV_ITEMS = [
   { to: "/command-centre", label: "Command Centre" },
+  { to: "/part-intelligence", label: "Part Intelligence" },
   { to: "/dashboard", label: "Dashboard" },
   { to: "/vendor-inventory", label: "Vendor Inventory" },
   { to: "/customer-orders", label: "Customer Orders" },
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { to: "/purchase-orders", label: "Purchase Orders" },
   { to: "/vendor-performance", label: "Vendor Performance" },
   { to: "/file-inbox", label: "File Inbox" },
+  { to: "/audit-log", label: "Audit Log" },
   { to: "/settings", label: "Settings" },
 ];
 

@@ -26,6 +26,7 @@ import {
   getCommandCentreSummary,
   getCommandCentreTrends,
   getCommandCentreVendorScorecard,
+  getPriceLeakage,
 } from "../api/commandCentre";
 
 const PERIODS = [
@@ -92,6 +93,7 @@ export function CommandCentrePage() {
   const [deliveryTower, setDeliveryTower] = useState(null);
   const [scorecard, setScorecard] = useState([]);
   const [trends, setTrends] = useState([]);
+  const [leakage, setLeakage] = useState(null);
   const [days, setDays] = useState(7);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -108,6 +110,7 @@ export function CommandCentrePage() {
         deliveryData,
         scorecardData,
         trendsData,
+        leakageData,
       ] = await Promise.all([
         getCommandCentreSummary(),
         getCommandCentreAlerts(),
@@ -118,6 +121,7 @@ export function CommandCentrePage() {
         getCommandCentreDeliveryTower(windowDays),
         getCommandCentreVendorScorecard(),
         getCommandCentreTrends(windowDays),
+        getPriceLeakage(windowDays),
       ]);
       setSummary(summaryData);
       setAlerts(alertsData);
@@ -128,6 +132,7 @@ export function CommandCentrePage() {
       setDeliveryTower(deliveryData);
       setScorecard(scorecardData);
       setTrends(trendsData);
+      setLeakage(leakageData);
     } catch (error) {
       toast.error(extractErrorMessage(error, "Could not load the Command Centre."));
     } finally {
@@ -582,6 +587,86 @@ export function CommandCentrePage() {
           </div>
         )}
       </section>
+
+      {leakage && (
+        <section className="panel">
+          <div className="panel__header">
+            <h2>Price Leakage ({days === 1 ? "today" : `${days} days`})</h2>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+              gap: 12,
+              marginBottom: 12,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)" }}>
+                Purchase value (priced)
+              </div>
+              <div style={{ fontSize: "1.3rem", fontWeight: 700 }}>
+                ₹{leakage.purchase_value_priced}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)" }}>
+                Price coverage
+              </div>
+              <div style={{ fontSize: "1.3rem", fontWeight: 700 }}>
+                {leakage.priced_coverage_pct === null ? "—" : `${leakage.priced_coverage_pct}%`}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)" }}>
+                Potential leakage
+              </div>
+              <div
+                style={{
+                  fontSize: "1.3rem",
+                  fontWeight: 700,
+                  color: leakage.potential_leakage > 0 ? "#dc2626" : "#16a34a",
+                }}
+              >
+                ₹{leakage.potential_leakage}
+              </div>
+            </div>
+          </div>
+          <p style={{ fontSize: "0.8rem", color: "var(--color-text-muted)", marginBottom: 12 }}>
+            {leakage.note}
+          </p>
+          {leakage.rows.length > 0 && (
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Part</th>
+                    <th>Selected Vendor</th>
+                    <th>Selected ₹</th>
+                    <th>Best Vendor</th>
+                    <th>Best ₹</th>
+                    <th>Qty</th>
+                    <th>Leakage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leakage.rows.map((row, index) => (
+                    <tr key={`${row.part_number}-${index}`}>
+                      <td>{row.part_number}</td>
+                      <td>{row.selected_vendor}</td>
+                      <td>₹{row.selected_price}</td>
+                      <td>{row.best_vendor}</td>
+                      <td>₹{row.best_price}</td>
+                      <td>{row.quantity}</td>
+                      <td style={{ color: "#dc2626", fontWeight: 600 }}>₹{row.leakage}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="panel">
         <div className="panel__header">

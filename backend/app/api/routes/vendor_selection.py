@@ -16,7 +16,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from backend.app.auth.dependencies import get_current_user
+from backend.app.auth.models import User
 from backend.app.core.config import settings
+from backend.app.services import audit_service
 from backend.app.database.session import get_db
 from backend.app.integrations.gmail.mailer import send_email
 from backend.app.integrations.whatsapp import allocation_output
@@ -62,8 +64,13 @@ def select_vendor(
     order_item_id: int,
     vendor_id: int,
     payload: VendorSelectionIn,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> VendorSelectionOut:
+    previous = [
+        {"vendor_id": row.vendor_id, "qty": str(row.quantity_selected)}
+        for row in vendor_selection_service.list_selections_for_item(order_item_id, db)
+    ]
     try:
         selection = vendor_selection_service.upsert_selection(
             order_item_id,
@@ -76,6 +83,16 @@ def select_vendor(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    audit_service.record(
+        db,
+        actor=current_user.username,
+        action="manual_vendor_select",
+        entity_type="order_item",
+        entity_id=order_item_id,
+        previous_value=previous,
+        new_value={"vendor_id": vendor_id, "qty": str(payload.quantity_selected)},
+        reason=f"Customer order {order_id}",
+    )
     return _to_out(selection)
 
 
@@ -87,9 +104,25 @@ def deselect_vendor(
     order_id: int,
     order_item_id: int,
     vendor_id: int,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
+    previous = [
+        {"vendor_id": row.vendor_id, "qty": str(row.quantity_selected)}
+        for row in vendor_selection_service.list_selections_for_item(order_item_id, db)
+        if row.vendor_id == vendor_id
+    ]
     vendor_selection_service.remove_selection(order_item_id, vendor_id, db)
+    audit_service.record(
+        db,
+        actor=current_user.username,
+        action="manual_vendor_deselect",
+        entity_type="order_item",
+        entity_id=order_item_id,
+        previous_value=previous,
+        new_value=None,
+        reason=f"Customer order {order_id}",
+    )
 
 
 def _allocation_report_workbook_bytes(order_id: int, db: Session) -> bytes:

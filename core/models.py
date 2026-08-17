@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Numeric,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -898,3 +899,29 @@ class VendorPurchaseOrderItem(Base):
         CheckConstraint("quantity > 0", name="ck_vendor_po_items_qty_positive"),
         Index("ix_vendor_po_items_purchase_order_id", "purchase_order_id"),
     )
+
+
+class AuditLog(Base):
+    """Management audit trail (Founder spec §24): every MANUAL,
+    management-impacting action -- who did it, when, what changed, and why
+    when a reason was given. Automatic pipeline processing is deliberately
+    NOT audited here (Import History / the File Inbox already record it);
+    this table is for human overrides: manual vendor selection and
+    deselection, data purges, founder contact-registry updates, PO email
+    resends. Append-only -- rows are never updated or deleted by the app."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Who: a web username ("admin") or a WhatsApp actor
+    # ("founder-whatsapp:9170..."). Free text -- survives user deletion.
+    actor: Mapped[str] = mapped_column(nullable=False)
+    action: Mapped[str] = mapped_column(nullable=False)  # e.g. "manual_vendor_select"
+    entity_type: Mapped[str] = mapped_column(nullable=False)  # e.g. "vendor_selection"
+    entity_id: Mapped[str | None] = mapped_column(default=None)
+    previous_value: Mapped[str | None] = mapped_column(Text, default=None)
+    new_value: Mapped[str | None] = mapped_column(Text, default=None)
+    reason: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
