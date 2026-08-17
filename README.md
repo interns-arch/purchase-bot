@@ -375,6 +375,13 @@ The **grouping window** (`WHATSAPP_GROUPING_WINDOW_MINUTES`, default 10): all fi
 - **Stock vs Demand table** (spec §8): per short part — vendor stock, reserved, live remaining, demand, allocated, short, gap, and which vendors carry it.
 - Phase 1 shows **quantities and counts, not money** — price data is absent from most vendor files, and an untraceable figure must not be shown (spec §28). Finance KPIs come with the finance phase.
 
+**Phase 2 additions** (same page, with a Today / 7 / 30 / 90-day period selector):
+
+- **Procurement Funnel** (spec §5): Vendor Stock → Orders → Allocation → POs → Invoices → Delivered, quantity bars + stage-to-stage conversion %, each stage clickable.
+- **Control Towers** (spec §7, §11, §12): Customer Orders (fully/partially/un-allocated, awaiting PO, still-short ageing 0-1h…24h+, customer-wise fill rate) · Purchase Orders (status, fully/partially/not supplied — completeness from the same Delivery Tracking source — unsupplied ageing 0-1d…15d+) · Deliveries (ordered/delivered/short, vendor-wise & part-wise short supply, daily delivery series).
+- **Vendor Scorecard + Stock-Trust** (spec §9, §10): per vendor — declared → allocated → invoiced → delivered → short chain, fulfilment %, trust % (did supply match declaration?), 30-day upload discipline, and a composite score /100 using the spec's weights **renormalised over metrics that have data** (price competitiveness and due-date timeliness are omitted until that data exists — a score is never faked; inactive vendors are omitted, not zeroed).
+- **Trends** (spec §21): daily ordered-vs-allocated lines and stock-received/files-failed bars over the selected window.
+
 ---
 
 ## 9. Settings Page

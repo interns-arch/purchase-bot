@@ -565,6 +565,498 @@ def command_centre_alerts(db: Session = Depends(get_db)) -> list[Alert]:
     return alerts
 
 
+# ===========================================================================
+# Phase 2 -- funnel (§5), control towers (§7, §11, §12), vendor scorecard +
+# stock-trust (§9, §10), trends (§21). Same principles: aggregated queries,
+# quantities/counts only (no un-traceable money), drill links everywhere.
+# ===========================================================================
+
+
+def _window_start(days: int) -> datetime:
+    """IST-midnight-aligned start for a `days` window (days=1 -> today)."""
+    return _ist_today_start_utc() - timedelta(days=max(days - 1, 0))
+
+
+class FunnelStage(BaseModel):
+    stage: str
+    count: int
+    quantity: float
+    conversion_pct: float | None  # vs previous stage's quantity
+    link: str
+
+
+@router.get("/funnel", response_model=list[FunnelStage])
+def command_centre_funnel(days: int = 7, db: Session = Depends(get_db)) -> list[FunnelStage]:
+    """Vendor Stock → Orders → Allocation → PO → Invoice → Delivery, with
+    quantity at every stage and stage-to-stage conversion (spec §5)."""
+    since = _window_start(days)
+
+    stock_count, stock_qty = db.execute(
+        select(func.count(func.distinct(InventoryImport.vendor_id)),
+               func.coalesce(func.sum(VendorInventory.quantity_available), 0))
+        .select_from(VendorInventory)
+        .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+        .where(InventoryImport.created_at >= since)
+    ).one()
+
+    order_ids = list(db.execute(
+        select(CustomerOrder.id).where(CustomerOrder.created_at >= since)
+    ).scalars())
+    ordered, allocated = _order_allocation_totals(order_ids, db)
+
+    po_count, po_qty = db.execute(
+        select(func.count(func.distinct(VendorPurchaseOrder.id)),
+               func.coalesce(func.sum(VendorPurchaseOrderItem.quantity), 0))
+        .select_from(VendorPurchaseOrder)
+        .outerjoin(VendorPurchaseOrderItem,
+                   VendorPurchaseOrderItem.purchase_order_id == VendorPurchaseOrder.id)
+        .where(VendorPurchaseOrder.created_at >= since)
+    ).one()
+
+    invoice_count, invoiced_qty = db.execute(
+        select(func.count(func.distinct(VendorInvoiceImport.id)),
+               func.coalesce(func.sum(VendorInvoiceLineResult.quantity_invoiced), 0))
+        .select_from(VendorInvoiceImport)
+        .outerjoin(VendorInvoiceLineResult,
+                   VendorInvoiceLineResult.invoice_import_id == VendorInvoiceImport.id)
+        .where(VendorInvoiceImport.created_at >= since)
+    ).one()
+
+    tracking = delivery_tracking_service.compute_summary(
+        delivery_tracking_service.compute_rows(db)
+    )
+
+    stages_raw = [
+        ("Vendor Stock", stock_count, float(stock_qty), "/vendor-inventory"),
+        ("Customer Orders", len(order_ids), float(ordered), "/customer-orders"),
+        ("Allocation", len(order_ids), float(allocated), "/vendor-comparison"),
+        ("Purchase Orders", po_count, float(po_qty), "/purchase-orders"),
+        ("Invoices", invoice_count, float(invoiced_qty), "/vendor-invoices"),
+        ("Delivered", tracking.complete_count + tracking.partial_count,
+         float(tracking.total_delivered_qty), "/delivery-tracking"),
+    ]
+    stages: list[FunnelStage] = []
+    previous_qty: float | None = None
+    for name, count, quantity, link in stages_raw:
+        conversion = (
+            round(quantity / previous_qty * 100, 1)
+            if previous_qty and quantity is not None
+            else None
+        )
+        stages.append(FunnelStage(
+            stage=name, count=count, quantity=quantity, conversion_pct=conversion, link=link,
+        ))
+        previous_qty = quantity if quantity else previous_qty
+    return stages
+
+
+class OrderTower(BaseModel):
+    total: int
+    fully_allocated: int
+    partially_allocated: int
+    unallocated: int
+    awaiting_po: int
+    ageing: dict[str, int]  # bucket label -> count of orders STILL short
+    customer_fill: list[dict]  # {customer, ordered, allocated, fill_pct}
+
+
+@router.get("/order-tower", response_model=OrderTower)
+def command_centre_order_tower(days: int = 7, db: Session = Depends(get_db)) -> OrderTower:
+    """Customer Order Control Tower (spec §7): allocation status buckets,
+    ageing of still-short orders, customer-wise fill rate."""
+    since = _window_start(days)
+    now_utc = datetime.utcnow()
+    orders = db.execute(
+        select(CustomerOrder, Customer)
+        .outerjoin(Customer, CustomerOrder.customer_id == Customer.id)
+        .where(CustomerOrder.created_at >= since)
+    ).all()
+
+    po_order_ids = set(db.execute(
+        select(func.distinct(VendorPurchaseOrder.customer_order_id))
+    ).scalars())
+
+    buckets = {"0-1h": 0, "1-3h": 0, "3-6h": 0, "6-24h": 0, "24h+": 0}
+    fully = partially = unallocated = awaiting_po = 0
+    per_customer: dict[str, dict] = {}
+    for order, customer in orders:
+        requested, allocated = _order_allocation_totals([order.id], db)
+        who = customer.name if customer else order.file_name
+        entry = per_customer.setdefault(who, {"ordered": Decimal(0), "allocated": Decimal(0)})
+        entry["ordered"] += requested
+        entry["allocated"] += allocated
+
+        if requested <= 0:
+            continue
+        if allocated <= 0:
+            unallocated += 1
+        elif allocated >= requested:
+            fully += 1
+            if order.id not in po_order_ids:
+                awaiting_po += 1
+        else:
+            partially += 1
+            if order.id not in po_order_ids:
+                awaiting_po += 1
+
+        if allocated < requested:
+            age_hours = (now_utc - order.created_at).total_seconds() / 3600
+            if age_hours <= 1:
+                buckets["0-1h"] += 1
+            elif age_hours <= 3:
+                buckets["1-3h"] += 1
+            elif age_hours <= 6:
+                buckets["3-6h"] += 1
+            elif age_hours <= 24:
+                buckets["6-24h"] += 1
+            else:
+                buckets["24h+"] += 1
+
+    customer_fill = [
+        {
+            "customer": who,
+            "ordered": float(entry["ordered"]),
+            "allocated": float(entry["allocated"]),
+            "fill_pct": round(float(entry["allocated"] / entry["ordered"] * 100), 1)
+            if entry["ordered"]
+            else None,
+        }
+        for who, entry in sorted(per_customer.items(), key=lambda kv: kv[0].lower())
+    ]
+    return OrderTower(
+        total=len(orders),
+        fully_allocated=fully,
+        partially_allocated=partially,
+        unallocated=unallocated,
+        awaiting_po=awaiting_po,
+        ageing=buckets,
+        customer_fill=customer_fill,
+    )
+
+
+class PoTower(BaseModel):
+    created_in_window: int
+    generated: int
+    emailed: int
+    email_failed: int
+    complete: int
+    partial: int
+    not_supplied: int
+    ageing: dict[str, int]
+
+
+@router.get("/po-tower", response_model=PoTower)
+def command_centre_po_tower(days: int = 30, db: Session = Depends(get_db)) -> PoTower:
+    """Purchase Order Control Tower (spec §11): status, supply completeness
+    (from the same Delivery Tracking source, spec §12 rule) and ageing."""
+    since = _window_start(days)
+    now_utc = datetime.utcnow()
+    pos = db.execute(
+        select(VendorPurchaseOrder).where(VendorPurchaseOrder.created_at >= since)
+    ).scalars().all()
+
+    # Delivery completeness per (vendor, part), from the authoritative source.
+    tracking_by_key = {
+        (row.vendor_id, row.part_id): row
+        for row in delivery_tracking_service.compute_rows(db)
+    }
+
+    status_counts = {"GENERATED": 0, "EMAILED": 0, "EMAIL_FAILED": 0}
+    complete = partial = not_supplied = 0
+    ageing = {"0-1d": 0, "2-3d": 0, "4-7d": 0, "8-15d": 0, "15d+": 0}
+    for po in pos:
+        status_counts[po.status.value] = status_counts.get(po.status.value, 0) + 1
+        items = db.execute(
+            select(VendorPurchaseOrderItem).where(
+                VendorPurchaseOrderItem.purchase_order_id == po.id
+            )
+        ).scalars().all()
+        delivered_all = bool(items)
+        has_delivery = False
+        for item in items:
+            row = tracking_by_key.get((po.vendor_id, item.part_id))
+            if row is not None and row.delivered_qty > 0:
+                has_delivery = True
+            if row is None or row.delivered_qty < row.ordered_qty:
+                delivered_all = False
+        if items and delivered_all:
+            complete += 1
+        elif has_delivery:
+            partial += 1
+        else:
+            not_supplied += 1
+            age_days = (now_utc - po.created_at).total_seconds() / 86400
+            if age_days <= 1:
+                ageing["0-1d"] += 1
+            elif age_days <= 3:
+                ageing["2-3d"] += 1
+            elif age_days <= 7:
+                ageing["4-7d"] += 1
+            elif age_days <= 15:
+                ageing["8-15d"] += 1
+            else:
+                ageing["15d+"] += 1
+
+    return PoTower(
+        created_in_window=len(pos),
+        generated=status_counts.get("GENERATED", 0),
+        emailed=status_counts.get("EMAILED", 0),
+        email_failed=status_counts.get("EMAIL_FAILED", 0),
+        complete=complete,
+        partial=partial,
+        not_supplied=not_supplied,
+        ageing=ageing,
+    )
+
+
+class DeliveryTower(BaseModel):
+    ordered_qty: float
+    delivered_qty: float
+    short_qty: float
+    fulfilment_pct: float | None
+    complete_lines: int
+    partial_lines: int
+    not_delivered_lines: int
+    vendor_short: list[dict]  # {vendor, short_qty}
+    part_short: list[dict]  # {part, short_qty}
+    daily: list[dict]  # {date, delivered_qty}
+
+
+@router.get("/delivery-tower", response_model=DeliveryTower)
+def command_centre_delivery_tower(days: int = 30, db: Session = Depends(get_db)) -> DeliveryTower:
+    """Delivery Control Tower (spec §12) -- entirely from the existing
+    Delivery Tracking computation, never a parallel calculation."""
+    rows = delivery_tracking_service.compute_rows(db)
+    summary = delivery_tracking_service.compute_summary(rows)
+
+    vendor_short: dict[str, Decimal] = {}
+    part_short: dict[str, Decimal] = {}
+    for row in rows:
+        if row.short_qty > 0:
+            vendor_short[row.vendor_name] = vendor_short.get(row.vendor_name, Decimal(0)) + row.short_qty
+            part_short[row.part_number] = part_short.get(row.part_number, Decimal(0)) + row.short_qty
+
+    since_date = (now_ist() - timedelta(days=days)).date()
+    daily = delivery_tracking_service.compute_daily_deliveries(db, date_from=since_date)
+
+    total_ordered = float(summary.total_ordered_qty)
+    return DeliveryTower(
+        ordered_qty=total_ordered,
+        delivered_qty=float(summary.total_delivered_qty),
+        short_qty=float(summary.total_short_qty),
+        fulfilment_pct=round(float(summary.total_delivered_qty) / total_ordered * 100, 1)
+        if total_ordered
+        else None,
+        complete_lines=summary.complete_count,
+        partial_lines=summary.partial_count,
+        not_delivered_lines=summary.not_delivered_count,
+        vendor_short=[
+            {"vendor": name, "short_qty": float(qty)}
+            for name, qty in sorted(vendor_short.items(), key=lambda kv: -kv[1])[:10]
+        ],
+        part_short=[
+            {"part": part, "short_qty": float(qty)}
+            for part, qty in sorted(part_short.items(), key=lambda kv: -kv[1])[:10]
+        ],
+        daily=[
+            {"date": point.delivery_date.isoformat(), "delivered_qty": float(point.delivered_qty)}
+            for point in daily
+        ],
+    )
+
+
+class VendorScore(BaseModel):
+    vendor_id: int
+    vendor: str
+    vendor_code: str | None
+    declared_qty: float
+    allocated_qty: float
+    invoiced_qty: float
+    delivered_qty: float
+    short_qty: float
+    fulfilment_pct: float | None  # delivered vs allocated
+    trust_pct: float | None  # spec §10: does supply match declaration chain?
+    submissions_30d: int
+    discipline_pct: float | None  # submission days / 30
+    score: float | None  # weighted composite, /100
+    rank: int | None = None
+
+
+@router.get("/vendor-scorecard", response_model=list[VendorScore])
+def command_centre_vendor_scorecard(db: Session = Depends(get_db)) -> list[VendorScore]:
+    """Vendor scorecard + stock-trust (spec §9, §10). The composite score
+    uses the spec's weights RENORMALISED over the metrics that exist today
+    (price competitiveness and due-date timeliness have no data yet):
+    fulfilment 25, trust 25, availability 10, discipline 5 -> scaled to 100.
+    A vendor with no allocations yet gets no score, never a fake 0."""
+    month_ago = datetime.utcnow() - timedelta(days=30)
+
+    declared = dict(db.execute(
+        select(VendorInventory.vendor_id,
+               func.coalesce(func.sum(VendorInventory.quantity_available), 0))
+        .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
+        .where(InventoryImport.is_active.is_(True))
+        .group_by(VendorInventory.vendor_id)
+    ).all())
+    allocated = dict(db.execute(
+        select(VendorSelection.vendor_id,
+               func.coalesce(func.sum(VendorSelection.quantity_selected), 0))
+        .group_by(VendorSelection.vendor_id)
+    ).all())
+    invoiced = dict(db.execute(
+        select(VendorInvoiceImport.vendor_id,
+               func.coalesce(func.sum(VendorInvoiceLineResult.quantity_invoiced), 0))
+        .join(VendorInvoiceLineResult,
+              VendorInvoiceLineResult.invoice_import_id == VendorInvoiceImport.id)
+        .where(VendorInvoiceImport.vendor_id.isnot(None))
+        .group_by(VendorInvoiceImport.vendor_id)
+    ).all())
+    submissions = dict(db.execute(
+        select(InventoryImport.vendor_id, func.count(func.distinct(
+            func.date(InventoryImport.created_at))))
+        .where(InventoryImport.created_at >= month_ago)
+        .group_by(InventoryImport.vendor_id)
+    ).all())
+
+    tracking_rows = delivery_tracking_service.compute_rows(db)
+    delivered: dict[int, Decimal] = {}
+    short: dict[int, Decimal] = {}
+    for row in tracking_rows:
+        delivered[row.vendor_id] = delivered.get(row.vendor_id, Decimal(0)) + row.delivered_qty
+        short[row.vendor_id] = short.get(row.vendor_id, Decimal(0)) + row.short_qty
+
+    max_declared = max((float(v) for v in declared.values()), default=0.0)
+
+    vendors = db.execute(select(Vendor).order_by(Vendor.name)).scalars().all()
+    scores: list[VendorScore] = []
+    for vendor in vendors:
+        d = float(declared.get(vendor.id, 0))
+        a = float(allocated.get(vendor.id, 0))
+        inv = float(invoiced.get(vendor.id, 0))
+        dl = float(delivered.get(vendor.id, 0))
+        sh = float(short.get(vendor.id, 0))
+        subs = int(submissions.get(vendor.id, 0))
+        if d == 0 and a == 0 and dl == 0:
+            continue  # nothing to judge -- omit rather than fake
+
+        fulfilment = round(min(dl / a, 1.0) * 100, 1) if a else None
+        # Trust (§10): of what we allocated against their declaration, how
+        # much actually arrived (invoiced counts when no delivery yet).
+        arrived = max(dl, inv)
+        trust = round(min(arrived / a, 1.0) * 100, 1) if a else None
+        availability = round(d / max_declared * 100, 1) if max_declared else None
+        discipline = round(min(subs / 30, 1.0) * 100, 1)
+
+        weighted: list[tuple[float, float]] = []  # (weight, value)
+        if fulfilment is not None:
+            weighted.append((25, fulfilment))
+        if trust is not None:
+            weighted.append((25, trust))
+        if availability is not None:
+            weighted.append((10, availability))
+        weighted.append((5, discipline))
+        total_weight = sum(w for w, _ in weighted)
+        score = round(sum(w * v for w, v in weighted) / total_weight, 1) if total_weight else None
+
+        scores.append(VendorScore(
+            vendor_id=vendor.id,
+            vendor=vendor.name,
+            vendor_code=vendor.vendor_code,
+            declared_qty=d,
+            allocated_qty=a,
+            invoiced_qty=inv,
+            delivered_qty=dl,
+            short_qty=sh,
+            fulfilment_pct=fulfilment,
+            trust_pct=trust,
+            submissions_30d=subs,
+            discipline_pct=discipline,
+            score=score,
+        ))
+
+    scores.sort(key=lambda s: (s.score is None, -(s.score or 0)))
+    for index, entry in enumerate(scores):
+        if entry.score is not None:
+            entry.rank = index + 1
+    return scores
+
+
+class TrendPoint(BaseModel):
+    date: str
+    orders_qty: float
+    allocated_qty: float
+    stock_qty: float
+    fill_rate_pct: float | None
+    files_failed: int
+
+
+@router.get("/trends", response_model=list[TrendPoint])
+def command_centre_trends(days: int = 30, db: Session = Depends(get_db)) -> list[TrendPoint]:
+    """Daily management trends (spec §21): demand, allocation, fill rate,
+    incoming stock, failures -- one grouped query per series."""
+    since = _window_start(days)
+
+    ordered_by_day = {
+        str(day): float(qty)
+        for day, qty in db.execute(
+            select(func.date(CustomerOrder.created_at),
+                   func.coalesce(func.sum(CustomerOrderItem.quantity_requested), 0))
+            .join(CustomerOrderItem, CustomerOrderItem.customer_order_id == CustomerOrder.id)
+            .where(CustomerOrder.created_at >= since)
+            .group_by(func.date(CustomerOrder.created_at))
+        )
+    }
+    allocated_by_day = {
+        str(day): float(qty)
+        for day, qty in db.execute(
+            select(func.date(CustomerOrder.created_at),
+                   func.coalesce(func.sum(VendorSelection.quantity_selected), 0))
+            .join(CustomerOrderItem, CustomerOrderItem.customer_order_id == CustomerOrder.id)
+            .join(VendorSelection,
+                  VendorSelection.customer_order_item_id == CustomerOrderItem.id)
+            .where(CustomerOrder.created_at >= since)
+            .group_by(func.date(CustomerOrder.created_at))
+        )
+    }
+    stock_by_day = {
+        str(day): float(qty)
+        for day, qty in db.execute(
+            select(func.date(InventoryImport.created_at),
+                   func.coalesce(func.sum(VendorInventory.quantity_available), 0))
+            .join(VendorInventory, VendorInventory.import_id == InventoryImport.id)
+            .where(InventoryImport.created_at >= since)
+            .group_by(func.date(InventoryImport.created_at))
+        )
+    }
+    failed_by_day = {
+        str(day): count
+        for day, count in db.execute(
+            select(func.date(IncomingDocument.received_at), func.count())
+            .where(IncomingDocument.received_at >= since,
+                   IncomingDocument.status.in_(["FAILED", "DOWNLOAD_FAILED"]))
+            .group_by(func.date(IncomingDocument.received_at))
+        )
+    }
+
+    points: list[TrendPoint] = []
+    day = since.date()
+    end = datetime.utcnow().date()
+    while day <= end:
+        key = day.isoformat()
+        ordered = ordered_by_day.get(key, 0.0)
+        allocated_qty = allocated_by_day.get(key, 0.0)
+        points.append(TrendPoint(
+            date=key,
+            orders_qty=ordered,
+            allocated_qty=allocated_qty,
+            stock_qty=stock_by_day.get(key, 0.0),
+            fill_rate_pct=round(allocated_qty / ordered * 100, 1) if ordered else None,
+            files_failed=failed_by_day.get(key, 0),
+        ))
+        day += timedelta(days=1)
+    return points
+
+
 @router.get("/stock-gaps", response_model=list[StockGapRow])
 def command_centre_stock_gaps(db: Session = Depends(get_db)) -> list[StockGapRow]:
     """Spec §8: per part -- imported stock, live reservations, live
