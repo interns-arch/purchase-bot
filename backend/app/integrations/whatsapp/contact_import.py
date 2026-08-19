@@ -248,25 +248,52 @@ REGISTER_COMMAND_KEY = "register"
 TEAM_COMMAND_KEY = "register_team"
 
 TEAM_COMMANDS = {"register team", "team", "update team", "purchase team"}
+REMOVE_TEAM_COMMANDS = {"remove team", "remove team member", "remove from team"}
+REMOVE_TEAM_COMMAND_KEY = "remove_team"
 
 
 def is_team_command_text(text: str | None) -> bool:
     return (text or "").strip().lower() in TEAM_COMMANDS
 
 
+def is_remove_team_command_text(text: str | None) -> bool:
+    return (text or "").strip().lower() in REMOVE_TEAM_COMMANDS
+
+
+def _team_roster_lines(session) -> list[str]:
+    """The full team as reply lines -- every team reply ends with the final
+    roster so the Founder always sees exactly who receives POs now."""
+    from backend.app.integrations.whatsapp.models import PurchaseTeamMember
+    from sqlalchemy import select as _select
+
+    members = list(
+        session.execute(
+            _select(PurchaseTeamMember).order_by(PurchaseTeamMember.name)
+        ).scalars()
+    )
+    if not members:
+        return ["Current team: (empty — nobody receives POs)"]
+    lines = [f"Current team ({len(members)} member(s), all receive every PO):"]
+    lines.extend(f"• {m.name} ({m.whatsapp_number})" for m in members)
+    return lines
+
+
 def apply_team_update(rows: list[tuple[str, list[str]]], session) -> tuple[str, dict]:
-    """REPLACE the purchase-team list with the uploaded Name + Number sheet
-    (the Founder's clarification: internal purchasers who receive every PO
-    as a CC). Same parser as the vendor contact flow; audited."""
+    """UPDATE the purchase-team list from a Name + Number sheet: listed
+    members are added (or their name/number corrected); members NOT in the
+    sheet are left untouched -- the Founder can send just the change. Removal
+    is its own explicit flow (`remove team`). Same parser as the vendor
+    contact flow; audited."""
     from backend.app.integrations.whatsapp.models import PurchaseTeamMember
     from backend.app.services import audit_service
     from sqlalchemy import select as _select
 
-    for existing in session.execute(_select(PurchaseTeamMember)).scalars():
-        session.delete(existing)
-    session.flush()
+    existing = list(session.execute(_select(PurchaseTeamMember)).scalars())
+    by_number = {m.whatsapp_number: m for m in existing}
+    by_name = {m.name.strip().lower(): m for m in existing}
 
     added: list[str] = []
+    updated: list[str] = []
     skipped: list[str] = []
     seen: set[str] = set()
     for name, numbers in rows:
@@ -275,37 +302,128 @@ def apply_team_update(rows: list[tuple[str, list[str]]], session) -> tuple[str, 
             skipped.append(f"{name} — no usable number")
             continue
         if number in seen:
-            skipped.append(f"{name} — duplicate number")
+            skipped.append(f"{name} — duplicate number in the sheet")
             continue
         seen.add(number)
-        session.add(PurchaseTeamMember(name=name, whatsapp_number=number))
+
+        member = by_number.get(number)
+        if member is not None:
+            if member.name != name:
+                updated.append(f"{member.name} → {name} ({number})")
+                member.name = name
+                by_name[name.strip().lower()] = member
+            continue  # same name + number: already on the team, nothing to do
+        member = by_name.get(name.strip().lower())
+        if member is not None:
+            updated.append(f"{member.name}: {member.whatsapp_number} → {number}")
+            del by_number[member.whatsapp_number]
+            member.whatsapp_number = number
+            by_number[number] = member
+            continue
+        member = PurchaseTeamMember(name=name, whatsapp_number=number)
+        session.add(member)
+        by_number[number] = member
+        by_name[name.strip().lower()] = member
         added.append(f"{name} ({number})")
     session.flush()
 
-    lines = [f"✅ Purchase team updated — {len(added)} member(s)."]
-    lines.extend(f"• {entry}" for entry in added)
+    lines = [
+        f"✅ Purchase team updated — {len(added)} added, {len(updated)} changed. "
+        "Members not in your sheet were kept."
+    ]
+    if added:
+        lines.append("")
+        lines.append("🆕 Added:")
+        lines.extend(f"• {entry}" for entry in added)
+    if updated:
+        lines.append("")
+        lines.append("✏️ Changed:")
+        lines.extend(f"• {entry}" for entry in updated)
     if skipped:
         lines.append("")
         lines.append("ℹ️ Skipped:")
         lines.extend(f"• {entry}" for entry in skipped)
     lines.append("")
-    lines.append("Every generated PO will now be sent to these members on WhatsApp.")
+    lines.extend(_team_roster_lines(session))
+    lines.append("")
+    lines.append('To remove someone, text "remove team" and send their row.')
 
     audit_service.record(
         session,
         actor="founder-whatsapp",
         action="purchase_team_update",
         entity_type="purchase_team",
-        new_value=added,
+        new_value={"added": added, "updated": updated, "skipped": skipped},
         reason=f"{len(rows)} row(s) in the uploaded team list",
     )
-    return "\n".join(lines), {"added": len(added), "skipped": len(skipped)}
+    return "\n".join(lines), {
+        "added": len(added),
+        "updated": len(updated),
+        "skipped": len(skipped),
+    }
+
+
+def apply_team_removal(rows: list[tuple[str, list[str]]], session) -> tuple[str, dict]:
+    """REMOVE the listed members from the purchase team (matched by number
+    when the row has one, otherwise by name). Everyone else stays. Audited."""
+    from backend.app.integrations.whatsapp.models import PurchaseTeamMember
+    from backend.app.services import audit_service
+    from sqlalchemy import select as _select
+
+    existing = list(session.execute(_select(PurchaseTeamMember)).scalars())
+    by_number = {m.whatsapp_number: m for m in existing}
+    by_name = {m.name.strip().lower(): m for m in existing}
+
+    removed: list[str] = []
+    not_found: list[str] = []
+    for name, numbers in rows:
+        member = None
+        for number in numbers:
+            member = by_number.get(number)
+            if member is not None:
+                break
+        if member is None:
+            member = by_name.get(name.strip().lower())
+        if member is None:
+            not_found.append(name)
+            continue
+        by_number.pop(member.whatsapp_number, None)
+        by_name.pop(member.name.strip().lower(), None)
+        removed.append(f"{member.name} ({member.whatsapp_number})")
+        session.delete(member)
+    session.flush()
+
+    lines = [f"✅ Removed {len(removed)} member(s) from the purchase team."]
+    lines.extend(f"• {entry}" for entry in removed)
+    if not_found:
+        lines.append("")
+        lines.append(f"⚠️ Not on the team: {', '.join(not_found)}")
+    lines.append("")
+    lines.extend(_team_roster_lines(session))
+
+    audit_service.record(
+        session,
+        actor="founder-whatsapp",
+        action="purchase_team_removal",
+        entity_type="purchase_team",
+        previous_value={"removed": removed},
+        new_value=None,
+        reason=f"{len(rows)} row(s) in the uploaded removal list",
+    )
+    return "\n".join(lines), {"removed": len(removed), "not_found": len(not_found)}
 
 
 def has_pending_team_command(sender: str, window_minutes: float, session) -> bool:
     return (
         command_store.get_fresh_command(sender, window_minutes, session)
         == TEAM_COMMAND_KEY
+    )
+
+
+def has_pending_remove_team_command(sender: str, window_minutes: float, session) -> bool:
+    return (
+        command_store.get_fresh_command(sender, window_minutes, session)
+        == REMOVE_TEAM_COMMAND_KEY
     )
 
 

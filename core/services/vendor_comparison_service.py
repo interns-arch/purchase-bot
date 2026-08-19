@@ -212,6 +212,14 @@ def compare_vendors(
         ):
             offer_index.setdefault(alias_norm, by_part_id[alias_part_id])
 
+    # FOUNDER-DECLARED equivalences last (`part_link_service`): numbers a
+    # human has stated are the same part ("MF390300ML32" / "MF390300ML")
+    # become extra keys onto the offers their partner already found. Added
+    # after aliases so a real canonical/alias match always wins.
+    from core.services import part_link_service
+
+    part_link_service.apply_links_to_index(offer_index, session)
+
     result = VendorComparisonResult()
     result.summary.customer_order_items = len(input_rows)
 

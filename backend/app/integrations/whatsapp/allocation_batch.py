@@ -32,6 +32,7 @@ import io
 import threading
 
 from backend.app.integrations.whatsapp import outbound
+from backend.app.integrations.whatsapp import recipients as recipients_service
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.notifications import broker
 from core.db import get_session
@@ -168,11 +169,13 @@ def _run_batch(order_ids: list[int]) -> None:
         )
         return
 
-    recipients = (
-        whatsapp_settings.admin_phone_numbers
-        if whatsapp_settings.send_allocation_report
-        else []
-    )
+    # Founder + purchase team (Founder's rule, 18 Aug 2026) -- see
+    # `recipients.internal_file_recipients`. Read on this module's own
+    # session so the whole batch uses one database entry point.
+    recipients: list[str] = []
+    if whatsapp_settings.send_allocation_report:
+        with get_session() as session:
+            recipients = recipients_service.internal_file_recipients(session)
     if not recipients:
         logger.info(
             "Allocation report not sent to WhatsApp for orders %s (send_allocation_report=%s, "

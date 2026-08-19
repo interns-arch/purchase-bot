@@ -37,7 +37,12 @@ class GoogleSheetsSettings:
     daily_reset_enabled: bool = (
         os.environ.get("GOOGLE_SHEETS_DAILY_RESET_ENABLED", "true").strip().lower() == "true"
     )
-    daily_reset_time: str = os.environ.get("GOOGLE_SHEETS_DAILY_RESET_TIME", "06:00").strip()
+    # 09:15 IST (Founder, 18 Aug 2026 -- was 06:00): late enough that the
+    # 09:00 morning stock request has gone out, so a vendor who replies
+    # promptly keeps their tab. Sheet-only: clearing a tab never touches the
+    # vendor's stock in the database, so an order arriving at 08:30 still
+    # allocates against yesterday's stock exactly as before.
+    daily_reset_time: str = os.environ.get("GOOGLE_SHEETS_DAILY_RESET_TIME", "09:15").strip()
 
     # OAuth credentials are shared with the Gmail integration (same Google
     # account) -- read through `gmail_settings` rather than re-reading the

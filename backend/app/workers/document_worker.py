@@ -87,7 +87,25 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         send_reply_safe(
             message.sender,
             "Send the contact list Excel now — one row per vendor: "
-            "Vendor Name + WhatsApp number(s).",
+            "Vendor Name + WhatsApp number(s). Only the vendors in the "
+            "sheet are updated — every other vendor stays as it is.",
+        )
+        return
+
+    # Founder command "remove team": the NEXT Excel lists members to REMOVE
+    # from the purchase team (checked before "register team" -- "remove team"
+    # must never be mistaken for an update).
+    if daily_stock.is_admin_sender(message.sender) and contact_import.is_remove_team_command_text(
+        message.text
+    ):
+        with get_session() as session:
+            command_store.set_command(
+                message.sender, contact_import.REMOVE_TEAM_COMMAND_KEY, session
+            )
+        send_reply_safe(
+            message.sender,
+            "Send the Excel of members to REMOVE from the purchase team — "
+            "one row per member (Name, or Name + Number). Everyone else stays.",
         )
         return
 
@@ -103,7 +121,9 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         send_reply_safe(
             message.sender,
             "Send the purchase-team Excel now — one row per member: "
-            "Name + WhatsApp number. The list REPLACES the current team.",
+            "Name + WhatsApp number. New members are ADDED and listed ones "
+            "updated; members not in the sheet are kept. "
+            'To remove someone, text "remove team" instead.',
         )
         return
 
@@ -231,6 +251,12 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
             pending_team = contact_import.has_pending_team_command(
                 message.sender, whatsapp_settings.grouping_window_minutes, session
             )
+            pending_remove_team = contact_import.has_pending_remove_team_command(
+                message.sender, whatsapp_settings.grouping_window_minutes, session
+            )
+        if caption_lower in contact_import.REMOVE_TEAM_COMMANDS or pending_remove_team:
+            _handle_team_update_upload(message, remove=True)
+            return
         if caption_lower in contact_import.TEAM_COMMANDS or pending_team:
             _handle_team_update_upload(message)
             return
@@ -305,13 +331,17 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
 _SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 
 
-def _handle_team_update_upload(message: IncomingWhatsAppMessage) -> None:
-    """A purchase-team list from an admin: Name + WhatsApp number rows
-    REPLACE the current team (they receive every generated PO)."""
+def _handle_team_update_upload(
+    message: IncomingWhatsAppMessage, *, remove: bool = False
+) -> None:
+    """A purchase-team list from an admin. Update mode ADDS/CORRECTS the
+    listed members (rows not in the sheet are kept); remove mode DELETES the
+    listed members. Team members receive every generated PO."""
     logger.info(
-        "WhatsApp file '%s' from admin %s taken as the PURCHASE TEAM list.",
+        "WhatsApp file '%s' from admin %s taken as the PURCHASE TEAM %s list.",
         message.filename,
         message.sender,
+        "REMOVAL" if remove else "update",
     )
     try:
         client = WhatsAppClient(whatsapp_settings)
@@ -324,8 +354,11 @@ def _handle_team_update_upload(message: IncomingWhatsAppMessage) -> None:
             )
             return
         with get_session() as session:
-            reply, stats = contact_import.apply_team_update(rows, session)
-        logger.info("Purchase team updated: %s", stats)
+            if remove:
+                reply, stats = contact_import.apply_team_removal(rows, session)
+            else:
+                reply, stats = contact_import.apply_team_update(rows, session)
+        logger.info("Purchase team %s: %s", "removal" if remove else "update", stats)
     except Exception:
         logger.exception("Purchase team update failed for %s.", message.filename)
         send_reply_safe(

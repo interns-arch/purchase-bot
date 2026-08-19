@@ -927,6 +927,30 @@ class AuditLog(Base):
     __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
 
 
+class PartNumberLink(Base):
+    """A FOUNDER-DECLARED equivalence between part numbers that name the same
+    physical part but differ in text -- e.g. 'MF390300ML32' and 'MF390300ML'.
+
+    Normal alias discovery cannot see these: `PartAlias` only learns pairs a
+    vendor states side by side in one row, and part-number normalisation only
+    strips special characters (so a trailing '32' still makes two different
+    parts, correctly -- 'ML32' and 'ML33' really are different items). This
+    table is the one place where a human says "these two are the same", and
+    nothing is ever inferred into it.
+
+    Every number in one equivalence shares a `group_key`, so three or more
+    spellings of one part link together and declaring A=B then B=C makes A=C.
+    Numbers are stored normalised (`normalise_part_number`)."""
+
+    __tablename__ = "part_number_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized_part_number: Mapped[str] = mapped_column(unique=True, index=True)
+    group_key: Mapped[str] = mapped_column(index=True, nullable=False)
+    declared_by: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class VendorNameAlias(Base):
     """A REMEMBERED alternative name for a vendor (Founder's rule). Created
     automatically when a duplicate vendor is merged: the duplicate's name

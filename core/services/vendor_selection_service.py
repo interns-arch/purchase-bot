@@ -55,21 +55,28 @@ def _matchable_part_numbers(normalized_part_number: str, session: Session) -> li
     vendor's ALTERNATE number ("Root Part Num" / OEM number) lock and consume
     the very same inventory row the primary number would -- one part, one
     reservation ledger, whichever number the customer wrote."""
+    from core.services import part_link_service
+
+    # A FOUNDER-DECLARED equivalence ("MF390300ML32 and MF390300ML are the
+    # same part") widens the search before the Part graph is walked, so both
+    # spellings reach each other's inventory rows and share ONE reservation
+    # ledger -- ordering 20 under either number leaves the same remainder.
+    seeds = {normalized_part_number}
+    seeds.update(part_link_service.linked_numbers(seeds, session))
+
     part_ids = set(
         session.execute(
-            select(Part.id).where(Part.canonical_part_number == normalized_part_number)
+            select(Part.id).where(Part.canonical_part_number.in_(seeds))
         ).scalars()
     )
     part_ids.update(
         session.execute(
-            select(PartAlias.part_id).where(
-                PartAlias.normalized_part_number == normalized_part_number
-            )
+            select(PartAlias.part_id).where(PartAlias.normalized_part_number.in_(seeds))
         ).scalars()
     )
     if not part_ids:
-        return [normalized_part_number]
-    numbers = {normalized_part_number}
+        return list(seeds)
+    numbers = set(seeds)
     numbers.update(
         session.execute(
             select(Part.canonical_part_number).where(Part.id.in_(part_ids))
@@ -80,6 +87,9 @@ def _matchable_part_numbers(normalized_part_number: str, session: Session) -> li
             select(PartAlias.normalized_part_number).where(PartAlias.part_id.in_(part_ids))
         ).scalars()
     )
+    # Numbers reached through the Part graph may themselves be declared
+    # equivalent to others -- one more pass closes the set.
+    numbers.update(part_link_service.linked_numbers(numbers, session))
     return list(numbers)
 
 

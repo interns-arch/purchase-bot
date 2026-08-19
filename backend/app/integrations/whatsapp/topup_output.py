@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 
 from backend.app.integrations.whatsapp import outbound
+from backend.app.integrations.whatsapp import recipients as recipients_service
 from backend.app.integrations.whatsapp.allocation_batch import order_identity
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from core.db import get_session
@@ -63,12 +64,14 @@ def send_topup_report(result) -> bool:
                 "WHATSAPP_SEND_ALLOCATION_REPORT=false -- reallocation workbook not sent."
             )
             return False
-        recipients = whatsapp_settings.admin_phone_numbers
+        with get_session() as session:
+            # Founder + purchase team (Founder's rule, 18 Aug 2026): the
+            # reallocation workbook reaches the same people as the allocation
+            # one. Read on THIS session -- never opening a second one.
+            recipients = recipients_service.internal_file_recipients(session)
+            workbook, labels = build_reallocation_workbook(result.order_ids, session)
         if not recipients:
             return False
-
-        with get_session() as session:
-            workbook, labels = build_reallocation_workbook(result.order_ids, session)
         if workbook is None:
             return False
 
