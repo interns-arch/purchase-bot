@@ -7,9 +7,6 @@ import { IntegrationNotifications } from "./components/IntegrationNotifications"
 
 // Lazy-loaded so each page is its own chunk instead of one large bundle.
 const LoginPage = lazy(() => import("./pages/LoginPage").then((m) => ({ default: m.LoginPage })));
-const DashboardPage = lazy(() =>
-  import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage }))
-);
 const VendorInventoryPage = lazy(() =>
   import("./pages/VendorInventoryPage").then((m) => ({ default: m.VendorInventoryPage }))
 );
@@ -64,14 +61,10 @@ function App() {
           <Suspense fallback={null}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
-            <Route
-              path="/dashboard"
-              element={
-                <ProtectedRoute>
-                  <DashboardPage />
-                </ProtectedRoute>
-              }
-            />
+            {/* The old Dashboard duplicated Command Centre, so it was
+                removed from the menu. The path stays alive as a redirect so
+                existing bookmarks and links still land somewhere useful. */}
+            <Route path="/dashboard" element={<Navigate to="/command-centre" replace />} />
             <Route
               path="/vendor-inventory"
               element={
@@ -184,8 +177,8 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/" element={<Navigate to="/command-centre" replace />} />
+            <Route path="*" element={<Navigate to="/command-centre" replace />} />
           </Routes>
           </Suspense>
         </AuthProvider>

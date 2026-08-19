@@ -16,7 +16,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from core.hashing import sha256_of_file
 from core.ingestion.column_detector import (
@@ -41,6 +41,7 @@ from core.models import (
     ImportErrorRecord,
     ImportStatus,
     InventoryImport,
+    Part,
     PartAlias,
     Vendor,
     VendorInventory,
@@ -802,48 +803,86 @@ def get_master_inventory(session: Session) -> list[MasterInventoryRow]:
     if not active_import_ids:
         return []
 
-    inventory_rows = session.execute(
-        select(VendorInventory, InventoryImport)
+    # MEMORY: this reads every active inventory row (25k+ in production), so
+    # it selects plain COLUMNS instead of ORM entities. Loading
+    # VendorInventory/Part/Vendor/InventoryImport objects kept four mapped
+    # instances per row alive in the session's identity map for the whole
+    # request -- enough to exhaust a 512MB instance once the catalogue grew.
+    # Columns stream through `yield_per` and only the small dataclasses below
+    # are retained. (Joins replace the old `selectinload`: still ONE query,
+    # never the per-row lazy loads that once made this take ~357s.)
+    statement = (
+        select(
+            Part.id,
+            Part.canonical_part_number,
+            Part.description,
+            Part.brand,
+            Vendor.id,
+            Vendor.name,
+            Vendor.is_own_stock,
+            VendorInventory.vendor_part_number,
+            VendorInventory.quantity_available,
+            VendorInventory.price,
+            VendorInventory.mrp,
+            VendorInventory.raw_data,
+            InventoryImport.file_name,
+        )
         .join(InventoryImport, VendorInventory.import_id == InventoryImport.id)
-        # Eager-load the two relationships the loop below reads. Without this
-        # SQLAlchemy lazy-loads `.part` and `.vendor` ONE QUERY PER ROW --
-        # measured at 6,869 queries for 6,866 active rows, which is what made
-        # the dashboard take ~357s and Vendor Comparison ~5s.
-        .options(selectinload(VendorInventory.part), selectinload(VendorInventory.vendor))
+        .join(Part, VendorInventory.part_id == Part.id)
+        .join(Vendor, VendorInventory.vendor_id == Vendor.id)
         .where(
             VendorInventory.import_id.in_(active_import_ids),
             VendorInventory.part_id.isnot(None),
         )
-    ).all()
+        .execution_options(yield_per=2000)
+    )
 
     grouped: dict[int, MasterInventoryRow] = {}
+    own_stock_by_vendor: dict[int, bool] = {}  # is_own_stock_vendor() once per vendor
 
-    for inventory_row, inventory_import in inventory_rows:
-        part = inventory_row.part
-        vendor = inventory_row.vendor
-
-        if part.id not in grouped:
-            grouped[part.id] = MasterInventoryRow(
-                part_id=part.id,
-                canonical_part_number=part.canonical_part_number,
+    for (
+        part_id,
+        canonical_part_number,
+        part_description,
+        brand,
+        vendor_id,
+        vendor_name,
+        vendor_is_own_stock,
+        vendor_part_number,
+        quantity_available,
+        price,
+        mrp,
+        raw_data,
+        inventory_file,
+    ) in session.execute(statement):
+        entry_row = grouped.get(part_id)
+        if entry_row is None:
+            entry_row = MasterInventoryRow(
+                part_id=part_id,
+                canonical_part_number=canonical_part_number,
                 total_quantity_available=Decimal("0"),
-                part_description=part.description,
-                brand=part.brand,
+                part_description=part_description,
+                brand=brand,
             )
+            grouped[part_id] = entry_row
 
-        entry = grouped[part.id]
-        entry.total_quantity_available += inventory_row.quantity_available
-        entry.vendors.append(
+        is_own_stock = own_stock_by_vendor.get(vendor_id)
+        if is_own_stock is None:
+            is_own_stock = is_own_stock_vendor(vendor_name, flag=vendor_is_own_stock)
+            own_stock_by_vendor[vendor_id] = is_own_stock
+
+        entry_row.total_quantity_available += quantity_available
+        entry_row.vendors.append(
             MasterInventoryVendorEntry(
-                vendor_id=vendor.id,
-                vendor_name=vendor.name,
-                vendor_part_number=inventory_row.vendor_part_number,
-                quantity_available=inventory_row.quantity_available,
-                price=inventory_row.price,
-                mrp=inventory_row.mrp,
-                raw_data=inventory_row.raw_data,
-                inventory_file=inventory_import.file_name,
-                is_own_stock=is_own_stock_vendor(vendor.name, flag=vendor.is_own_stock),
+                vendor_id=vendor_id,
+                vendor_name=vendor_name,
+                vendor_part_number=vendor_part_number,
+                quantity_available=quantity_available,
+                price=price,
+                mrp=mrp,
+                raw_data=raw_data,
+                inventory_file=inventory_file,
+                is_own_stock=is_own_stock,
             )
         )
 
