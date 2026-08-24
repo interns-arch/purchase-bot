@@ -1,0 +1,41 @@
+# Keep the build context small and never bake secrets or local state into
+# an image layer.
+
+# Secrets and local config
+.env
+*.env
+!*.env.example
+oauth_client.json
+
+# Local virtualenv / caches (huge, and platform-specific)
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local data: uploaded files and the SQLite fallback database live in
+# volumes at runtime, never in the image.
+uploads/
+database/
+*.db
+preview.db
+output/
+charts/
+
+# Frontend build inputs/outputs (the frontend has its own Dockerfile and
+# installs its own dependencies)
+frontend/node_modules/
+frontend/dist/
+node_modules/
+
+# VCS, editor and docs
+.git/
+.gitignore
+.claude/
+*.md
+!README.md
+todo.md

@@ -26,6 +26,7 @@ from core.ingestion.column_detector import (
     detect_header_row,
     find_optional_column,
     is_parseable_quantity,
+    normalise_header,
     parse_quantity,
 )
 from core.ingestion.csv_reader import read_csv_grid
@@ -68,6 +69,10 @@ class CustomerOrderImportResult:
     row_count: int
     error_count: int
     errors: list[str] = field(default_factory=list)
+    # Set only when the file was read through a saved format or an AI-proposed
+    # column mapping -- explains WHY this file imported when its headers are
+    # not the usual ones.
+    message: str | None = None
 
 
 def _utcnow() -> datetime:
@@ -80,18 +85,50 @@ def _read_grid(file_path: Path) -> list[list[str]]:
     return read_excel_grid(file_path)
 
 
-def _parse_line_items(file_path: Path) -> tuple[list[str], list[dict[str, str]]]:
+def _header_row_for_mapping(grid, column_mapping: dict[str, str]) -> int | None:
+    """Index of the row that carries BOTH mapped header texts. Used by the
+    saved-format / AI-rescue path, where the header names are known but are
+    not in the built-in alias lists (e.g. 'Suzuki Part No. (No Dash)')."""
+    wanted = {
+        normalise_header(text)
+        for text in column_mapping.values()
+        if text and str(text).strip()
+    }
+    if not wanted:
+        return None
+    for index, row in enumerate(grid):
+        present = {normalise_header(str(cell)) for cell in row if str(cell).strip()}
+        if wanted.issubset(present):
+            return index
+    return None
+
+
+def _parse_line_items(
+    file_path: Path, *, column_mapping: dict[str, str] | None = None
+) -> tuple[list[str], list[dict[str, str]]]:
     """Locate the line-item header row ANYWHERE in the worksheet (metadata
     rows above it are ignored) and return (headers, item_rows).
 
     Works for both a simple single-section order (header on row 1 -> detected
     at index 0) and a multi-section order (metadata block, then the real
     `... PART NUMBER ...` header, then the item rows). The item table ends at
-    the first fully-blank row (a section boundary)."""
+    the first fully-blank row (a section boundary).
+
+    With `column_mapping`, the header row is found by the EXACT header texts
+    the mapping names instead of the built-in aliases -- the only difference;
+    every row is still read from the file exactly as below."""
     grid = _read_grid(file_path)
-    header_index = detect_header_row(
-        grid, PART_NUMBER_HEADERS, quantity_headers=QUANTITY_HEADERS
-    )
+    if column_mapping:
+        header_index = _header_row_for_mapping(grid, column_mapping)
+        if header_index is None:
+            raise ValueError(
+                f"Column mapping {column_mapping!r} does not match any header row "
+                f"in '{file_path.name}'."
+            )
+    else:
+        header_index = detect_header_row(
+            grid, PART_NUMBER_HEADERS, quantity_headers=QUANTITY_HEADERS
+        )
     if header_index is None:
         raise ValueError(
             f"Part-number column not found in '{file_path.name}'. "
@@ -117,8 +154,63 @@ def _parse_line_items(file_path: Path) -> tuple[list[str], list[dict[str, str]]]
     return headers, item_rows
 
 
+def _column_for(headers: list[str], wanted_text: str) -> str | None:
+    """The actual header string matching `wanted_text`, compared the same
+    forgiving way headers are matched everywhere else (case/punctuation
+    insensitive)."""
+    target = normalise_header(wanted_text)
+    for header in headers:
+        if normalise_header(header) == target:
+            return header
+    return None
+
+
+def read_order_table_with_mapping(
+    file_path: Path, column_mapping: dict[str, str]
+) -> tuple[list[str], list[dict[str, str]], str, str]:
+    """Read the line-item table using an EXPLICIT column mapping (the header
+    TEXT for part number and requested quantity) instead of the built-in
+    aliases -- the customer-order twin of
+    `inventory_import_service.read_table_with_mapping`, used to cross-check a
+    proposed mapping before anything is imported.
+
+    Returns (headers, rows, part_column, quantity_column). Raises ValueError
+    when the mapping is unusable."""
+    part_source = (column_mapping.get("part_number") or "").strip()
+    quantity_source = (
+        column_mapping.get("quantity_requested")
+        or column_mapping.get("available_quantity")
+        or column_mapping.get("quantity")
+        or ""
+    ).strip()
+    if not part_source or not quantity_source:
+        raise ValueError(
+            "Column mapping must name both part_number and quantity_requested."
+        )
+
+    headers, rows = _parse_line_items(
+        file_path,
+        column_mapping={"part_number": part_source, "quantity": quantity_source},
+    )
+    part_column = _column_for(headers, part_source)
+    quantity_column = _column_for(headers, quantity_source)
+    if part_column is None or quantity_column is None:
+        raise ValueError(
+            f"Mapped columns {part_source!r}/{quantity_source!r} are not both present "
+            f"in the detected header row {headers!r}."
+        )
+    if part_column == quantity_column:
+        raise ValueError("part_number and quantity_requested cannot be the same column.")
+    return headers, rows, part_column, quantity_column
+
+
 def run_customer_order_import(
-    file_path: Path, session: Session, *, customer_id: int | None = None
+    file_path: Path,
+    session: Session,
+    *,
+    customer_id: int | None = None,
+    column_mapping: dict[str, str] | None = None,
+    mapping_note: str | None = None,
 ) -> CustomerOrderImportResult:
     """Import one customer order file. Raises `DuplicateCustomerOrderFileError`
     if this exact file content was already imported successfully.
@@ -156,17 +248,25 @@ def run_customer_order_import(
     if existing is not None:
         raise DuplicateCustomerOrderFileError(existing.id)
 
-    headers, item_rows = _parse_line_items(file_path)
-    part_column = find_optional_column(headers, PART_NUMBER_HEADERS)
-    if part_column is None:
-        raise ValueError(
-            f"Part-number column not found in '{file_path.name}'. Headers found: {headers}"
+    if column_mapping is not None:
+        # SAVED-FORMAT / AI-RESCUE path: the mapping names WHICH columns to
+        # read; every value below still comes from the file itself through the
+        # same deterministic loop, and all later guards apply unchanged.
+        headers, item_rows, part_column, quantity_column = read_order_table_with_mapping(
+            file_path, column_mapping
         )
-    # No quantity column -> do NOT invent one from PO ID / totals / price /
-    # etc. Signal NEEDS_REVIEW (the dispatcher maps this, no order is stored).
-    quantity_column = find_optional_column(headers, QUANTITY_HEADERS)
-    if quantity_column is None:
-        raise CustomerOrderQuantityMissingError(file_path.name, headers)
+    else:
+        headers, item_rows = _parse_line_items(file_path)
+        part_column = find_optional_column(headers, PART_NUMBER_HEADERS)
+        if part_column is None:
+            raise ValueError(
+                f"Part-number column not found in '{file_path.name}'. Headers found: {headers}"
+            )
+        # No quantity column -> do NOT invent one from PO ID / totals / price /
+        # etc. Signal NEEDS_REVIEW (the dispatcher maps this, no order is stored).
+        quantity_column = find_optional_column(headers, QUANTITY_HEADERS)
+        if quantity_column is None:
+            raise CustomerOrderQuantityMissingError(file_path.name, headers)
 
     customer_order = CustomerOrder(
         file_name=file_path.name,
@@ -247,6 +347,7 @@ def run_customer_order_import(
         row_count=row_count,
         error_count=error_count,
         errors=error_messages,
+        message=mapping_note,
     )
 
 

@@ -1,0 +1,69 @@
+# PRODUCTION OVERRIDE -- DIRECT PORT EXPOSURE (no reverse proxy).
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.direct.yml up -d
+#
+# Use this INSTEAD of deploy/docker-compose.prod.yml when the application is
+# reached directly on its own ports:
+#
+#     Frontend  http://<EC2_PUBLIC_IP>:4009
+#     Backend   http://<EC2_PUBLIC_IP>:4008
+#
+# Why this variant exists: the target EC2 instance already runs other live
+# services, and Caddy owns ports 80/443 there. Putting ProcureHub behind a
+# proxy would mean editing a config that fronts the Dealer Portal and the
+# CarTrends site. Exposing 4008/4009 directly touches nothing that is already
+# running -- the lower-risk option ON THAT BOX.
+#
+# Postgres is STILL never published. The database is reachable only from the
+# other containers as db:5432.
+#
+# TWO VALUES MUST BE SET before `up`, in the repo-root .env:
+#
+#     PUBLIC_HOST=13.233.238.99          # the EC2 public/Elastic IP
+#     VITE_API_BASE_URL=http://13.233.238.99:4008
+#     CORS_ORIGINS=http://13.233.238.99:4009
+#
+# The API URL is compiled into the frontend by Vite, so changing the IP means
+# rebuilding the frontend image -- not merely restarting it. An Elastic IP
+# keeps that rare. (The proxy variant avoids this entirely; that is the one
+# real advantage it has.)
+
+services:
+  db:
+    # Never published -- not even on localhost. Same as the proxy variant.
+    ports: !reset []
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    # Published publicly on 4008, per the Founder's instruction that the
+    # application use ports above 4000. `!override` REPLACES the base file's
+    # mapping -- Compose MERGES port lists, so without it the container would
+    # also try to bind the base 8000 and fail.
+    ports: !override
+      - "${BACKEND_PORT:-4008}:8000"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    ports: !override
+      - "${FRONTEND_PORT:-4009}:80"
+    build:
+      args:
+        # MUST be the public backend address -- the browser resolves this,
+        # not the container. "localhost" would break for every user.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:?set VITE_API_BASE_URL=http://<EC2_IP>:4008 in .env}
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

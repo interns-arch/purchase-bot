@@ -498,7 +498,10 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
         customer_id_hint=party.party_id if party.party_type == "customer" else None,
     )
     try:
-        result = _process_staged_file(file_path, metadata, message.filename, message.media_id)
+        # This path sends its own reply below -- never two for one file.
+        result = _process_staged_file(
+            file_path, metadata, message.filename, message.media_id, notify_sender=False
+        )
     except Exception:
         # process_document reports normal failures via the result status; an
         # exception here is infrastructure-level. The admin already got the
@@ -655,8 +658,48 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
     _process_staged_file(file_path, metadata, message.filename, message.media_id)
 
 
+def _sender_result_reply(result, document_type: IncomingDocumentType) -> str:
+    """The reply ANY sender gets about their own file. Same plain wording the
+    registered parties get, plus the REASON when the file could not be used --
+    without it the sender has no idea what to fix and simply resends the same
+    file."""
+    text = _registered_result_reply(None, result, document_type)
+    status = getattr(getattr(result, "status", None), "value", None)
+    if status in ("FAILED", "DOWNLOAD_FAILED", "NEEDS_REVIEW", "UNSUPPORTED"):
+        reason = (getattr(result, "message", "") or "").strip()
+        if reason:
+            # One line, no stack traces or file paths -- enough to act on.
+            reason = reason.splitlines()[0][:180]
+            text = f"{text}\nReason: {reason}"
+    return text
+
+
+def _notify_sender_of_result(metadata: DocumentMetadata, result) -> None:
+    """Tell the person who sent the file what happened to it. Best-effort --
+    a failed reply must never affect the import.
+
+    Skipped for admin numbers: they already receive the full technical detail
+    through the notification mirror, and the Founder's rule is ONE message per
+    import, not two."""
+    sender = (getattr(metadata, "sender", None) or "").strip()
+    if not sender or result is None:
+        return
+    try:
+        if daily_stock.is_admin_sender(sender):
+            return
+        document_type = getattr(result, "document_type", None) or metadata.document_type_hint
+        send_reply_safe(sender, _sender_result_reply(result, document_type))
+    except Exception:  # noqa: BLE001 -- an output must never affect the import
+        logger.exception("Could not send the import result to %s.", sender)
+
+
 def _process_staged_file(
-    file_path, metadata: DocumentMetadata, display_name: str, media_id: str | None = None
+    file_path,
+    metadata: DocumentMetadata,
+    display_name: str,
+    media_id: str | None = None,
+    *,
+    notify_sender: bool = True,
 ) -> None:
     """Run one already-staged WhatsApp file through the unchanged import
     pipeline, then publish the result + trigger the post-commit outputs."""
@@ -700,6 +743,11 @@ def _process_staged_file(
         # has moved it to uploads/failed/ by now, so resolve its real
         # location rather than assuming the staged path.
         _send_failed_file_safe(result, "WhatsApp")
+        # Whoever sent the file hears what happened to it -- imported, or
+        # not used and why. (Registered senders get their own reply from
+        # `_handle_registered_upload`, so that path passes notify_sender=False.)
+        if notify_sender:
+            _notify_sender_of_result(metadata, result)
 
     # Temporary Google-Sheets replacement (output layer): the import above is
     # now committed, so on a SUCCESSFUL Vendor Inventory import request the

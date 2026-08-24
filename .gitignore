@@ -1,11 +1,14 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 database/*.db
+# Local SQLite files anywhere in the repo (preview.db is created by the
+# local preview server).
+*.db
 output/*.csv
 output/*.xlsx
 charts/*.png
 .pytest_cache/
-
+procurehub.dump
 # Web app (backend/frontend)
 uploads/
 frontend/node_modules/
@@ -18,3 +21,17 @@ frontend/dist/
 
 # Google OAuth client secret + local token helper output -- never commit
 oauth_client.json
+
+# SSH / EC2 private keys. These should never be inside the project folder at
+# all, but a stray copy must never become a commit.
+*.pem
+*.key
+*.ppk
+
+# Database dumps -- procurehub.dump holds real business data.
+*.dump
+*.sql.gz
+
+# Backups of config files -- '*.env' does not match '.env.bak', so a stray
+# backup of a secrets file would otherwise be committable.
+*.bak

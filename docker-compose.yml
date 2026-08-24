@@ -1,0 +1,117 @@
+# Run the whole application locally: Postgres + FastAPI backend + the React
+# frontend behind nginx.
+#
+#     docker compose up --build          # then open http://localhost:5173
+#
+# TWO DELIBERATE SAFETY DEFAULTS -- read these before changing them:
+#
+#  1. The database defaults to the `db` container, NOT the Neon URL in
+#     backend/.env. `environment:` wins over `env_file:` in Compose, so even
+#     with your real .env mounted, `docker compose up` can never write to
+#     production by accident. To point at a real database on purpose, set
+#     DATABASE_URL in a root `.env` file (see .env.docker.example).
+#
+#  2. WhatsApp / Gmail / Google Sheets default to OFF. Your credentials would
+#     otherwise work perfectly from a laptop container -- a second instance
+#     polling the same Gmail inbox would race the deployed one for the same
+#     unread mail, and the bot would send real messages to real vendors. Turn
+#     one on only when you actually mean to test it.
+
+services:
+  db:
+    # Built from db/Dockerfile (a pinned layer over postgres:18-alpine) so
+    # the database is versioned with the application like the other two
+    # images -- Postgres version, timezone and first-run initialisation all
+    # live in this repo.
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    image: procurehub-db:local
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-procurehub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-procurehub}
+      POSTGRES_DB: ${POSTGRES_DB:-procurehub}
+    ports:
+      # Published on a non-standard port so it never collides with a Postgres
+      # already installed on the host.
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      # Postgres 18 CHANGED THE MOUNT POINT. Its image stores data in a
+      # major-version subdirectory (/var/lib/postgresql/18/docker) so that
+      # `pg_upgrade --link` can work across versions, and it refuses to start
+      # if it finds an older layout at /var/lib/postgresql/data. Mounting the
+      # old path under 18 would put the data OUTSIDE the volume and lose it
+      # on the next `docker compose up`, silently.
+      #
+      # The volume is named `pgdata18` so the Postgres 16 volume (`pgdata`)
+      # is left untouched rather than reused or destroyed -- delete it
+      # yourself with `docker volume rm procurehub_pgdata` once you are sure
+      # you no longer need it.
+      - pgdata18:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-procurehub} -d ${POSTGRES_DB:-procurehub}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      # Your real configuration (WhatsApp tokens, AI keys, ...). Optional:
+      # the app starts without it, with every integration simply disabled.
+      - path: backend/.env
+        required: false
+    environment:
+      # --- these OVERRIDE anything in backend/.env, on purpose (see header)
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-procurehub}:${POSTGRES_PASSWORD:-procurehub}@db:5432/${POSTGRES_DB:-procurehub}}
+      WHATSAPP_ENABLED: ${WHATSAPP_ENABLED:-false}
+      ENABLE_WHATSAPP_AUTOMATION: ${ENABLE_WHATSAPP_AUTOMATION:-false}
+      GMAIL_ENABLED: ${GMAIL_ENABLED:-false}
+      ENABLE_EMAIL_AUTOMATION: ${ENABLE_EMAIL_AUTOMATION:-false}
+      ENABLE_GOOGLE_SHEETS_SYNC: ${ENABLE_GOOGLE_SHEETS_SYNC:-false}
+      # The browser talks to the backend from the HOST, so the allowed origin
+      # is the published frontend port, not the container name.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      # Signing key for login tokens. Override in .env for anything shared --
+      # changing it logs everyone out.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-only-change-me}
+      # One-time bootstrap: creates this login only while zero users exist.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-procurehub123}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # Uploaded files survive a rebuild. Imported DATA lives in Postgres;
+      # this keeps the ORIGINAL files (downloadable from the File Inbox).
+      - uploads:/app/uploads
+      # Only used if you unset DATABASE_URL to fall back to local SQLite.
+      - appdb:/app/database
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked in at BUILD time by Vite -- change it here and rebuild, a
+        # restart alone will not pick it up.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8000}}
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    restart: unless-stopped
+
+volumes:
+  # Postgres 18 layout (mounted at /var/lib/postgresql -- see the db service).
+  # The old Postgres 16 volume was called `pgdata`; it is deliberately not
+  # referenced here so nothing overwrites or deletes it.
+  pgdata18:
+  uploads:
+  appdb:

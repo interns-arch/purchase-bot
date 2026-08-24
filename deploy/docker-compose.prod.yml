@@ -1,0 +1,74 @@
+# PRODUCTION OVERRIDE (EC2). Layered on top of the known-good
+# docker-compose.yml -- it changes only what production requires and leaves
+# the verified architecture untouched:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+#
+# What it changes, and why:
+#
+#   * NOTHING is published to the public interface. Every container port is
+#     bound to 127.0.0.1, so the only way in is the host's Nginx on :80/:443.
+#     Postgres is not published at all -- not even on localhost -- because
+#     the backend reaches it over the compose network as db:5432.
+#
+#     Ports (Founder's instruction: backend on 4008; frontend beside it):
+#         backend   127.0.0.1:4008 -> container 8000
+#         frontend  127.0.0.1:4009 -> container 80
+#         postgres  not published; internal db:5432 only
+#     Only 22/80/443 are opened in the AWS Security Group -- 4008 and 4009
+#     are NOT reachable from the internet, which is why the frontend can
+#     call the API same-origin through Nginx (no CORS, no IP compiled into
+#     the bundle, and HTTPS later needs no application change).
+#   * restart: always, so the stack comes back after an EC2 reboot.
+#   * Log rotation, so a long-running box cannot fill its disk with logs.
+#
+# It deliberately does NOT change: image builds, volumes, the db service's
+# Dockerfile/initdb/timezone, or any application setting.
+
+services:
+  db:
+    # No `ports:` at all. The 55432 mapping from the base file is removed so
+    # Postgres is unreachable from outside the host, in any Security Group
+    # configuration. Reach it for maintenance with:
+    #   docker compose exec db psql -U procurehub -d procurehub
+    ports: !reset []
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    # Bound to loopback only: Nginx proxies to it, the internet cannot.
+    # `!override` REPLACES the base file's mapping. Without it Compose MERGES
+    # port lists, so the container would try to bind both the public
+    # "8000:8000" from the base file and this loopback one -- which fails with
+    # "address already in use" and, worse, would have published 8000 publicly.
+    ports: !override
+      - "127.0.0.1:${BACKEND_PORT:-4008}:8000"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    # Also loopback only. Nginx serves the public :80/:443 and proxies here.
+    # `!override` for the same reason as the backend above.
+    ports: !override
+      - "127.0.0.1:${FRONTEND_PORT:-4009}:80"
+    build:
+      args:
+        # "/" makes the browser call the API on the SAME ORIGIN it loaded
+        # from (/api/... through Nginx). Nothing host-specific is baked into
+        # the bundle, so changing the IP, adding a domain, or moving to HTTPS
+        # needs no frontend rebuild.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/}
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

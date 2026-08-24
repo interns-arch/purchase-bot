@@ -1,5 +1,5 @@
-"""AI-ASSISTED RESCUE for Vendor Inventory files the deterministic parser
-could not read (Phase 3 of ARCHITECTURE_V2 -- gated by AI_FALLBACK_ENABLED).
+"""AI-ASSISTED RESCUE for Vendor Inventory AND Customer Order files the
+deterministic parser could not read (gated by AI_FALLBACK_ENABLED).
 
 Design principle: **the model never writes data -- it only proposes WHICH
 columns to use.** The pipeline is:
@@ -30,13 +30,13 @@ from pathlib import Path
 from backend.app.ai.compact import compact_grid
 from backend.app.ai.provider import UnderstandRequest
 from backend.app.ai.registry import document_fallback_enabled, get_provider
-from backend.app.ai.schemas import VENDOR_INVENTORY
+from backend.app.ai.schemas import CUSTOMER_ORDER, VENDOR_INVENTORY
 from backend.app.core.config import settings
 from core.ingestion.column_detector import normalise_part_number, parse_quantity, is_parseable_quantity
 from core.ingestion.csv_reader import read_csv_grid
 from core.ingestion.excel_reader import read_excel_grid
 from core.logging_setup import get_logger
-from core.services import inventory_import_service
+from core.services import customer_order_service, inventory_import_service
 from core.services.normalized_validation import validate_normalized_document
 
 logger = get_logger(__name__)
@@ -47,6 +47,10 @@ _RESCUE_ELIGIBLE_FRAGMENTS = (
     "column not found",
     "no inventory header row",
     "no inventory rows could be imported",
+    # Customer orders: unrecognised line-item headers, or a table found with
+    # no quantity column the built-in aliases recognise.
+    "no line-item header row",
+    "quantity column is missing",
 )
 
 
@@ -81,9 +85,45 @@ def _read_grid(file_path: Path) -> list[list[str]] | None:
 def discover_inventory_mapping(
     file_path: Path, deterministic_reason: str | None
 ) -> tuple[dict[str, str], str] | None:
-    """Ask the configured model to read the failed file and return a VERIFIED
-    (column_mapping, provenance_note) -- or None, leaving the deterministic
-    failure in place. See module docstring for the guard chain."""
+    """Ask the configured model to read the failed VENDOR INVENTORY file and
+    return a VERIFIED (column_mapping, provenance_note) -- or None, leaving
+    the deterministic failure in place."""
+    return _discover_mapping(
+        file_path,
+        deterministic_reason,
+        document_type=VENDOR_INVENTORY,
+        quantity_key="available_quantity",
+        read_with_mapping=inventory_import_service.read_table_with_mapping,
+    )
+
+
+def discover_customer_order_mapping(
+    file_path: Path, deterministic_reason: str | None
+) -> tuple[dict[str, str], str] | None:
+    """The same guarded rescue for a CUSTOMER ORDER whose line-item headers
+    the deterministic parser did not recognise (customer files vary most --
+    every customer writes their own column names, e.g. 'Suzuki Part No.
+    (No Dash)' / 'Suzuki Order Qty')."""
+    return _discover_mapping(
+        file_path,
+        deterministic_reason,
+        document_type=CUSTOMER_ORDER,
+        quantity_key="quantity_requested",
+        read_with_mapping=customer_order_service.read_order_table_with_mapping,
+    )
+
+
+def _discover_mapping(
+    file_path: Path,
+    deterministic_reason: str | None,
+    *,
+    document_type: str,
+    quantity_key: str,
+    read_with_mapping,
+) -> tuple[dict[str, str], str] | None:
+    """Shared rescue path for both document types. See the module docstring
+    for the guard chain -- it is identical either way; only the schema the
+    model answers in and the deterministic re-reader differ."""
     if not document_fallback_enabled():
         return None
 
@@ -98,14 +138,15 @@ def discover_inventory_mapping(
         )
         logger.info(
             "AI rescue: deterministic parser failed for %s (%s) -- asking %s to "
-            "propose a column mapping.",
+            "propose a %s column mapping.",
             file_path.name,
             (deterministic_reason or "no reason recorded")[:120],
             provider.name,
+            document_type,
         )
         document = provider.understand_document(
             UnderstandRequest(
-                document_type=VENDOR_INVENTORY,
+                document_type=document_type,
                 compact_text=compact_text,
                 file_name=file_path.name,
                 hints={"deterministic_failure": (deterministic_reason or "")[:200]},
@@ -133,9 +174,7 @@ def discover_inventory_mapping(
         # Gate 2: apply the mapping deterministically and cross-check every
         # sampled model row against what the file ACTUALLY contains.
         try:
-            _headers, file_rows, part_col, qty_col = (
-                inventory_import_service.read_table_with_mapping(file_path, mapping)
-            )
+            _headers, file_rows, part_col, qty_col = read_with_mapping(file_path, mapping)
         except ValueError as exc:
             logger.info("AI rescue REFUSED for %s: mapping unusable (%s).", file_path.name, exc)
             return None
@@ -162,7 +201,7 @@ def discover_inventory_mapping(
             f"Imported via AI-assisted column mapping ({provider.name}"
             f"{'/' + document.meta.model if document.meta.model else ''}): "
             f"part_number={mapping.get('part_number')!r}, "
-            f"quantity={mapping.get('available_quantity') or mapping.get('quantity')!r} "
+            f"quantity={mapping.get(quantity_key) or mapping.get('quantity')!r} "
             f"(confidence {document.meta.confidence:.2f}"
             + (
                 f"; ignored money columns: {', '.join(document.meta.rejected_columns)}"

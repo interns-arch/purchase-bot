@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 # Same DATABASE_URL resolution as the app: backend/.env (real env wins).
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from sqlalchemy import select, update  # noqa: E402
+from sqlalchemy import delete, select, update  # noqa: E402
 
 from core.db import get_session
 from core.models import (
@@ -87,23 +87,62 @@ def merge(keep_id: int, duplicate_id: int, session, *, verbose: bool = True) -> 
     ).rowcount
 
     # Part aliases: (vendor_id, normalized) is unique -- drop the duplicate's
-    # alias where the keeper already has one for the same normalized number.
-    keep_norms = set(session.execute(
-        select(PartAlias.normalized_part_number).where(PartAlias.vendor_id == keep_id)
-    ).scalars())
-    dropped = alias_moved = 0
-    for alias in session.execute(
-        select(PartAlias).where(PartAlias.vendor_id == duplicate_id)
-    ).scalars():
-        if alias.normalized_part_number in keep_norms:
-            session.delete(alias)
-            dropped += 1
-        else:
-            alias.vendor_id = keep_id
-            alias_moved += 1
+    # alias where the keeper already has one for the same normalized number,
+    # then move the rest. Done as TWO bulk statements: a vendor can carry tens
+    # of thousands of aliases, and the previous row-at-a-time loop meant one
+    # round-trip each, which timed out against a remote database.
+    dropped = session.execute(
+        delete(PartAlias).where(
+            PartAlias.vendor_id == duplicate_id,
+            PartAlias.normalized_part_number.in_(
+                select(PartAlias.normalized_part_number).where(
+                    PartAlias.vendor_id == keep_id
+                )
+            ),
+        )
+    ).rowcount
+    alias_moved = session.execute(
+        update(PartAlias).where(PartAlias.vendor_id == duplicate_id)
+        .values(vendor_id=keep_id)
+    ).rowcount
     session.flush()
     moved["part_aliases_moved"] = alias_moved
     moved["part_aliases_dropped_dupes"] = dropped
+
+    # One customer line reserved from BOTH vendor rows: since they are one
+    # firm, those are one reservation, so the duplicate's quantity is ADDED to
+    # the keeper's row and the duplicate row dropped. (Seen in production:
+    # order item 380 held 2 under one Bijwasan row and 1 under the other,
+    # against a requested 3.) Without this the unique constraint on
+    # (customer_order_item_id, vendor_id) aborts the whole merge.
+    keeper_selections = {
+        row.customer_order_item_id: row
+        for row in session.execute(
+            select(VendorSelection).where(VendorSelection.vendor_id == keep_id)
+        ).scalars()
+    }
+    combined = 0
+    for duplicate_selection in session.execute(
+        select(VendorSelection).where(VendorSelection.vendor_id == duplicate_id)
+    ).scalars():
+        keeper_selection = keeper_selections.get(duplicate_selection.customer_order_item_id)
+        if keeper_selection is None:
+            continue  # no clash -- moved by the bulk UPDATE below
+        keeper_selection.quantity_selected = (
+            keeper_selection.quantity_selected + duplicate_selection.quantity_selected
+        )
+        # Never lose a link to a raised PO line.
+        if (
+            keeper_selection.purchase_order_item_id is None
+            and duplicate_selection.purchase_order_item_id is not None
+        ):
+            keeper_selection.purchase_order_item_id = (
+                duplicate_selection.purchase_order_item_id
+            )
+        session.delete(duplicate_selection)
+        combined += 1
+    session.flush()
+    moved["selections_combined"] = combined
 
     moved["vendor_selections"] = session.execute(
         update(VendorSelection).where(VendorSelection.vendor_id == duplicate_id)

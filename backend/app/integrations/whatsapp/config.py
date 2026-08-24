@@ -158,7 +158,8 @@ class WhatsAppSettings:
     daily_request_enabled: bool = (
         os.environ.get("WHATSAPP_DAILY_REQUEST_ENABLED", "false").strip().lower() == "true"
     )
-    daily_request_time: str = os.environ.get("WHATSAPP_DAILY_REQUEST_TIME", "09:00").strip()
+    # 09:30 IST (Founder, 19 Aug 2026 -- was 09:00).
+    daily_request_time: str = os.environ.get("WHATSAPP_DAILY_REQUEST_TIME", "09:30").strip()
     # Daily participation summary to WHATSAPP_ADMIN_PHONE_NUMBER at this IST
     # time: "Received: X of Y vendors. Pending: ..." -- plain text, no
     # template needed (the admin messages the bot daily).

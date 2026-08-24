@@ -15,6 +15,21 @@ The project has **two front doors sharing one brain**:
 
 ## 1. Quick Start (Web App)
 
+### With Docker — one command, nothing to install
+
+```bash
+docker compose up --build
+```
+
+Open **http://localhost:5173** and sign in with `admin` / `procurehub123`.
+This starts Postgres, the backend and the frontend together. It uses its own
+**local** database and starts with WhatsApp/Gmail/Sheets **disabled**, so it
+can never touch production data or message a real vendor — see
+[DEPLOYMENT.md](DEPLOYMENT.md) §0 for how to change either, plus the ports
+and build arguments.
+
+### Without Docker
+
 Two terminals, both left running:
 
 ```powershell
@@ -89,20 +104,28 @@ WhatsApp number  ->  Vendor (or Customer)  ->  Vendor/Customer Code
 - A stray caption is **ignored** for registered numbers (the registry always wins) — it can never create or misfile a vendor. Texts ("good morning sir") are ignored too.
 - Vendor numbers: spreadsheet → Vendor Inventory, PDF → Vendor Invoice. Customer numbers: spreadsheet → Customer Order (feeds automatic vendor selection exactly as today).
 - Multiple numbers per party are supported; each number belongs to exactly ONE party (DB-enforced) — a number never sends both vendor and customer files.
-- The sender gets a simple reply (✅ imported / ⚠️ partial / ❌ could-not-read); the admin gets the full technical detail through the notification mirror.
+- **Everyone who sends a file is told what happened to it** (`document_worker._notify_sender_of_result`) — registered or not: ✅ imported / ⚠️ partial / ℹ️ already received / ❌ not used. A file that could not be used also carries a one-line **Reason**, so the sender can fix and resend instead of resending the same file. Admin numbers are deliberately skipped here: they already receive the full technical detail through the notification mirror, and the rule is ONE message per import, never two.
 - Unregistered numbers are untouched — they keep the command/caption flow below. The Founder/admin number can never be registered as a party (it uploads on behalf of many vendors).
 - Bulk-register from a contact list: `python -m backend.scripts.register_vendor_numbers contacts.xlsx [--dry-run]`.
 - **Founder-managed over WhatsApp** (`integrations/whatsapp/contact_import.py`): an admin texts `register` (or captions a file `contacts`) and sends an Excel of Vendor Name + WhatsApp number(s). The list is AUTHORITATIVE: each listed vendor's numbers are REPLACED, a number owned by another vendor is re-pointed, rows sharing one number are ONE vendor (first row wins, no duplicate vendor), unknown names are onboarded with a code — and the bot replies with exactly what changed. A column headed "updated …" wins over an old PHONE column.
 - **Several admin numbers**: `WHATSAPP_ADMIN_PHONE_NUMBER` is comma-separated — every listed number receives all founder-facing messages (workbook, allocation reports, mirrored notifications, daily summary) and may use the admin commands.
 - **Part-number matching ignores ALL special characters** (`column_detector.normalise_part_number`): a vendor's `DM-BP/1001$` and a customer's `DMBP1001` are the same part for comparison/mapping/allocation — only letters and digits count.
 - **Google Sheet daily reset** (`sync_service.reset_sheet_for_new_day`, `GOOGLE_SHEETS_DAILY_RESET_*`, **09:15 IST**): every morning, vendor tabs without a same-day upload are removed — the Sheet only ever shows today's stock. Hand-made tabs are never touched. **Sheet-only**: it deletes worksheets, never database rows, so an order arriving at 08:30 still allocates against the stock already imported — the reset changes nothing about matching, reservations or allocation.
+- **Unknown column headers → AI-assisted rescue** (`backend/app/ai/fallback.py`, gated by `AI_FALLBACK_ENABLED=true`). Covers **Vendor Inventory *and* Customer Orders** — customer files vary most, since every customer names columns their own way (`Suzuki Part No. (No Dash)`, `Suzuki Order Qty`). Order of attempts: deterministic parse → a previously **learned layout** (no model call) → the model. The model proposes ONLY which columns to read; it is then strictly validated (money/MRP/discount can never become quantity, confidence floor), its sampled rows are cross-checked against a deterministic re-read, and the file is re-imported through the unchanged pipeline — so **every stored value comes from the file, never from the model**. A rescued layout is saved, so the next file with those headers needs no model call. Measured settings matter: `google/gemma-4-31b-it` is listed by NVIDIA but never answers, and `NVIDIA_MAX_TOKENS=8192` pushed a 70B model to 210s; `meta/llama-3.1-8b-instruct` with `NVIDIA_MAX_TOKENS=4096` maps the same file correctly in ~3s.
+- **Vendor name matching → ONE vendor, ONE vendor code** (`core/services/vendor_service.py`). Four steps, each only running when the one before finds nothing:
+  1. exact name, case-insensitive;
+  2. **filler-insensitive** — `stock`/`stocks`/`inventory`/`stocklist` are dropped, so `JAIPUR STOCK` = `jaipur stock` = `Jaipur Stocks` = `jaipur`;
+  3. **one-letter spelling variants** (`find_similar_vendor`) — a dropped letter (`JAPUR`→`jaipur`), a swapped letter (`BIJVASAN`→`BIJWASAN`), a doubled letter (`jaipurr`), or two letters typed in the wrong order (`jaiupr`). Guardrails, each from a real pair in the live list: **both names ≥5 characters** (so `aman`/`amit` are never considered), **exactly one candidate** (two means we cannot know, so nothing is guessed), and **a differing DIGIT never matches** (`v01 apex`/`v02 apex`, `stock10`/`stock11` stay separate). Disable with `VENDOR_NAME_FUZZY_ENABLED=false`;
+  4. **remembered aliases** for spellings more than one letter apart (`BIJVASAN` vs `BIJWASHAN` — v→w *and* a missing h): declare once with `python -m backend.scripts.link_vendor_names <vendor_id> "<spelling>"`, remembered forever in `VendorNameAlias`. If that spelling is already a live vendor holding stock the script refuses and points at `merge_vendors.py`, which moves the stock and records the alias itself.
+
+  Because all four resolve to the *existing* vendor, the **vendor code is reused unchanged** — a new code is only ever generated for a genuinely new vendor.
 - **Founder-declared part equivalences** (`core/services/part_link_service.py`, `backend/scripts/link_part_numbers.py`): two numbers that mean one physical part but differ in text (`MF390300ML32` = `MF390300ML`) are linked by a human and then match as one part everywhere — comparison, allocation, the reservation ledger, top-up, stock gaps, part intelligence. Nothing is ever inferred: `MF390300ML33` stays a different part unless someone declares otherwise. Links are idempotent, order-independent and transitive.
 
 **Daily cycle on top of the registry** (`integrations/whatsapp/daily_stock.py`, all times IST via `workers/scheduler.py`):
 
 | When | What |
 |---|---|
-| `WHATSAPP_DAILY_REQUEST_TIME` (09:00) | Approved template ("please share your stock") to every registered vendor number; needs `WHATSAPP_DAILY_REQUEST_ENABLED=true` + an approved Meta template |
+| `WHATSAPP_DAILY_REQUEST_TIME` (09:30) | Approved template ("please share your stock") to every registered vendor number; needs `WHATSAPP_DAILY_REQUEST_ENABLED=true` + an approved Meta template. Being a **template**, it reaches vendors who have never replied to the bot — the 24h window does not apply |
 | all day | files auto-import by number; sheet/workbook update as usual |
 | `WHATSAPP_DAILY_SUMMARY_TIME` (11:00) | "📊 Received: X / Y + pending list" to the admin number (plain text, no template) |
 | admin texts `send reminder` | reminder template to still-pending vendors only, then a confirmation listing who was nudged |

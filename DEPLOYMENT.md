@@ -14,6 +14,126 @@ document processing) -- everything below is infrastructure/config only.
 
 ---
 
+## 0. Docker (run the whole stack anywhere)
+
+Render/Vercel above remain the production setup. Docker gives you the same
+application — Postgres, backend and frontend — on any machine with one
+command, and is the path to hosting it elsewhere later.
+
+```bash
+docker compose up --build
+```
+
+Then open **http://localhost:5173** and sign in with `admin` /
+`procurehub123` (that login is created only while the database has no users).
+
+All three pieces are images built from this repo, so the whole stack is
+versioned together:
+
+| Piece | Image | Address |
+|---|---|---|
+| Frontend | `frontend/Dockerfile` — Vite build served by nginx | http://localhost:5173 |
+| Backend | `Dockerfile` — FastAPI on uvicorn | http://localhost:8000 |
+| Database | `db/Dockerfile` — pinned layer over `postgres:18-alpine` | localhost:**55432** (not 5432, so it cannot clash with a local Postgres) |
+
+### The database image (`db/`)
+
+A thin layer over official Postgres rather than pulling the stock image, so
+the Postgres version, the timezone and any first-run setup change through a
+reviewed commit like the rest of the code.
+
+- **Timezone `Asia/Kolkata`.** The application already stores UTC and
+  converts for display (`core/time_utils.py`), so **no stored value
+  changes** — columns remain `timestamp without time zone`. What changes is
+  what a *human* sees when querying the database directly: `now()`, `psql`
+  output and the server log read in IST, matching the app. Checking "what
+  did the 09:15 job do this morning" no longer needs mental arithmetic.
+- **`db/initdb/` runs ONCE**, when the data volume is first created — never
+  on a restart, and never against a database that already holds data
+  (verified: the script stays at one execution across restarts). Put any
+  future extension or role setup there.
+- **The schema is deliberately NOT in this image.** The application creates
+  its own tables at startup; defining them here too would give the schema
+  two sources of truth that drift apart.
+
+#### Postgres 18 changed the data mount point
+
+Postgres 18's image stores data in a **major-version subdirectory**
+(`PGDATA=/var/lib/postgresql/18/docker`) so `pg_upgrade --link` can work
+across versions. Two consequences, both handled in `docker-compose.yml`:
+
+- The volume mounts at **`/var/lib/postgresql`**, not
+  `/var/lib/postgresql/data`. Keeping the old path under 18 would write the
+  data *outside* the volume and lose it on the next recreate — silently.
+- The volume is named **`pgdata18`**. Postgres 18 refuses to start when it
+  finds a 16-era layout, so reusing the old name would fail; a new name also
+  leaves the Postgres 16 volume (`pgdata`) intact instead of destroying it.
+  Remove it yourself once you are sure:
+  `docker volume rm procurehub_pgdata`
+
+Restoring a custom-format dump into the container (the tools are already
+inside it — `pg_restore` 18.6):
+
+```bash
+docker compose up -d db
+docker compose cp procurehub.dump db:/tmp/procurehub.dump
+docker compose exec db pg_restore -U procurehub -d procurehub \
+    --no-owner --no-privileges /tmp/procurehub.dump
+```
+
+Restore into an **empty** database. The backend creates its 38 tables on
+first start, so either restore before starting the backend, or add
+`--clean --if-exists` so the dump replaces those empty tables.
+
+Copy `.env.docker.example` to `.env` in the repo root to change ports,
+credentials or the database — every value already has a working default.
+
+### Two safety defaults, deliberately chosen
+
+1. **It never touches production data.** `backend/.env` holds the live Neon
+   `DATABASE_URL`, and the backend container reads that file — so Compose
+   *overrides* `DATABASE_URL` with the local `db` container. Verified: a
+   `docker compose up` creates its own empty database (0 vendors) while
+   production is untouched. To aim at a real database on purpose, set
+   `DATABASE_URL` in the root `.env`.
+
+2. **WhatsApp, Gmail and Sheets start disabled.** The same credentials work
+   perfectly from a laptop: a second instance polling Gmail would race the
+   deployed one for the same unread mail, and the bot would message real
+   vendors. Enable one only while you are testing it
+   (`WHATSAPP_ENABLED=true` in the root `.env`).
+
+### Things worth knowing
+
+- **`tzdata` is required, not cosmetic.** The scheduler passes the string
+  `Asia/Kolkata` to APScheduler; without the IANA database the 09:30 stock
+  request and the 09:15 Sheet reset would silently never schedule. The
+  backend image installs it and logs timestamps in IST.
+- **One worker on purpose.** The scheduler and the debounce queues for
+  allocation/workbook sends live in the process; a second worker would run
+  every daily job twice.
+- **The frontend's API URL is baked in at build time** (Vite inlines
+  `VITE_*`). Changing it needs `docker compose build frontend`, not just a
+  restart. For a real deployment:
+  `docker build --build-arg VITE_API_BASE_URL=https://api.example.com ./frontend`
+- **Volumes** keep uploaded files (`uploads`) and the database (`pgdata`)
+  across rebuilds. Imported data lives in Postgres; the `uploads` volume
+  holds the original files the File Inbox lets you download.
+- **`backend/.env` must be valid `KEY=VALUE`.** Python tolerates stray
+  lines with a warning; Docker Compose refuses to start. If you see
+  *"key cannot contain a space"*, comment out the offending line.
+
+Useful commands:
+
+```bash
+docker compose logs -f backend      # follow the backend log
+docker compose exec backend sh      # shell inside the container
+docker compose down                 # stop (volumes are kept)
+docker compose down -v              # stop AND erase the local database
+```
+
+---
+
 ## 1. Backend deployment (Render)
 
 This repo includes a Render Blueprint at `render.yaml` (repo root). From the

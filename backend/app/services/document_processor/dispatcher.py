@@ -129,6 +129,61 @@ def _vendor_name_from_filename(filename: str) -> str:
     return Path(filename).stem.strip()
 
 
+def _rescue_customer_order_mapping(
+    file_path: Path, reason: str, session: Session
+) -> tuple[dict[str, str], str] | None:
+    """A column mapping for a customer order whose headers were not
+    recognised: a SAVED format first (zero model calls), then the AI. Returns
+    None when neither can help, leaving the original failure to stand."""
+    if not ai_fallback.rescue_eligible(reason):
+        return None
+
+    cached = format_memory.find_mapping(file_path, session)
+    if cached is not None:
+        mapping, note = cached
+        # Saved formats store the quantity under the inventory key; the order
+        # reader accepts either, but be explicit about what it means here.
+        mapping = dict(mapping)
+        if "quantity_requested" not in mapping:
+            mapping["quantity_requested"] = (
+                mapping.get("available_quantity") or mapping.get("quantity") or ""
+            )
+        try:
+            order_service.read_order_table_with_mapping(file_path, mapping)
+        except ValueError:
+            logger.info(
+                "Saved format does not fit customer order '%s' -- trying the AI.",
+                file_path.name,
+            )
+        else:
+            return mapping, note
+
+    return ai_fallback.discover_customer_order_mapping(file_path, reason)
+
+
+def _remember_customer_order_format(
+    file_path: Path, mapping: dict[str, str], session: Session
+) -> None:
+    """Remember a mapping that worked, so the NEXT file with the same header
+    layout imports with no model call. Best-effort: learning must never
+    affect the import that just succeeded."""
+    try:
+        headers, _rows, part_column, quantity_column = (
+            order_service.read_order_table_with_mapping(file_path, mapping)
+        )
+        format_memory.save_mapping(
+            headers,
+            {"part_number": part_column, "available_quantity": quantity_column},
+            ai_fallback.provenance_label(),
+            session,
+        )
+    except Exception:  # noqa: BLE001 -- learning is best-effort
+        logger.exception(
+            "Could not save the learned customer-order format for %s (import unaffected).",
+            file_path.name,
+        )
+
+
 def _resolve_or_onboard_vendor(name: str, session: Session) -> tuple["Vendor", str | None]:
     """Reuse the existing vendor for this company NAME (the stable identity --
     never the generated code), or onboard a brand-new one. Race-safe:
@@ -372,26 +427,53 @@ def _dispatch_customer_order(
     # attempted (see `Classification.resolve_customer`), so `customer` stays
     # None exactly as before this feature existed.
 
+    customer_id = customer.id if customer is not None else None
     try:
         result = order_service.run_customer_order_import(
-            file_path, session, customer_id=customer.id if customer is not None else None
+            file_path, session, customer_id=customer_id
         )
     except order_service.DuplicateCustomerOrderFileError as exc:
         raise DocumentAlreadyProcessedError(exc.existing_order_id, str(exc)) from exc
-    except order_service.CustomerOrderQuantityMissingError as exc:
-        # A real line-item table was found but has no quantity column -- do not
-        # invent one. Report NEEDS_REVIEW (no order persisted) rather than fail.
-        return DispatchResult(
-            message=str(exc),
-            customer_id=customer.id if customer is not None else None,
-            customer_name=customer.name if customer is not None else None,
-            core_status="NEEDS_REVIEW",
+    except (order_service.CustomerOrderQuantityMissingError, ValueError) as exc:
+        # UNRECOGNISED HEADERS. Every customer writes their own column names
+        # ('Suzuki Part No. (No Dash)', 'Suzuki Order Qty'), which no alias
+        # list can cover, so try the same two-step rescue the vendor files
+        # get: a previously learned layout first (no model call), then the
+        # AI. Both only propose WHICH columns to read; the file is re-read
+        # deterministically below.
+        rescue = _rescue_customer_order_mapping(file_path, str(exc), session)
+        if rescue is None:
+            if isinstance(exc, order_service.CustomerOrderQuantityMissingError):
+                # A real table, but no quantity column -- never invent one.
+                # NEEDS_REVIEW (no order persisted) rather than a failure.
+                return DispatchResult(
+                    message=str(exc),
+                    customer_id=customer_id,
+                    customer_name=customer.name if customer is not None else None,
+                    core_status="NEEDS_REVIEW",
+                )
+            raise
+        mapping, note = rescue
+        result = order_service.run_customer_order_import(
+            file_path,
+            session,
+            customer_id=customer_id,
+            column_mapping=mapping,
+            mapping_note=note,
         )
+        logger.info(
+            "Customer order '%s' imported via a rescued column mapping (%s rows).",
+            file_path.name,
+            result.row_count,
+        )
+        _remember_customer_order_format(file_path, mapping, session)
 
     return DispatchResult(
         row_count=result.row_count,
         error_count=result.error_count,
-        message=onboarding_message,
+        # A rescued file explains itself ("imported via saved format / AI
+        # column mapping"); otherwise the onboarding note, exactly as before.
+        message=" ".join(m for m in (onboarding_message, result.message) if m) or None,
         customer_order_id=result.order_id,
         customer_id=customer.id if customer is not None else None,
         customer_name=customer.name if customer is not None else None,
