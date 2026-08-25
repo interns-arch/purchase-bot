@@ -34,7 +34,11 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80
 
+# 127.0.0.1, NOT localhost: in Alpine `localhost` resolves to ::1 first, and
+# the server block below listens on IPv4 only -- so `localhost` gets
+# "connection refused" and the container is reported unhealthy while it is
+# actually serving perfectly.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q --spider http://localhost/ || exit 1
+    CMD wget -q --spider http://127.0.0.1/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
