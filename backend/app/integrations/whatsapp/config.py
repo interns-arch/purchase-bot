@@ -107,11 +107,25 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_SEND_PO_TO_VENDOR", "true").strip().lower() == "true"
     )
 
-    # Send allocation report workbooks to WhatsApp after automatic vendor
-    # selection. false = allocations still run and are visible on the web
-    # (Vendor Comparison / exports); only the WhatsApp file is skipped.
+    # The COMBINED allocation workbook (one sheet per customer order).
+    # Default changed to false on 25 Aug 2026: the Founder found that sheet
+    # hard to read and asked for one message per vendor instead (below).
+    # Set true to receive both.
     send_allocation_report: bool = (
-        os.environ.get("WHATSAPP_SEND_ALLOCATION_REPORT", "true").strip().lower() == "true"
+        os.environ.get("WHATSAPP_SEND_ALLOCATION_REPORT", "false").strip().lower() == "true"
+    )
+
+    # ONE MESSAGE PER VENDOR after an allocation batch (Founder, 25 Aug 2026:
+    # "Purchase from Ess aay ... Purchase from Northend ..."), answering
+    # "what do we buy from this vendor?" -- see whatsapp/vendor_purchase_output.py.
+    allocation_per_vendor: bool = (
+        os.environ.get("WHATSAPP_ALLOCATION_PER_VENDOR", "true").strip().lower() == "true"
+    )
+
+    # A vendor with more purchase lines than this gets a small Excel instead
+    # of an unreadably long text message ("details in excel or text").
+    vendor_message_max_lines: int = int(
+        os.environ.get("WHATSAPP_VENDOR_MESSAGE_MAX_LINES", "20")
     )
 
     # When several vendor files arrive in one WhatsApp batch, each successful

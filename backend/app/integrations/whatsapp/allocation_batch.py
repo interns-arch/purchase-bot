@@ -33,6 +33,7 @@ import threading
 
 from backend.app.integrations.whatsapp import outbound
 from backend.app.integrations.whatsapp import recipients as recipients_service
+from backend.app.integrations.whatsapp import vendor_purchase_output
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.notifications import broker
 from core.db import get_session
@@ -138,6 +139,7 @@ def _run_batch(order_ids: list[int]) -> None:
     reports: list[tuple[str, list]] = []  # (worksheet title, export rows)
     order_labels: list[str] = []  # 'Order 12 — Karol Bagh' per report
     headings: dict[str, str] = {}  # worksheet title -> in-sheet heading
+    order_label_by_title: dict[str, str] = {}  # title -> 'Order 12 — Karol Bagh'
     done: list[int] = []
     failed: list[int] = []
 
@@ -152,6 +154,7 @@ def _run_batch(order_ids: list[int]) -> None:
             reports.append((title, rows))
             order_labels.append(label)
             headings[title] = heading
+            order_label_by_title[title] = label
             done.append(order_id)
         except Exception:  # noqa: BLE001 -- one bad order must not block the batch
             logger.exception(
@@ -169,25 +172,39 @@ def _run_batch(order_ids: list[int]) -> None:
         )
         return
 
-    # Founder + purchase team (Founder's rule, 18 Aug 2026) -- see
-    # `recipients.internal_file_recipients`. Read on this module's own
-    # session so the whole batch uses one database entry point.
+    # PRIMARY OUTPUT (Founder, 25 Aug 2026): one message per vendor --
+    # "Purchase from BIJWASHAN STOCK: <parts>" -- instead of one combined
+    # sheet he found hard to read. Sent first, and independently of the
+    # workbook below, so a workbook problem can never cost him the purchase
+    # instructions. Never raises.
+    vendor_messages = vendor_purchase_output.send_vendor_messages(reports, order_label_by_title)
+
+    # The combined workbook is now OPT-IN (WHATSAPP_SEND_ALLOCATION_REPORT).
     recipients: list[str] = []
     if whatsapp_settings.send_allocation_report:
         with get_session() as session:
             recipients = recipients_service.internal_file_recipients(session)
     if not recipients:
         logger.info(
-            "Allocation report not sent to WhatsApp for orders %s (send_allocation_report=%s, "
-            "admin numbers configured=%s) -- allocations are saved and visible on the web.",
+            "Combined allocation workbook not sent for orders %s "
+            "(send_allocation_report=%s, admin numbers configured=%s); "
+            "%d vendor-wise purchase message(s) were sent instead. "
+            "Allocations are saved and visible on the web either way.",
             order_ids,
             whatsapp_settings.send_allocation_report,
             bool(whatsapp_settings.admin_phone_numbers),
+            vendor_messages,
         )
         broker.publish(
             "success",
             f"Automatic vendor selection completed for {len(reports)} customer order(s).",
-            "Report not sent: WHATSAPP_ADMIN_PHONE_NUMBER is not configured.",
+            (
+                f"{vendor_messages} vendor-wise purchase message(s) sent on WhatsApp."
+                if vendor_messages
+                else "No WhatsApp purchase messages were sent (nothing allocated, "
+                "or no recipients configured)."
+            ),
+            mirror=False,
         )
         return
 
