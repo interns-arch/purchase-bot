@@ -30,6 +30,7 @@ from backend.app.documents.models import (
     IncomingDocument,
     IncomingDocumentType,
 )
+from backend.app.integrations import dealer_portal
 from backend.app.integrations.whatsapp import (
     command_store,
     commands,
@@ -765,6 +766,14 @@ def _process_staged_file(
             getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
         )
         inventory_output.request_consolidated_send(getattr(result, "vendor_name", None))
+        # DEALER PORTAL: push this vendor's new snapshot -- including the
+        # parts that DISAPPEARED since the previous snapshot, sent as
+        # quantity 0, which DP cannot work out for itself. Gated by
+        # DEALER_PORTAL_ENABLED (default false) and DEALER_PORTAL_SHADOW
+        # (default true); best-effort in its own session, and never raises.
+        dealer_portal.request_push(
+            getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
+        )
 
     # Founder automation ("Combined ZIP" mode): a successfully imported
     # customer order is queued for automatic vendor selection; the batch runs

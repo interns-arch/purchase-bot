@@ -967,3 +967,68 @@ class VendorNameAlias(Base):
         ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class DealerPortalPushStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    SHADOW = "SHADOW"
+
+
+class DealerPortalPush(Base):
+    """One attempt to push a vendor stock snapshot into Dealer Portal.
+
+    Both the AUDIT TRAIL ("did today's stock actually reach DP, and what did
+    DP do with it?") and the RETRY QUEUE -- the scheduler re-runs rows left
+    in FAILED. Without it that question can only be answered by opening DP
+    by hand.
+
+    A push covers ONE DP dealer account, which may be fed by SEVERAL
+    ProcureHub vendor rows (`Bijvasan` and `Bijwasan` are two vendor rows for
+    one real warehouse with one DP account -- see
+    `backend/app/integrations/dealer_portal/credentials.py`). `vendor_id` and
+    `import_id` are therefore the TRIGGERING vendor and its active import,
+    while `account_key`, `vendor_ids` and `import_ids` record the full group
+    the delta was actually computed over.
+
+    Credentials are never stored here -- environment variables only."""
+
+    __tablename__ = "dealer_portal_pushes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_key: Mapped[str] = mapped_column(nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vendors.id", ondelete="SET NULL"), default=None
+    )
+    import_id: Mapped[int | None] = mapped_column(
+        ForeignKey("inventory_imports.id", ondelete="SET NULL"), default=None
+    )
+    # The whole group this delta was computed over.
+    vendor_ids: Mapped[list] = mapped_column(JSON, default=list)
+    import_ids: Mapped[list] = mapped_column(JSON, default=list)
+
+    batch_id: Mapped[str | None] = mapped_column(default=None)  # from DP's response
+    rows_sent: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    zeroed_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    inserted_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    updated_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    # Parts DP rejected because they are absent from its parts master. This
+    # is a SIGNAL, not noise -- it is exactly the "new SKU we should add"
+    # report.
+    failed_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+
+    status: Mapped[DealerPortalPushStatus] = mapped_column(
+        Enum(DealerPortalPushStatus, name="dealer_portal_push_status"),
+        default=DealerPortalPushStatus.PENDING,
+        nullable=False,
+    )
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    attempts: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    __table_args__ = (
+        Index("ix_dealer_portal_pushes_account_created", "account_key", "created_at"),
+        Index("ix_dealer_portal_pushes_status", "status"),
+    )

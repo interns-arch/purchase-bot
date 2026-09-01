@@ -592,8 +592,18 @@ def command_centre_alerts(db: Session = Depends(get_db)) -> list[Alert]:
             )
         )
 
+    # Severity first, then NEWEST first (Founder's request): a problem from
+    # this morning is the one still worth acting on, while a 150-hour-old
+    # shortage has usually been dealt with off-system. Alerts with no age of
+    # their own (e.g. "vendors have not sent today's stock") sort last within
+    # their severity rather than jumping the queue.
     severity_rank = {"error": 0, "warning": 1, "info": 2}
-    alerts.sort(key=lambda alert: severity_rank.get(alert.severity, 3))
+    alerts.sort(
+        key=lambda alert: (
+            severity_rank.get(alert.severity, 3),
+            alert.age_hours if alert.age_hours is not None else float("inf"),
+        )
+    )
     return alerts
 
 

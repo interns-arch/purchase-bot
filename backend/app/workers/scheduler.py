@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from backend.app.integrations.dealer_portal.config import dealer_portal_settings
 from backend.app.integrations.gmail.config import gmail_settings
 from backend.app.integrations.google_sheets.config import google_sheets_settings
 from backend.app.integrations.google_sheets.sync_service import reset_sheet_for_new_day_safe
@@ -103,6 +104,35 @@ def _schedule_google_sheet_daily_reset() -> None:
         )
 
 
+def _schedule_dealer_portal_retry() -> None:
+    """Re-send Dealer Portal pushes left in FAILED (a DP outage, a timeout,
+    an auth failure). Safe to repeat: DP's upload is an absolute replace, so
+    re-sending the same stock cannot double-count it.
+
+    Does nothing unless DEALER_PORTAL_ENABLED is set."""
+    if not dealer_portal_settings.enabled:
+        return
+    if dealer_portal_settings.retry_interval_minutes <= 0:
+        return
+
+    from backend.app.integrations import dealer_portal
+
+    _scheduler.add_job(
+        lambda: _run_safely(
+            "dealer_portal_retry_failed_pushes", dealer_portal.retry_failed_pushes
+        ),
+        "interval",
+        minutes=dealer_portal_settings.retry_interval_minutes,
+        id="dealer_portal_retry_failed_pushes",
+        replace_existing=True,
+    )
+    logger.info(
+        "Dealer Portal retry sweep enabled -- every %d minute(s), shadow=%s.",
+        dealer_portal_settings.retry_interval_minutes,
+        dealer_portal_settings.shadow,
+    )
+
+
 def _schedule_startup_recovery() -> None:
     """One-shot, shortly after boot: re-queue customer orders whose
     allocation was lost to a crash/restart (the in-memory batch queue does
@@ -125,6 +155,7 @@ def _schedule_startup_recovery() -> None:
 def start_scheduler() -> None:
     _schedule_whatsapp_daily_jobs()
     _schedule_google_sheet_daily_reset()
+    _schedule_dealer_portal_retry()
     _schedule_startup_recovery()
 
     if gmail_settings.enabled:

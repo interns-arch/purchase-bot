@@ -128,6 +128,26 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_VENDOR_MESSAGE_MAX_LINES", "20")
     )
 
+    # ONE EXCEL, ONE SHEET PER VENDOR after an allocation batch (Founder,
+    # 1 Sep 2026): instead of a separate text message per vendor, a single
+    # workbook is sent whose tabs are named after the vendors ("Bijwasan",
+    # "Northend", "Jaipur"), each listing that vendor's parts with the
+    # CUSTOMER REQUESTED and VENDOR AVAILABLE quantities alongside what was
+    # allocated -- detail a text message cannot carry. A leading Summary tab
+    # indexes the vendors.
+    #
+    # Internal only: the workbook shows every vendor we buy from and at what
+    # quantity, so it goes to the founder/admin number(s) and the registered
+    # purchase team -- the same recipients as before -- and never to a vendor.
+    #
+    # false restores the per-vendor text messages exactly. The texts are also
+    # used automatically as a FALLBACK if the workbook cannot be built or
+    # delivered, so a spreadsheet problem never costs the Founder the
+    # purchase instructions.
+    vendor_workbook: bool = (
+        os.environ.get("WHATSAPP_VENDOR_WORKBOOK", "true").strip().lower() == "true"
+    )
+
     # When several vendor files arrive in one WhatsApp batch, each successful
     # import requests the consolidated workbook -- this debounce coalesces
     # those requests so ONE final workbook is sent after imports have been

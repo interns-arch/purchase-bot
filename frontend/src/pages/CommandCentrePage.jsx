@@ -338,8 +338,9 @@ export function CommandCentrePage() {
           </h2>
         </div>
         <SectionHint>
-          Problems that need a person, worst first — failed files, orders no vendor can cover,
-          vendors who haven't sent stock, POs without an invoice.
+          Problems that need a person — most serious first, and within that the newest first.
+          Failed files, orders no vendor can cover, vendors who haven't sent stock, POs without
+          an invoice.
         </SectionHint>
         {alerts.length === 0 ? (
           <EmptyState
