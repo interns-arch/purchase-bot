@@ -35,8 +35,10 @@ from backend.app.integrations.whatsapp import (
     command_store,
     commands,
     contact_import,
+    customer_text_order,
     daily_stock,
     failed_file,
+    pending_customer_files,
     pending_vendor_files,
     registry,
     vendor_memory,
@@ -52,11 +54,14 @@ from backend.app.integrations.whatsapp.parser import (
     IncomingWhatsAppText,
 )
 from backend.app.notifications import emitters as notifications
+from backend.app.services.document_processor import staging
 from backend.app.services.document_processor.metadata import DocumentMetadata
 from backend.app.services.document_processor.processor import process_document
 from backend.app.services.topup_runner import run_topup_for_vendor
 from core.db import get_session
+from core.services import customer_code_service
 from core.logging_setup import get_logger
+from core.time_utils import now_ist
 
 logger = get_logger(__name__)
 
@@ -75,6 +80,41 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     if daily_stock.is_reminder_command(message.sender, message.text):
         daily_stock.handle_reminder_command(message.sender)
         return
+
+    # Founder command "register customer": the NEXT Excel from this admin
+    # number is a CUSTOMER contact list. The same message may instead carry
+    # the customers inline ("Karol Bagh 9812345678" one per line), in which
+    # case it is applied immediately without waiting for a file.
+    if daily_stock.is_admin_sender(message.sender) and contact_import.is_customer_command_text(
+        message.text
+    ):
+        with get_session() as session:
+            command_store.set_command(
+                message.sender, contact_import.CUSTOMER_COMMAND_KEY, session
+            )
+        send_reply_safe(
+            message.sender,
+            "Send the customer list now — either an Excel (one row per "
+            "customer: Customer Name + WhatsApp number(s)), or just type them "
+            "here, one per line:\n\n"
+            "Karol Bagh 9812345678\n"
+            "Rohini Auto 9811122233",
+        )
+        return
+
+    # The customer list typed as a MESSAGE rather than sent as a file --
+    # accepted whenever an admin's text parses as name+number pairs, so the
+    # Founder can register without preparing a sheet.
+    if daily_stock.is_admin_sender(message.sender):
+        with get_session() as session:
+            awaiting_customers = contact_import.has_pending_customer_command(
+                message.sender, whatsapp_settings.grouping_window_minutes, session
+            )
+        if awaiting_customers:
+            rows = contact_import.parse_contact_text(message.text)
+            if rows:
+                _apply_customer_contacts_safe(message.sender, rows)
+                return
 
     # Founder command "register" / "update numbers": the NEXT Excel from this
     # admin number is a vendor contact list that updates the number registry.
@@ -136,6 +176,22 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         with get_session() as session:
             registered = registry.lookup(message.sender, session)
     if registered is not None:
+        # A registered CUSTOMER may simply type their part numbers -- the
+        # number is the identity, so no command and no file are needed. Any
+        # other text from a registered number stays ignored exactly as
+        # before (no instruction spam back at a vendor).
+        if registered.party_type == "customer":
+            order = customer_text_order.parse_text_order(message.text)
+            if order.is_order:
+                logger.info(
+                    "WhatsApp text from registered customer %s (%s) read as an "
+                    "ORDER of %d part(s).",
+                    message.sender,
+                    registered.name,
+                    len(order.lines),
+                )
+                _process_text_order(message.sender, order, customer_id=registered.party_id)
+                return
         logger.info(
             "WhatsApp text from registered %s number %s (%s) ignored: %r",
             registered.party_type,
@@ -145,9 +201,47 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         )
         return
 
+    # A TYPED customer order from an unregistered sender: they texted
+    # "customer" (the command persists), then sent the part numbers as an
+    # ordinary message instead of a file. Excel is unaffected -- this only
+    # fires when the text actually parses as part numbers, so a vendor name
+    # or ordinary chatter still falls through to the handling below.
+    with get_session() as session:
+        pending = command_store.get_fresh_command(
+            message.sender, whatsapp_settings.grouping_window_minutes, session
+        )
+    if pending == "customer":
+        order = customer_text_order.parse_text_order(message.text)
+        if order.is_order:
+            logger.info(
+                "WhatsApp text from %s read as a TYPED customer order: %d part(s), "
+                "customer=%r.",
+                message.sender,
+                len(order.lines),
+                order.customer_name,
+            )
+            _process_text_order(message.sender, order)
+            return
+
     command = commands.parse_command(message.text)
     if command is None:
-        vendor_name = (message.text or "").strip()
+        supplied_name = (message.text or "").strip()
+        # Customer Order files held while waiting for their customer name --
+        # checked before vendor files so the answer goes to whichever kind of
+        # file this sender actually has waiting.
+        with get_session() as session:
+            held_customer = pending_customer_files.list_for(message.sender, session)
+        if held_customer and supplied_name:
+            logger.info(
+                "WhatsApp text from %s taken as CUSTOMER NAME %r for %d held file(s).",
+                message.sender,
+                supplied_name,
+                len(held_customer),
+            )
+            _process_pending_customer_files(message.sender, supplied_name, held_customer)
+            return
+
+        vendor_name = supplied_name
         with get_session() as session:
             held = pending_vendor_files.list_for(message.sender, session)
         if held and vendor_name:
@@ -182,6 +276,103 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
             message.sender,
             f"Got it — now upload your {command.label} file (Excel).",
         )
+
+
+def _apply_customer_contacts_safe(sender: str, rows) -> None:
+    """Apply a typed customer list and reply with exactly what changed.
+    Never raises -- a registry failure must not kill the worker thread."""
+    try:
+        with get_session() as session:
+            reply, stats = contact_import.apply_customer_contact_update(rows, session)
+        logger.info("Customer registry updated from a typed list: %s", stats)
+        send_reply_safe(sender, reply)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not apply the typed customer contact list.")
+        send_reply_safe(
+            sender,
+            "Sorry — that customer list could not be applied. Please check the "
+            "numbers and try again.",
+        )
+
+
+def _process_text_order(
+    sender: str, order, customer_id: int | None = None
+) -> None:
+    """Turn a TYPED customer order into the CSV the normal importer reads,
+    then run it through the unchanged pipeline.
+
+    Nothing downstream knows the difference: `run_customer_order_import`
+    already accepts CSV, so allocation and the vendor-wise workbook behave
+    exactly as they do for an Excel upload. Never raises."""
+    try:
+        send_reply_safe(sender, customer_text_order.summary_reply(order))
+
+        content = customer_text_order.build_csv(order)
+        stamp = now_ist().strftime("%Y%m%d_%H%M%S")
+        # The staged file is kept for audit like any other upload, and the
+        # name says where it came from.
+        file_name = f"whatsapp_text_order_{stamp}.csv"
+        file_path = staging.save_incoming_bytes(
+            content, file_name, DocumentSource.WHATSAPP
+        )
+
+        metadata = DocumentMetadata(
+            sender=sender,
+            caption=None,
+            original_filename=file_name,
+            document_type_hint=IncomingDocumentType.CUSTOMER_ORDER,
+            customer_id_hint=customer_id,
+            customer_name=order.customer_name,
+        )
+        _process_staged_file(file_path, metadata, file_name, notify_sender=False)
+    except Exception:  # noqa: BLE001 -- a typed order must never kill the worker
+        logger.exception("Could not process the typed customer order from %s.", sender)
+        send_reply_safe(
+            sender,
+            "Sorry — that order could not be processed. Please re-send the part "
+            "numbers, or send them as an Excel file.",
+        )
+
+
+def _process_pending_customer_files(sender: str, customer_name: str, held) -> None:
+    """Import every held Customer Order file for `sender` under the customer
+    name they just supplied, oldest first. The counterpart of
+    `_process_pending_vendor_files`; each file is removed from the pending
+    store whether its import succeeds or fails."""
+    send_reply_safe(
+        sender, f"Importing {len(held)} file(s) for customer '{customer_name}'."
+    )
+    for row in held:
+        file_path = Path(row.staged_path)
+        try:
+            if not file_path.exists():
+                logger.error(
+                    "Held customer file %s for %s no longer exists on disk -- skipping.",
+                    row.staged_path,
+                    sender,
+                )
+                notifications.publish_download_failure(
+                    "WhatsApp",
+                    row.original_filename,
+                    "The held file is no longer available -- please re-send it.",
+                )
+                continue
+            metadata = DocumentMetadata(
+                sender=sender,
+                document_type_hint=IncomingDocumentType.CUSTOMER_ORDER,
+                original_filename=row.original_filename,
+                customer_name=customer_name,
+            )
+            _process_staged_file(file_path, metadata, row.original_filename)
+        except Exception:  # noqa: BLE001 -- one bad held file must not block the rest
+            logger.exception(
+                "Failed to import held customer file %s for %s.",
+                row.original_filename,
+                sender,
+            )
+        finally:
+            with get_session() as session:
+                pending_customer_files.remove(row.id, session)
 
 
 def _process_pending_vendor_files(sender: str, vendor_name: str, held) -> None:
@@ -255,6 +446,12 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
             pending_remove_team = contact_import.has_pending_remove_team_command(
                 message.sender, whatsapp_settings.grouping_window_minutes, session
             )
+            pending_customer = contact_import.has_pending_customer_command(
+                message.sender, whatsapp_settings.grouping_window_minutes, session
+            )
+        if contact_import.is_customer_caption(message.caption) or pending_customer:
+            _handle_customer_contact_upload(message)
+            return
         if caption_lower in contact_import.REMOVE_TEAM_COMMANDS or pending_remove_team:
             _handle_team_update_upload(message, remove=True)
             return
@@ -420,6 +617,59 @@ def _handle_contact_update_upload(message: IncomingWhatsAppMessage) -> None:
     finally:
         # One list per "register" command -- the next file from this admin is
         # a normal upload again unless they text "register" first.
+        with get_session() as session:
+            command_store.clear_command(message.sender, session)
+
+    send_reply_safe(message.sender, reply)
+
+
+def _handle_customer_contact_upload(message: IncomingWhatsAppMessage) -> None:
+    """A CUSTOMER contact list from an admin number: parse it and register
+    the numbers against customers. The exact counterpart of
+    `_handle_contact_update_upload`, reusing the same forgiving parser."""
+    logger.info(
+        "WhatsApp file '%s' from admin %s taken as a CUSTOMER CONTACT LIST "
+        "(registry update, not an order import).",
+        message.filename,
+        message.sender,
+    )
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+    except Exception:
+        logger.exception(
+            "Could not download the customer list %s from %s.",
+            message.media_id,
+            message.sender,
+        )
+        send_reply_safe(
+            message.sender, "❌ Could not receive the customer list. Please send it again."
+        )
+        return
+
+    try:
+        rows = contact_import.parse_contact_rows(Path(file_path))
+        if not rows:
+            send_reply_safe(
+                message.sender,
+                "⚠️ No customer rows found in that file. Expected one row per "
+                "customer: Customer Name + WhatsApp number(s).",
+            )
+            return
+        with get_session() as session:
+            reply, stats = contact_import.apply_customer_contact_update(rows, session)
+        logger.info("Founder customer registry update applied: %s", stats)
+    except Exception:
+        logger.exception("Customer registry update failed for %s.", message.filename)
+        send_reply_safe(
+            message.sender,
+            "❌ Could not read that customer list. Please send an Excel with "
+            "Customer Name and WhatsApp number columns.",
+        )
+        return
+    finally:
+        # One list per "register customer" command -- the next file from this
+        # admin is a normal upload again.
         with get_session() as session:
             command_store.clear_command(message.sender, session)
 
@@ -648,6 +898,36 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
             )
             return
 
+    # Customer identity for an UNREGISTERED sender's Customer Order works
+    # exactly like the vendor flow above: the customer NAME comes from the
+    # file caption or a follow-up text. Unlike vendor files this is OPTIONAL
+    # -- a filename carrying a Customer Code still resolves on its own, and
+    # an order with no customer at all is a supported state -- so the file is
+    # only held when neither a caption nor a code-shaped filename is present.
+    customer_name = None
+    if command.document_type == IncomingDocumentType.CUSTOMER_ORDER:
+        customer_name = (message.caption or "").strip()
+        if not customer_name and not customer_code_service.parse_customer_code_from_filename(
+            message.filename or ""
+        ):
+            with get_session() as session:
+                pending_customer_files.add(
+                    message.sender, str(file_path), message.filename, session
+                )
+            logger.info(
+                "WhatsApp customer order '%s' from %s has no customer name and no "
+                "Customer Code -- held at %s; asking the sender.",
+                message.filename,
+                message.sender,
+                file_path,
+            )
+            send_reply_safe(
+                message.sender,
+                f"Got '{message.filename}'. Which customer is this order for? "
+                "Reply with the customer name (e.g. Karol Bagh).",
+            )
+            return
+
     metadata = DocumentMetadata(
         sender=message.sender,
         caption=message.caption,
@@ -655,6 +935,7 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
         original_filename=message.filename,
         document_type_hint=command.document_type,
         vendor_name=vendor_name or None,
+        customer_name=customer_name or None,
     )
     _process_staged_file(file_path, metadata, message.filename, message.media_id)
 

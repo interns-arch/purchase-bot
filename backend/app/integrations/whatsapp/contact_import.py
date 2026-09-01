@@ -432,3 +432,190 @@ def has_pending_register_command(sender: str, window_minutes: float, session: Se
         command_store.get_fresh_command(sender, window_minutes, session)
         == REGISTER_COMMAND_KEY
     )
+
+
+# --------------------------- CUSTOMER registration -------------------------
+# The Founder maintains customer numbers exactly the way vendor numbers are
+# maintained (above) -- same commands shape, same forgiving Excel parser,
+# same authoritative semantics. Added 1 Sep 2026 on the Founder's request
+# ("make the system also I write the admin register customer ... and this
+# also should be both excel and text").
+
+CUSTOMER_COMMANDS = {
+    "register customer",
+    "register customers",
+    "customer numbers",
+    "customer contacts",
+    "update customer numbers",
+    "update customer contacts",
+    "add customer",
+}
+CUSTOMER_COMMAND_KEY = "register_customer"
+
+
+def is_customer_command_text(text: str | None) -> bool:
+    return (text or "").strip().lower() in CUSTOMER_COMMANDS
+
+
+def is_customer_caption(caption: str | None) -> bool:
+    return (caption or "").strip().lower() in CUSTOMER_COMMANDS
+
+
+def has_pending_customer_command(sender: str, window_minutes: float, session) -> bool:
+    return (
+        command_store.get_fresh_command(sender, window_minutes, session)
+        == CUSTOMER_COMMAND_KEY
+    )
+
+
+def parse_contact_text(text: str | None) -> list[tuple[str, list[str]]]:
+    """[(name, [numbers])] from a plain WhatsApp MESSAGE rather than a file.
+
+    The Founder writes one party per line, in whichever order reads
+    naturally -- the number is found by shape, and whatever is left on the
+    line is the name::
+
+        Karol Bagh 9812345678
+        9811122233 - Rohini Auto
+        Pitampura Motors, 98111 22333 / 98444 55666
+
+    A line with no usable number, or no name left after removing the
+    numbers, is skipped -- never guessed at."""
+    rows: list[tuple[str, list[str]]] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        numbers: list[str] = []
+        for candidate in re.findall(r"[+\d][\d\s\-()]{8,}\d", line):
+            for number in _numbers_in_cell(candidate):
+                if number not in numbers:
+                    numbers.append(number)
+        if not numbers:
+            continue
+        # Whatever remains once the phone numbers are removed is the name.
+        name = re.sub(r"[+\d][\d\s\-()]{8,}\d", " ", line)
+        name = re.sub(r"[,;:/\-]+", " ", name)
+        name = " ".join(name.split()).strip()
+        if not name:
+            continue
+        rows.append((name, numbers))
+    return rows
+
+
+def apply_customer_contact_update(
+    rows: list[tuple[str, list[str]]], session: Session
+) -> tuple[str, dict]:
+    """Apply the Founder's authoritative CUSTOMER contact list.
+
+    Mirrors `apply_contact_update` exactly -- same REPLACE semantics, same
+    re-point behaviour, same shared-number rule -- but registers the numbers
+    against Customers and onboards unknown names through the existing
+    customer onboarding (permanent Customer Code, race-safe)."""
+    from backend.app.services.document_processor.dispatcher import (
+        _resolve_or_onboard_customer,
+    )
+
+    updated: list[str] = []
+    onboarded: list[str] = []
+    skipped: list[str] = []
+    repointed: list[str] = []
+    no_number: list[str] = []
+    assigned_this_batch: dict[str, str] = {}  # number -> customer name
+
+    for name, numbers in rows:
+        if not numbers:
+            no_number.append(name)
+            continue
+        already = [n for n in numbers if n in assigned_this_batch]
+        if len(already) == len(numbers):
+            skipped.append(
+                f"{name} — same number as {assigned_this_batch[already[0]]} (one customer)"
+            )
+            continue
+
+        customer, onboarding_message = _resolve_or_onboard_customer(name, session)
+        if onboarding_message:
+            onboarded.append(f"{customer.name} ({customer.customer_code})")
+
+        # REPLACE: this customer's registrations become exactly this row.
+        for existing in session.execute(
+            select(WhatsAppRegisteredNumber).where(
+                WhatsAppRegisteredNumber.customer_id == customer.id
+            )
+        ).scalars():
+            if existing.whatsapp_number not in numbers:
+                session.delete(existing)
+        session.flush()
+
+        final_numbers = []
+        for number in numbers:
+            if assigned_this_batch.get(number) not in (None, customer.name):
+                continue
+            try:
+                registry.register_customer_number(
+                    number, customer.id, session, note="founder update"
+                )
+            except registry.NumberAlreadyRegisteredError as exc:
+                # Registered to another party (vendor OR customer): the
+                # Founder's new list is authoritative -- re-point it.
+                registry.unregister(number, session)
+                registry.register_customer_number(
+                    number, customer.id, session, note="founder update"
+                )
+                previous = (
+                    f"vendor_id={exc.existing.vendor_id}"
+                    if exc.existing.vendor_id is not None
+                    else f"customer_id={exc.existing.customer_id}"
+                )
+                repointed.append(f"{number} → {customer.name} (was {previous})")
+            except ValueError:
+                continue  # admin number etc. -- refused, not fatal
+            assigned_this_batch[number] = customer.name
+            final_numbers.append(number)
+        if final_numbers:
+            updated.append(
+                f"{customer.name} ({customer.customer_code}): {', '.join(final_numbers)}"
+            )
+
+    lines = [f"✅ Customer contacts updated — {len(updated)} customer(s)."]
+    lines.extend(f"• {entry}" for entry in updated)
+    if onboarded:
+        lines.append("")
+        lines.append(f"🆕 New customer(s) onboarded: {', '.join(onboarded)}")
+    if repointed:
+        lines.append("")
+        lines.append("↪️ Number(s) moved:")
+        lines.extend(f"• {entry}" for entry in repointed)
+    if skipped:
+        lines.append("")
+        lines.append("ℹ️ Skipped:")
+        lines.extend(f"• {entry}" for entry in skipped)
+    if no_number:
+        lines.append("")
+        lines.append(f"⚠️ No usable number found for: {', '.join(no_number)}")
+    lines.append("")
+    lines.append(
+        "These numbers can now send an order directly — an Excel file, or the "
+        "part numbers as a text message. No command needed."
+    )
+
+    from backend.app.services import audit_service
+
+    audit_service.record(
+        session,
+        actor="founder-whatsapp",
+        action="customer_registry_update",
+        entity_type="whatsapp_registry",
+        previous_value=None,
+        new_value={"updated": updated, "repointed": repointed, "skipped": skipped},
+        reason=f"{len(rows)} row(s) in the customer contact list",
+    )
+    stats = {
+        "updated": len(updated),
+        "onboarded": len(onboarded),
+        "repointed": len(repointed),
+        "skipped": len(skipped),
+        "no_number": len(no_number),
+    }
+    return "\n".join(lines), stats

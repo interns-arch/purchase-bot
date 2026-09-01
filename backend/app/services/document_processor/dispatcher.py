@@ -418,10 +418,15 @@ def _dispatch_customer_order(
         # customer -- reject rather than silently misassigning the order.
         raise UnknownCustomerCodeError(classification.customer_code)
     elif classification.resolve_customer:
-        # WhatsApp Customer Order with no code-shaped prefix -- first-time
-        # onboarding by name, exactly like an unrecognized Vendor Inventory
-        # filename onboards a new vendor.
-        name = _customer_name_from_filename(file_path.name)
+        # WhatsApp Customer Order with no code-shaped prefix. A customer NAME
+        # supplied by the sender (file caption, follow-up text, or the first
+        # line of a typed order) outranks the filename -- the same rule
+        # Vendor Inventory already follows, so an unregistered number can
+        # send an order for any customer by naming them. With no supplied
+        # name it falls back to the filename exactly as before.
+        name = (classification.customer_name or "").strip() or _customer_name_from_filename(
+            file_path.name
+        )
         customer, onboarding_message = _resolve_or_onboard_customer(name, session)
     # else: Gmail/manual Customer Order -- customer identification was never
     # attempted (see `Classification.resolve_customer`), so `customer` stays

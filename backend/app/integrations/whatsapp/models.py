@@ -147,3 +147,25 @@ class WhatsAppIntegrationStatus(Base):
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )
+
+
+class WhatsAppPendingCustomerFile(Base):
+    """A staged Customer Order file waiting for its CUSTOMER NAME.
+
+    The exact counterpart of `WhatsAppPendingVendorFile` (Founder, 1 Sep
+    2026: an unregistered number must be able to send a customer order "like
+    vendor file is treating now"). An UNREGISTERED sender's Customer Order
+    file names its customer through the file caption or a follow-up text; if
+    neither is present the file is staged on disk and recorded here, and the
+    sender's next non-command text is taken as the customer name.
+
+    A REGISTERED customer number never reaches this table -- the number is
+    the identity. `original_filename` is audit metadata only."""
+
+    __tablename__ = "whatsapp_pending_customer_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True)
+    staged_path: Mapped[str] = mapped_column()
+    original_filename: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

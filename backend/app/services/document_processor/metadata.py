@@ -25,5 +25,10 @@ class DocumentMetadata:
     # the identity, so the customer is passed straight through -- no code
     # parsing, no filename involvement. Mirrors `vendor_id_hint`.
     customer_id_hint: int | None = None
+    # The customer NAME the sender supplied for this file (WhatsApp caption,
+    # follow-up text, or the first line of a typed order). Mirrors
+    # `vendor_name`: when present it -- not the filename -- is the customer
+    # identity, and the dispatcher resolves it against the Customer master.
+    customer_name: str | None = None
     external_message_id: str | None = None
     original_filename: str | None = None

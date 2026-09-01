@@ -1,11 +1,20 @@
 """VENDOR-WISE PURCHASE OUTPUT after an allocation batch.
 
-Both outputs here answer one question -- **what do we buy from this
-vendor?** -- and the batch's allocations are regrouped BY VENDOR to do it.
+Answers both halves of the Founder's question (1 Sep 2026) -- *"Now I want
+to check in stock what is available and what [is not]. WhatsApp se pata lag
+jaana chahiye."*
 
-CURRENT PRIMARY OUTPUT (Founder, 1 Sep 2026): ONE EXCEL, ONE SHEET PER
-VENDOR. A `Summary` tab indexes the vendors, then one tab per vendor named
-after that vendor ("Bijwasan", "Northend", "Jaipur"), each listing:
+CURRENT PRIMARY OUTPUT: ONE EXCEL. Tabs, in order:
+
+    <vendor>   one tab per vendor, named after that vendor ("Bijwasan",
+               "Northend", "Jaipur")
+    Summary    which vendors, how much from each, and the shortage count
+    Shortages  what we CANNOT supply and by how much (omitted when none)
+
+The vendor tabs lead because they are what gets acted on; Summary and
+Shortages close the file.
+
+Each vendor tab lists:
 
     Part Number | Vendor Part Number | Customer Requested |
     Vendor Available | Allocated Qty | Status | Customer Order
@@ -13,6 +22,16 @@ after that vendor ("Bijwasan", "Northend", "Jaipur"), each listing:
 That detail is the reason for the change: a text message can only carry
 "part x quantity", while the sheet also shows what the customer asked for
 and what the vendor actually had -- so a Partial allocation explains itself.
+
+The Shortages tab is the other half. A part nobody can supply appears on NO
+vendor tab (correctly -- there is nothing to buy), so without that sheet it
+would be invisible and read as "not ordered" rather than "not available".
+Because it sits at the end, the shortage count is ALSO stated on Summary and
+in the WhatsApp caption, so it can never be missed by someone who only reads
+the first tab. When parts are short but nothing at all could be allocated,
+the workbook is still sent -- shortages only -- since that is exactly the
+case worth hearing about.
+
 Controlled by `WHATSAPP_VENDOR_WORKBOOK` (default true).
 
 PREVIOUS OUTPUT, still available and used as the FALLBACK -- one text
@@ -66,8 +85,13 @@ XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sh
 
 # Only these count as "we are buying this from them". A line nobody can
 # supply (Cannot Fulfill) or one still awaiting a choice (Not Selected)
-# belongs in the shortage report, not in a purchase instruction.
+# belongs on the Shortages sheet, not in a purchase instruction.
 _PURCHASED_STATUSES = {"fulfilled", "partial"}
+
+# The other half of the answer: what the customer asked for that we CANNOT
+# supply. "Cannot Fulfill" = no vendor has enough. "Not Selected" = stock
+# exists but no allocation was made, so it still needs a decision.
+_SHORTAGE_STATUSES = {"cannot fulfill", "not selected"}
 
 
 @dataclass
@@ -142,6 +166,59 @@ def group_by_vendor(reports: list[tuple[str, list]], labels: dict[str, str]) -> 
             )
             entry["qty"] += quantity
     return by_vendor
+
+
+@dataclass
+class ShortageLine:
+    """One part we cannot supply in full -- the "what is NOT available" half
+    of the answer."""
+
+    part_number: str
+    requested: Decimal | None
+    available: Decimal | None
+    status: str
+    reason: str
+    order_label: str
+
+    @property
+    def short_by(self) -> Decimal | None:
+        """How many are missing. None when availability was never
+        established -- which is not the same as being short zero."""
+        if self.requested is None or self.available is None:
+            return None
+        return max(self.requested - self.available, Decimal(0))
+
+
+def collect_shortages(
+    reports: list[tuple[str, list]], labels: dict[str, str]
+) -> list[ShortageLine]:
+    """Every order line that could NOT be filled, across the whole batch.
+
+    Deliberately separate from `group_by_vendor`: a shortage has no vendor
+    to be grouped under -- that is precisely what is wrong with it."""
+    shortages: list[ShortageLine] = []
+    for title, rows in reports:
+        order_label = labels.get(title, title)
+        for row in rows:
+            status = (getattr(row, "status", "") or "").strip()
+            if status.lower() not in _SHORTAGE_STATUSES:
+                continue
+            shortages.append(
+                ShortageLine(
+                    part_number=getattr(row, "customer_part_number", "") or "",
+                    requested=_optional_quantity(getattr(row, "requested_quantity", None)),
+                    available=_optional_quantity(getattr(row, "available_quantity", None)),
+                    status=status,
+                    reason=(getattr(row, "reason", "") or "").strip(),
+                    order_label=order_label,
+                )
+            )
+    # Biggest gap first -- the part that hurts most is the first one read.
+    return sorted(
+        shortages,
+        key=lambda line: line.short_by if line.short_by is not None else Decimal(0),
+        reverse=True,
+    )
 
 
 def build_message(vendor: str, entry: dict, *, max_lines: int) -> tuple[str, bool]:
@@ -249,21 +326,34 @@ def _fill_vendor_sheet(sheet, vendor: str, entry: dict) -> None:
             ]
         )
 
-    for column_cells in sheet.columns:
-        width = max(len(str(cell.value)) if cell.value is not None else 0
-                    for cell in column_cells)
-        sheet.column_dimensions[column_cells[0].column_letter].width = min(width + 2, 46)
+    _autosize(sheet)
 
 
-def _fill_summary_sheet(sheet, by_vendor: dict, tab_by_vendor: dict[str, str]) -> None:
+def _fill_summary_sheet(
+    sheet,
+    by_vendor: dict,
+    tab_by_vendor: dict[str, str],
+    shortages: list[ShortageLine] | None = None,
+) -> None:
     """A leading index: which vendors we are buying from, how much from each,
     and which tab to open. With a dozen vendor tabs this is what makes the
-    workbook readable at a glance."""
+    workbook readable at a glance.
+
+    The shortage count is stated here too -- a part nobody can supply appears
+    on no vendor tab, so without this line it would be invisible."""
     from openpyxl.styles import Font
 
+    shortages = shortages or []
     sheet.append(["Purchase Summary"])
     sheet["A1"].font = Font(bold=True, size=12)
     sheet.append([f"Generated {now_ist().strftime('%d %b %Y %H:%M')} IST"])
+    if shortages:
+        sheet.append(
+            [f"⚠ {len(shortages)} part(s) NOT available -- see the Shortages sheet"]
+        )
+        sheet[f"A{sheet.max_row}"].font = Font(bold=True)
+    else:
+        sheet.append(["All requested parts are covered -- no shortages."])
     sheet.append([])
 
     header_index = sheet.max_row + 1
@@ -286,9 +376,61 @@ def _fill_summary_sheet(sheet, by_vendor: dict, tab_by_vendor: dict[str, str]) -
             ]
         )
 
+    _autosize(sheet)
+
+
+SHORTAGE_SHEET_HEADERS = (
+    "Part Number",
+    "Customer Requested",
+    "Total Available",
+    "Short By",
+    "Status",
+    "Reason",
+    "Customer Order",
+)
+
+
+def _fill_shortage_sheet(sheet, shortages: list[ShortageLine]) -> None:
+    """What the customer asked for that we CANNOT supply.
+
+    "Total Available" is the stock across ALL vendors, not one vendor -- a
+    shortage means nobody had enough, so a per-vendor figure would mislead.
+    "Short By" is requested minus available: the number to act on."""
+    from openpyxl.styles import Font
+
+    sheet.append(["Not Available / Short"])
+    sheet["A1"].font = Font(bold=True, size=12)
+    sheet.append([f"{len(shortages)} part(s) could not be filled from current stock"])
+    sheet.append([])
+
+    header_index = sheet.max_row + 1
+    sheet.append(list(SHORTAGE_SHEET_HEADERS))
+    for cell in sheet[header_index]:
+        cell.font = Font(bold=True)
+
+    for line in shortages:
+        short_by = line.short_by
+        sheet.append(
+            [
+                line.part_number,
+                float(line.requested) if line.requested is not None else None,
+                float(line.available) if line.available is not None else None,
+                float(short_by) if short_by is not None else None,
+                line.status,
+                line.reason,
+                line.order_label,
+            ]
+        )
+
+    _autosize(sheet)
+
+
+def _autosize(sheet) -> None:
     for column_cells in sheet.columns:
-        width = max(len(str(cell.value)) if cell.value is not None else 0
-                    for cell in column_cells)
+        width = max(
+            len(str(cell.value)) if cell.value is not None else 0
+            for cell in column_cells
+        )
         sheet.column_dimensions[column_cells[0].column_letter].width = min(width + 2, 46)
 
 
@@ -297,30 +439,42 @@ def _vendors_by_size(by_vendor: dict) -> list[tuple[str, dict]]:
     return sorted(by_vendor.items(), key=lambda item: item[1]["qty"], reverse=True)
 
 
-def build_vendor_workbook(by_vendor: dict) -> bytes:
-    """ONE workbook, ONE SHEET PER VENDOR (the Founder's ask).
+def build_vendor_workbook(
+    by_vendor: dict, shortages: list[ShortageLine] | None = None
+) -> bytes:
+    """ONE workbook answering both halves of "what is available and what is
+    not" (the Founder's ask).
 
-    A Summary tab first, then a tab per vendor named after that vendor --
-    "Bijwasan", "Northend", "Jaipur" -- each listing that vendor's parts with
-    the customer's requested quantity, the vendor's available quantity and
-    the quantity allocated.
+    Tabs, in order (Founder, 1 Sep 2026 -- the vendor tabs lead, the two
+    overview tabs close the file):
+      <vendor>   -- one tab per vendor, named after that vendor
+                    ("Bijwasan", "Northend", "Jaipur"), listing that vendor's
+                    parts with customer requested / vendor available /
+                    allocated quantities
+      Summary    -- which vendors, how much from each, and the shortage count
+      Shortages  -- what we CANNOT supply, and by how much (omitted if none)
 
     This is internal: it shows every vendor we buy from and at what
     quantities, so it goes to the Founder and the purchase team only, never
     to a vendor."""
     import openpyxl
 
+    shortages = shortages or []
     workbook = openpyxl.Workbook()
     workbook.remove(workbook.active)
 
-    used: set[str] = set()
+    used: set[str] = {"summary", "shortages"}  # reserved -- never a vendor tab
     tab_by_vendor: dict[str, str] = {}
     for vendor, _entry in _vendors_by_size(by_vendor):
         tab_by_vendor[vendor] = _sheet_title(vendor, used)
 
-    _fill_summary_sheet(workbook.create_sheet(title="Summary"), by_vendor, tab_by_vendor)
     for vendor, entry in _vendors_by_size(by_vendor):
         _fill_vendor_sheet(workbook.create_sheet(title=tab_by_vendor[vendor]), vendor, entry)
+    _fill_summary_sheet(
+        workbook.create_sheet(title="Summary"), by_vendor, tab_by_vendor, shortages
+    )
+    if shortages:
+        _fill_shortage_sheet(workbook.create_sheet(title="Shortages"), shortages)
 
     if not workbook.sheetnames:  # an empty workbook is invalid
         workbook.create_sheet(title="No Purchases")
@@ -330,9 +484,12 @@ def build_vendor_workbook(by_vendor: dict) -> bytes:
     return buffer.getvalue()
 
 
-def build_workbook_caption(by_vendor: dict) -> str:
-    """The WhatsApp caption sent with the workbook -- the same at-a-glance
-    summary the per-vendor messages gave, in one message."""
+def build_workbook_caption(
+    by_vendor: dict, shortages: list[ShortageLine] | None = None
+) -> str:
+    """The WhatsApp caption sent with the workbook -- both halves of the
+    answer at a glance, so the headline is readable without opening the file."""
+    shortages = shortages or []
     vendors = _vendors_by_size(by_vendor)
     total_qty = sum((entry["qty"] for _v, entry in vendors), Decimal(0))
     total_lines = sum(len(entry["lines"]) for _v, entry in vendors)
@@ -342,6 +499,9 @@ def build_workbook_caption(by_vendor: dict) -> str:
         for line in entry["lines"]:
             if line.order_label not in orders:
                 orders.append(line.order_label)
+    for line in shortages:
+        if line.order_label not in orders:
+            orders.append(line.order_label)
 
     header = [
         "🛒 Purchase plan by vendor",
@@ -350,13 +510,19 @@ def build_workbook_caption(by_vendor: dict) -> str:
     ]
     if orders:
         header.append("For: " + ", ".join(orders))
-    header.append("")
-    header.append("One sheet per vendor inside:")
-    for vendor, entry in vendors:
-        header.append(
-            f"• {vendor} — {len(entry['lines'])} part(s), qty "
-            f"{_tidy_number(entry['qty'])}"
-        )
+
+    if shortages:
+        header.append("")
+        header.append(f"⚠ NOT available: {len(shortages)} part(s) — see Shortages sheet")
+
+    if vendors:
+        header.append("")
+        header.append("One sheet per vendor inside:")
+        for vendor, entry in vendors:
+            header.append(
+                f"• {vendor} — {len(entry['lines'])} part(s), qty "
+                f"{_tidy_number(entry['qty'])}"
+            )
     return "\n".join(header)
 
 
@@ -370,10 +536,18 @@ def send_vendor_messages(
             return 0
 
         by_vendor = group_by_vendor(reports, labels)
-        if not by_vendor:
+        shortages = collect_shortages(reports, labels)
+
+        # Nothing bought AND nothing short = nothing happened worth sending.
+        # But nothing bought while parts ARE short is the case the Founder
+        # most needs to hear about, so the workbook still goes out then --
+        # a shortages-only file. (The text fallback has no way to express
+        # that, so it keeps the old "nothing to send" behaviour.)
+        if not by_vendor and not (shortages and whatsapp_settings.vendor_workbook):
             logger.info(
-                "Vendor-wise purchase messages: nothing allocated in this batch "
-                "(only shortages/unselected lines) -- nothing to send."
+                "Vendor-wise purchase output: nothing allocated in this batch "
+                "(%d shortage line(s)) -- nothing to send.",
+                len(shortages),
             )
             return 0
 
@@ -392,7 +566,7 @@ def send_vendor_messages(
         # alongside the allocated quantity. Set WHATSAPP_VENDOR_WORKBOOK=false
         # to go back to the per-vendor text messages.
         if whatsapp_settings.vendor_workbook:
-            return _send_vendor_workbook(by_vendor, recipients, stamp)
+            return _send_vendor_workbook(by_vendor, shortages, recipients, stamp)
 
         return _send_vendor_texts(by_vendor, recipients, stamp)
     except Exception:  # noqa: BLE001 -- an output must never affect an allocation
@@ -400,7 +574,12 @@ def send_vendor_messages(
         return 0
 
 
-def _send_vendor_workbook(by_vendor: dict, recipients: list[str], stamp: str) -> int:
+def _send_vendor_workbook(
+    by_vendor: dict,
+    shortages: list[ShortageLine],
+    recipients: list[str],
+    stamp: str,
+) -> int:
     """Send ONE workbook with a sheet per vendor to the internal recipients.
     Returns the vendor count when it was delivered, else 0.
 
@@ -408,8 +587,8 @@ def _send_vendor_workbook(by_vendor: dict, recipients: list[str], stamp: str) ->
     per-vendor text messages rather than leaving the Founder with nothing --
     the purchase instructions matter more than their format."""
     try:
-        content = build_vendor_workbook(by_vendor)
-        caption = build_workbook_caption(by_vendor)
+        content = build_vendor_workbook(by_vendor, shortages)
+        caption = build_workbook_caption(by_vendor, shortages)
         file_name = f"purchase_by_vendor_{stamp}.xlsx"
     except Exception:  # noqa: BLE001
         logger.exception(
@@ -435,12 +614,14 @@ def _send_vendor_workbook(by_vendor: dict, recipients: list[str], stamp: str) ->
         return _send_vendor_texts(by_vendor, recipients, stamp)
 
     logger.info(
-        "Vendor-wise purchase workbook sent (%d vendor sheet(s), %d recipient(s)): %s",
+        "Vendor-wise purchase workbook sent (%d vendor sheet(s), %d shortage "
+        "line(s), %d recipient(s)): %s",
         len(by_vendor),
+        len(shortages),
         len(recipients),
         file_name,
     )
-    return len(by_vendor)
+    return len(by_vendor) or 1
 
 
 def _send_vendor_texts(by_vendor: dict, recipients: list[str], stamp: str) -> int:

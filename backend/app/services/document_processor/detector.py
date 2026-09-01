@@ -89,6 +89,11 @@ class Classification:
     # clear message instead of guessing from the filename. Manual uploads
     # keep their pre-existing filename behaviour (flag stays False).
     require_vendor_name: bool = False
+    # The customer NAME the sender supplied for a WhatsApp Customer Order
+    # (caption, follow-up text, or the first line of a typed order). When
+    # present the dispatcher resolves it against the Customer master
+    # instead of parsing the filename -- mirrors `vendor_name`.
+    customer_name: str | None = None
 
 
 def _keyword_override(caption: str | None) -> IncomingDocumentType | None:
@@ -119,15 +124,26 @@ def _classify_inventory(file_path: Path, session: Session) -> Classification:
     )
 
 
-def _classify_customer_order(file_path: Path, session: Session) -> Classification:
-    """Resolves the customer for a WhatsApp Customer Order file from its
-    filename's Customer Code, mirroring `_classify_inventory` exactly.
+def _classify_customer_order(
+    file_path: Path, session: Session, customer_name: str | None = None
+) -> Classification:
+    """Resolves the customer for a WhatsApp Customer Order file.
+
+    A `customer_name` SUPPLIED BY THE SENDER (caption or follow-up text)
+    is carried through for the dispatcher to resolve -- it outranks the
+    filename, exactly as `vendor_name` does for Vendor Inventory.
+    Otherwise the filename's Customer Code is used, mirroring
+    `_classify_inventory` exactly.
     `resolve_customer=True` is set regardless of whether a code was found, so
     the dispatcher knows customer identification was actually attempted (as
     opposed to Gmail/manual Customer Orders, which never call this)."""
     code = customer_code_service.parse_customer_code_from_filename(file_path.name)
     if code is None:
-        return Classification(IncomingDocumentType.CUSTOMER_ORDER, resolve_customer=True)
+        return Classification(
+            IncomingDocumentType.CUSTOMER_ORDER,
+            resolve_customer=True,
+            customer_name=customer_name,
+        )
 
     customer = customer_code_service.get_customer_by_code(code, session)
     return Classification(
@@ -135,6 +151,7 @@ def _classify_customer_order(file_path: Path, session: Session) -> Classificatio
         customer_id=customer.id if customer is not None else None,
         customer_code=code,
         resolve_customer=True,
+        customer_name=customer_name,
     )
 
 
@@ -209,7 +226,9 @@ def classify(
             # each file arriving under a persisted "Customer" command is
             # classified independently, so consecutive files never get merged
             # into one customer.
-            classification = _classify_customer_order(file_path, session)
+            classification = _classify_customer_order(
+                file_path, session, (metadata.customer_name or '').strip() or None
+            )
             logger.info(
                 "WHATSAPP document '%s' routed to CUSTOMER_ORDER "
                 "(customer_code=%s, customer_id=%s).",
