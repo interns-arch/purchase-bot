@@ -9,8 +9,9 @@ here is meant to be reusable unchanged from a future FastAPI layer.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -792,13 +793,79 @@ def get_import_raw_table(import_id: int, session: Session) -> tuple[list[str], l
     return headers, table
 
 
+_IST = timezone(timedelta(hours=5, minutes=30), name="IST")
+
+# Founder's rule (1 Sep 2026): "Allocation should only be done by the CURRENT
+# stock. The same with update on the spreadsheet." A vendor who last uploaded
+# five days ago must NOT be allocated from -- the engine was promising stock
+# nobody had confirmed.
+#
+# `false` restores the previous behaviour (every vendor's latest file counts,
+# however old). Kept as an escape hatch: on a day when no vendor has uploaded
+# yet and an order must still be allocated, this can be turned off without a
+# deploy.
+CURRENT_STOCK_ONLY = (
+    os.environ.get("ALLOCATION_CURRENT_STOCK_ONLY", "true").strip().lower() == "true"
+)
+# The SAME boundary the Google Sheet's daily reset uses, read from the SAME
+# variable, so allocation and the Sheet can never drift apart.
+_SHEET_RESET_TIME = os.environ.get("GOOGLE_SHEETS_DAILY_RESET_TIME", "09:15").strip()
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    try:
+        hour_text, _, minute_text = value.partition(":")
+        hour, minute = int(hour_text), int(minute_text or "0")
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    except (TypeError, ValueError):
+        pass
+    return 9, 15
+
+
+def current_stock_cutoff(now_ist: datetime | None = None) -> datetime:
+    """The oldest import time that still counts as CURRENT stock, as naive
+    UTC (how `InventoryImport.created_at` is stored).
+
+    This mirrors what the Google Sheet actually SHOWS at this moment, so the
+    two never disagree -- but the data itself is still read from ProcureHub's
+    database, never from the Sheet:
+
+    - The Sheet's daily reset runs at `GOOGLE_SHEETS_DAILY_RESET_TIME`
+      (09:15 IST) and removes every vendor tab with no upload since IST
+      midnight. So AFTER that time the Sheet holds today's uploads only, and
+      allocation uses IST midnight today as the cutoff.
+    - BEFORE that time the reset has not run, so yesterday's tabs are still
+      on the Sheet -- and allocation likewise still accepts yesterday's
+      uploads. Without this the engine would find ZERO stock every morning
+      between midnight and the time vendors actually send their files (the
+      morning stock request only goes out at 09:30).
+
+    Either way a five-day-old file is never current.
+    """
+    ist_now = now_ist or datetime.now(_IST)
+    ist_midnight = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    reset_hour, reset_minute = _parse_hhmm(_SHEET_RESET_TIME)
+    reset_moment = ist_midnight.replace(hour=reset_hour, minute=reset_minute)
+    if ist_now < reset_moment:
+        # The Sheet still shows yesterday, so allocation accepts it too.
+        ist_midnight -= timedelta(days=1)
+    return ist_midnight.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def get_master_inventory(session: Session) -> list[MasterInventoryRow]:
-    active_import_ids = [
-        row.id
-        for row in session.execute(
-            select(InventoryImport).where(InventoryImport.is_active.is_(True))
-        ).scalars()
-    ]
+    """Every vendor's CURRENT stock -- the single source Automatic Vendor
+    Selection and every comparison/report read from.
+
+    "Current" means the vendor's one ACTIVE import is also recent enough to
+    count (see `current_stock_cutoff`). A vendor whose latest file is stale
+    contributes nothing, exactly as their tab is absent from the Sheet."""
+    statement = select(InventoryImport).where(InventoryImport.is_active.is_(True))
+    if CURRENT_STOCK_ONLY:
+        statement = statement.where(
+            InventoryImport.created_at >= current_stock_cutoff()
+        )
+    active_import_ids = [row.id for row in session.execute(statement).scalars()]
 
     if not active_import_ids:
         return []

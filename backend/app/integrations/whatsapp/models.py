@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, func
+from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models import Base
@@ -169,3 +169,67 @@ class WhatsAppPendingCustomerFile(Base):
     staged_path: Mapped[str] = mapped_column()
     original_filename: Mapped[str] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class SalesTeamMember(Base):
+    """An internal SALES-team member (Founder, 3 Sep 2026).
+
+    These are the people who ask "is this part in our inventory?" over
+    WhatsApp and need an instant answer. Deliberately a separate party type
+    from `WhatsAppRegisteredNumber`: a sales number must NOT be registered as
+    a customer, or their question would be imported as a customer ORDER
+    instead of answered as a QUERY.
+
+    Managed by the Founder over WhatsApp: text `register sales`, then send
+    the list (Excel, or typed straight into the chat). Numbers stored
+    normalized (see `registry.normalize_number`)."""
+
+    __tablename__ = "sales_team_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(nullable=False)
+    whatsapp_number: Mapped[str] = mapped_column(unique=True, index=True)
+    # The customer this member last placed an order for, so a bare "confirm"
+    # can OFFER it instead of making them retype. Only ever offered, never
+    # applied silently: one sales person serves MANY customers, and quietly
+    # reusing yesterday's name would file the order against the wrong one.
+    last_customer_name: Mapped[str | None] = mapped_column(default=None)
+    last_customer_at: Mapped[datetime | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class SalesQuote(Base):
+    """A stock answer given to a sales member, held so they can CONFIRM it
+    into a real order with one word instead of retyping the parts.
+
+    Founder, 3 Sep 2026: the sales team asks what is available, and once they
+    say yes the allocation must reach the PURCHASE team -- never back to the
+    sales team with vendor names.
+
+    Why the quote is stored rather than the order created immediately: a
+    stock check is a QUESTION. Creating an order for every question would
+    reserve stock nobody asked for. And why it is RE-CHECKED at confirm time
+    rather than trusted: between the question and the yes, another order may
+    have taken the same stock, so the quantities quoted here are a snapshot
+    for display only -- never the authority.
+
+    `parts` is [{"part_no": str, "quantity": str|null, "available": str}].
+    """
+
+    __tablename__ = "sales_quotes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True, nullable=False)
+    member_name: Mapped[str | None] = mapped_column(default=None)
+    reference: Mapped[str] = mapped_column(index=True, nullable=False)  # e.g. "A3"
+    parts: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(default="PENDING")  # PENDING/CONFIRMED/EXPIRED
+    customer_name: Mapped[str | None] = mapped_column(default=None)
+    customer_order_id: Mapped[int | None] = mapped_column(default=None)
+    nudged_at: Mapped[datetime | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    confirmed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    __table_args__ = (
+        Index("ix_sales_quotes_number_status", "whatsapp_number", "status"),
+    )
