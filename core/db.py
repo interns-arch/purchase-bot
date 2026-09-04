@@ -83,9 +83,33 @@ def _apply_schema_upgrades() -> None:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
 
 
-def init_db() -> None:
+# How many tables `create_all` was last run for. `create_all` issues ONE
+# existence check per table -- 38 round trips at the time of writing -- and
+# `get_session()` used to call it on EVERY session. Against a remote Postgres
+# at 50-100ms that is 2-4 SECONDS of pure latency per session, on every
+# request, including the 6-second notification poll. It was the single
+# biggest cause of the WhatsApp bot taking 30-50s to reply.
+#
+# Tracking the TABLE COUNT rather than a plain "done" flag keeps the original
+# safety: models registered late (e.g. `integrations.whatsapp.models`, which
+# adds its tables only when first imported) still get created, because the
+# count changes and `create_all` runs once more.
+_initialised_table_count = -1
+
+
+def init_db(force: bool = False) -> None:
+    """Create any missing tables. Cheap to call repeatedly -- the real work
+    happens once per process, and again only if new models were registered
+    since. Pass `force=True` after switching database URLs."""
+    global _initialised_table_count
+
+    table_count = len(Base.metadata.tables)
+    if not force and table_count == _initialised_table_count:
+        return
+
     Base.metadata.create_all(engine)
     _apply_schema_upgrades()
+    _initialised_table_count = table_count
 
 
 @contextmanager
