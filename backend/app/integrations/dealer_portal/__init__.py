@@ -15,10 +15,18 @@ The public entry point is `request_push(vendor_id)` -- best-effort, never
 raises, and a no-op unless `DEALER_PORTAL_ENABLED=true`.
 """
 
+from backend.app.integrations.dealer_portal.mapping import (
+    resolve_reply as resolve_mapping_reply,
+)
 from backend.app.integrations.dealer_portal.push_service import (
     push_account,
     request_push,
     retry_failed_pushes,
 )
 
-__all__ = ["request_push", "push_account", "retry_failed_pushes"]
+__all__ = [
+    "request_push",
+    "push_account",
+    "retry_failed_pushes",
+    "resolve_mapping_reply",
+]

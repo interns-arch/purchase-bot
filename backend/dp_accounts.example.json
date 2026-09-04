@@ -1,0 +1,50 @@
+[
+  {
+    "_comment": "One object per EXTERNAL vendor. Copy this file to dp_accounts.json (NOT in git, chmod 600) and point DEALER_PORTAL_ACCOUNTS_FILE at it. Own stock (Bijwasan / Mansarovar / Jaipur) must NOT be listed here at all -- that stock comes OUT of Dealer Portal, so pushing it back would double it.",
+
+    "key": "NORTHEND",
+    "username": "<ask Vineet / Harun>",
+    "password": "<paste here, chmod 600, never in git or chat>",
+    "vendors": ["Northend"],
+    "full_snapshot": false,
+
+    "_vendors_note": "Every spelling of this vendor as it appears in ProcureHub. Matched as whole words, so 'Northend' also catches 'Northend Distributors' and 'Northend Auto', but never 'Northendura'. An exact vendor_code such as 'NS_CT' works too. DP dealer_id 29 -- for your reference only; it is never sent, DP reads the dealer from the login token.",
+    "_full_snapshot_note": "false = sold-out parts are detected and logged but NOT zeroed in DP. Set true ONLY for a vendor confirmed to send a COMPLETE daily list -- on a partial file, true would wipe their real DP stock."
+  },
+
+  {
+    "key": "ESSAAY",
+    "username": "<ask Vineet / Harun>",
+    "password": "<paste here>",
+    "vendors": ["Ess Aay"],
+    "full_snapshot": false,
+    "_dp": "dealer_id 2818 - Ess Aay Automotive"
+  },
+
+  {
+    "key": "AKMOTORS",
+    "username": "<ask Vineet / Harun>",
+    "password": "<paste here>",
+    "vendors": ["A K Motors"],
+    "full_snapshot": false,
+    "_dp": "1367 A K Motors Karol Bagh, or 113 A. K. Motors Fbd - which one?"
+  },
+
+  {
+    "key": "KAROLBAGH",
+    "username": "<ask Vineet / Harun>",
+    "password": "<paste here>",
+    "vendors": ["Karol Bagh"],
+    "full_snapshot": false,
+    "_dp": "Harun says one Karol Bagh vendor account exists, but DP shows 119 Branch / 460 WAREHOUSE / 3784 Retail Sales. Confirm which before enabling.",
+    "enabled": false
+  },
+
+  {
+    "_comment": "Once permanent tokens exist, an account needs no username/password at all -- the login call disappears entirely, with no 8-hour expiry and no 409 SESSION_ALREADY_ACTIVE:",
+    "key": "EXAMPLE_WITH_TOKEN",
+    "token": "<permanent token>",
+    "vendors": ["Some Vendor"],
+    "enabled": false
+  }
+]

@@ -31,8 +31,13 @@ class DealerPortalSettings:
     # (DEALER_PORTAL_SHADOW=false).
     shadow: bool = _flag("DEALER_PORTAL_SHADOW", "true")
 
+    # The host MOVED (4 Sep 2026). The old `vagmine.mycentralpark.in` no
+    # longer completes a TLS handshake at all -- it is dead, not merely
+    # renamed. The dealer portal UI now lives at cartrend.vagminetech.com and
+    # its API at the base below (confirmed from the site's own bundle and a
+    # successful login).
     base_url: str = os.environ.get(
-        "DEALER_PORTAL_BASE_URL", "https://vagmine.mycentralpark.in/api/v1"
+        "DEALER_PORTAL_BASE_URL", "https://vagmine.vagminetech.com/api/v1"
     ).strip().rstrip("/")
 
     # Comma-separated list of ACCOUNT KEYS. Each key names one Dealer Portal
@@ -45,6 +50,51 @@ class DealerPortalSettings:
         for part in os.environ.get("DEALER_PORTAL_ACCOUNTS", "").split(",")
         if part.strip()
     ]
+
+    # NEVER PUSH THESE (Harun + Founder, call of 4 Sep 2026).
+    #
+    # Bijwasan, Mansarovar and Jaipur stock is PULLED OUT OF Dealer Portal's
+    # own ERP in the first place -- Harun exports it there, then sends it on
+    # WhatsApp. Pushing it back would double the same stock inside DP, which
+    # is exactly what he flagged on the call: "dealer portal pe apna stock
+    # already hai... wahi se main nikal ke deta hoon aapko."
+    #
+    # This REVERSES spec section 8(a), which had said own-stock vendors get a
+    # DP account and are pushed like any other vendor. They are not.
+    #
+    # The account list is opt-in already, so an unlisted vendor is never
+    # pushed. This is the second lock: even if one of these names is added to
+    # a DEALER_PORTAL_<KEY>_VENDORS group by mistake, it is dropped and
+    # logged. Matched as whole words, same rule as OWN_STOCK_VENDOR_NAME.
+    exclude_vendors: list[str] = [
+        part.strip()
+        for part in os.environ.get(
+            "DEALER_PORTAL_EXCLUDE_VENDORS",
+            "Bijvasan, Bijwasan, Bijwashan, Mansarovar, Mansarover, Maansarovar, Jaipur",
+        ).split(",")
+        if part.strip()
+    ]
+
+    # ONE FILE INSTEAD OF THREE ENV LINES PER VENDOR.
+    #
+    # Every external vendor needs its own DP dealer account, and writing
+    # USERNAME / PASSWORD / VENDORS into .env for each one does not scale
+    # past a handful. Point this at a JSON file instead and the whole vendor
+    # list lives in one place -- adding a vendor is one JSON object, not an
+    # .env edit.
+    #
+    # STILL NOT THE DATABASE. The spec's rule (section 7.4) is that
+    # credentials never sit in the database in plaintext and never reach a
+    # log; a file read at runtime honours both, and it is what Docker
+    # secrets / a mounted volume are for. Give it 0600 permissions and keep
+    # it out of git.
+    #
+    # Env-defined accounts and file-defined accounts can both be used; on a
+    # duplicate key the ENV one wins, so a single account can always be
+    # overridden without editing the file.
+    accounts_file: str | None = (
+        os.environ.get("DEALER_PORTAL_ACCOUNTS_FILE", "").strip() or None
+    )
 
     # Fallback TAT sent for every row (ProcureHub does not track a per-row
     # TAT). Overridable per account with DEALER_PORTAL_<KEY>_TAT_DAYS.

@@ -37,7 +37,13 @@ from __future__ import annotations
 import threading
 from collections import defaultdict
 
-from backend.app.integrations.dealer_portal import client, credentials, csv_builder, delta
+from backend.app.integrations.dealer_portal import (
+    client,
+    credentials,
+    csv_builder,
+    delta,
+    mapping,
+)
 from backend.app.integrations.dealer_portal.config import dealer_portal_settings
 from backend.app.integrations.dealer_portal.credentials import DealerPortalAccount
 from core.db import get_session
@@ -75,9 +81,63 @@ def request_push(vendor_id: int | None, vendor_name: str | None = None) -> None:
         )
 
 
+def _ask_admin(message: str) -> None:
+    """Send the mapping question to the admin number(s). Best-effort."""
+    try:
+        from backend.app.integrations.whatsapp.config import whatsapp_settings
+        from backend.app.integrations.whatsapp.outbound import send_reply_safe
+
+        for number in whatsapp_settings.admin_phone_numbers:
+            send_reply_safe(number, message)
+    except Exception:  # noqa: BLE001 -- a question must never affect an import
+        logger.exception("Could not send the Dealer Portal mapping question.")
+
+
 def _push_for_vendor(vendor_id: int, vendor_name: str | None) -> None:
+    # WHICH DP DEALER IS THIS? (Founder, 4 Sep 2026) Asked once, then
+    # remembered. Never guessed: several DP accounts share a vendor's name,
+    # and a wrong pick files one vendor's stock under another dealer.
+    with get_session() as session:
+        existing = mapping.get_map(vendor_id, session)
+        if mapping.is_refused(existing):
+            logger.info(
+                "Dealer Portal: vendor %s (%s) is marked never-push -- skipping.",
+                vendor_id,
+                vendor_name,
+            )
+            return
+        needs_question = not mapping.is_resolved(existing)
+        already_asked = (
+            existing is not None
+            and existing.status.value == "PENDING"
+            and existing.asked_at is not None
+        )
+
     with get_session() as session:
         account = credentials.account_for_vendor(vendor_id, session)
+
+    if account is not None and needs_question:
+        if already_asked:
+            logger.info(
+                "Dealer Portal: still waiting for the admin to say where vendor "
+                "%s (%s) should be pushed. Nothing sent.",
+                vendor_id,
+                vendor_name,
+            )
+            return
+        with get_session() as session:
+            prepared = mapping.prepare_question(
+                vendor_id, vendor_name or str(vendor_id), account, session
+            )
+            question = prepared[1] if prepared else None
+        if question:
+            logger.info(
+                "Dealer Portal: asking the admin where vendor %s (%s) belongs.",
+                vendor_id,
+                vendor_name,
+            )
+            _ask_admin(question)
+        return
 
     if account is None:
         logger.info(

@@ -76,9 +76,11 @@ redacted deliberately.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from backend.app.integrations.dealer_portal.config import dealer_portal_settings
 from core.logging_setup import get_logger
@@ -147,6 +149,109 @@ def _int_env(key: str, suffix: str, fallback: int) -> int:
         return fallback
 
 
+def _accounts_from_file() -> list[DealerPortalAccount]:
+    """Accounts read from `DEALER_PORTAL_ACCOUNTS_FILE` -- one JSON file
+    instead of three env lines per vendor.
+
+        [
+          {
+            "key": "NORTHEND",
+            "username": "northend_dealer",
+            "password": "...",
+            "vendors": ["Northend"],
+            "full_snapshot": false
+          },
+          { "key": "ESSAAY", "token": "...", "vendors": ["EA_CT"] }
+        ]
+
+    `key`, `vendors`, and either `token` or `username`+`password` are
+    required; `full_snapshot` (default false), `tat_days`, `device_id` and
+    `enabled` are optional -- the same meanings as the env form.
+
+    A missing or unreadable file is LOGGED AND IGNORED, never raised: a bad
+    path must not stop the import that triggered the push. Nothing from the
+    file is ever logged except the key and the vendor patterns."""
+    path_text = dealer_portal_settings.accounts_file
+    if not path_text:
+        return []
+
+    path = Path(path_text)
+    if not path.exists():
+        logger.warning(
+            "DEALER_PORTAL_ACCOUNTS_FILE points at %s, which does not exist -- "
+            "no accounts loaded from it.",
+            path,
+        )
+        return []
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- a bad file must not reach the import
+        logger.exception(
+            "Could not read DEALER_PORTAL_ACCOUNTS_FILE (%s) -- no accounts "
+            "loaded from it. Expected a JSON list of account objects.",
+            path,
+        )
+        return []
+
+    if isinstance(raw, dict):  # also accept {"NORTHEND": {...}} shape
+        raw = [{**value, "key": key} for key, value in raw.items()]
+    if not isinstance(raw, list):
+        logger.error(
+            "DEALER_PORTAL_ACCOUNTS_FILE (%s) must hold a JSON list of account "
+            "objects -- got %s.",
+            path,
+            type(raw).__name__,
+        )
+        return []
+
+    accounts: list[DealerPortalAccount] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            logger.warning("Account #%d in %s is not an object -- skipped.", index, path)
+            continue
+        key = str(entry.get("key") or "").strip().upper()
+        patterns = [str(v).strip() for v in (entry.get("vendors") or []) if str(v).strip()]
+        if not key or not patterns:
+            logger.warning(
+                "Account #%d in %s needs both 'key' and a non-empty 'vendors' "
+                "list -- skipped.",
+                index,
+                path,
+            )
+            continue
+
+        account = DealerPortalAccount(
+            key=key,
+            username=(entry.get("username") or None),
+            password=(entry.get("password") or None),
+            token=(entry.get("token") or None),
+            device_id=str(entry.get("device_id") or f"procurehub-{key.lower()}"),
+            vendor_patterns=patterns,
+            full_snapshot=bool(entry.get("full_snapshot", False)),
+            tat_days=int(entry.get("tat_days") or dealer_portal_settings.tat_days),
+            enabled=bool(entry.get("enabled", True)),
+        )
+        if not account.has_credentials:
+            logger.warning(
+                "Account %s in %s has neither 'token' nor 'username'+'password' "
+                "-- skipped.",
+                key,
+                path,
+            )
+            continue
+        accounts.append(account)
+
+    if accounts:
+        logger.info(
+            "Dealer Portal: loaded %d account(s) from %s: %s",
+            len(accounts),
+            path,
+            ", ".join(a.key for a in accounts),
+        )
+    return accounts
+
+
 def load_accounts() -> list[DealerPortalAccount]:
     """Every configured account, in `DEALER_PORTAL_ACCOUNTS` order.
 
@@ -190,6 +295,20 @@ def load_accounts() -> list[DealerPortalAccount]:
             )
             continue
         accounts.append(account)
+
+    # File-defined accounts come in behind the env ones: an account key
+    # present in BOTH is taken from the env, so a single vendor can always be
+    # overridden without editing the credentials file.
+    by_key = {a.key for a in accounts}
+    for account in _accounts_from_file():
+        if account.key in by_key:
+            logger.info(
+                "Dealer Portal account %s is defined in BOTH the env and the "
+                "accounts file -- using the env one.",
+                account.key,
+            )
+            continue
+        accounts.append(account)
     return accounts
 
 
@@ -212,6 +331,7 @@ def resolve_account_vendors(account: DealerPortalAccount, session) -> DealerPort
     """Populate `account.vendor_ids` with every ProcureHub vendor row in this
     account's group. Returns the same account, mutated."""
     from core.models import Vendor
+    from core.services.own_stock import is_own_stock_vendor
 
     vendors = session.query(Vendor).all()
     by_code = {
@@ -227,6 +347,35 @@ def resolve_account_vendors(account: DealerPortalAccount, session) -> DealerPort
         for vendor in vendors:
             if matches_name(pattern, vendor.name):
                 matched[vendor.id] = vendor.name
+
+    # OWN-STOCK GUARD (Harun + Founder, call of 4 Sep 2026). Bijwasan,
+    # Mansarovar and Jaipur stock is exported FROM Dealer Portal's ERP before
+    # it ever reaches WhatsApp, so pushing it back would double it inside DP.
+    # Dropped here even if someone lists the name in a group by mistake.
+    excluded: list[str] = []
+    for vendor_id in list(matched):
+        name = matched[vendor_id]
+        vendor = session.get(Vendor, vendor_id)
+        is_own = is_own_stock_vendor(
+            name, flag=bool(getattr(vendor, "is_own_stock", False))
+        )
+        blocked = any(
+            matches_name(pattern, name)
+            for pattern in dealer_portal_settings.exclude_vendors
+        )
+        if is_own or blocked:
+            excluded.append(name)
+            del matched[vendor_id]
+
+    if excluded:
+        logger.warning(
+            "Dealer Portal %s: NOT pushing %s -- this stock comes OUT of DP's own "
+            "ERP, so pushing it back would double it. Remove the name from "
+            "DEALER_PORTAL_%s_VENDORS to silence this.",
+            account.key,
+            ", ".join(sorted(excluded)),
+            account.key,
+        )
 
     account.vendor_ids = sorted(matched)
     account.vendor_names = [matched[vid] for vid in account.vendor_ids]

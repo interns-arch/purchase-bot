@@ -137,6 +137,59 @@ def _cached_token(account: DealerPortalAccount, *, force_refresh: bool = False) 
         return token
 
 
+def token_for(account: DealerPortalAccount) -> str:
+    """A usable bearer token for this account (public form of the cache)."""
+    return _cached_token(account)
+
+
+def logged_in_dealer_id(account: DealerPortalAccount) -> int | None:
+    """The dealer id DP itself reports for this account's credentials.
+
+    Used to VERIFY a mapping before pushing: the admin says vendor X belongs
+    to dealer 1367, and this confirms the credentials actually authenticate
+    as 1367. Without that check a wrong username in the accounts file would
+    silently file one vendor's stock under another dealer -- the exact
+    mistake the whole confirm-once flow exists to prevent.
+
+    Returns None when DP does not report one (a permanent token may not), in
+    which case the caller proceeds without the check."""
+    requests = _requests()
+    if account.uses_permanent_token:
+        try:
+            response = requests.get(
+                f"{dealer_portal_settings.base_url}/auth/me",
+                headers={"Authorization": f"Bearer {account.token}"},
+                timeout=dealer_portal_settings.timeout_seconds,
+            )
+            if response.status_code == 200:
+                body = response.json() or {}
+                value = body.get("dealer_id") or (body.get("user") or {}).get("dealer_id")
+                return int(value) if value is not None else None
+        except Exception:  # noqa: BLE001 -- the check is best-effort
+            logger.debug("Could not read the dealer id for %s.", account.key)
+        return None
+
+    try:
+        response = requests.post(
+            f"{dealer_portal_settings.base_url}/auth/login",
+            json={
+                "username": account.username,
+                "password": account.password,
+                "device_id": account.device_id,
+                "device_info": "ProcureHub identity check",
+            },
+            timeout=dealer_portal_settings.timeout_seconds,
+        )
+        if response.status_code != 200:
+            return None
+        body = response.json() or {}
+        value = body.get("dealer_id") or (body.get("user") or {}).get("dealer_id")
+        return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not read the dealer id for %s.", account.key)
+        return None
+
+
 def _parse_upload_response(response) -> UploadResult:
     try:
         body = response.json() or {}

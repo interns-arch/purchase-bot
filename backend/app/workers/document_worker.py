@@ -71,6 +71,38 @@ logger = get_logger(__name__)
 
 
 def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
+    """Entry point for a plain text message -- a LAST-RESORT wrapper.
+
+    This runs as a FastAPI BackgroundTask, so an exception escaping the real
+    handler is swallowed by the task machinery: the sender gets total silence
+    and the log says nothing useful. Every branch below already guards
+    itself; this exists so that a bug nobody anticipated still leaves a
+    traceback and, for an ordinary sender, some acknowledgement."""
+    try:
+        _handle_incoming_whatsapp_text(message)
+    except Exception:  # noqa: BLE001 -- silence is the worst possible outcome
+        logger.exception(
+            "Unhandled error while processing the WhatsApp text from %s: %r",
+            message.sender,
+            (message.text or "")[:120],
+        )
+        # Deliberately NOT sent to a registered vendor/customer -- their texts
+        # are meant to be ignored, and an error reply would be exactly the
+        # instruction spam that rule exists to prevent.
+        try:
+            with get_session() as session:
+                known = registry.lookup(message.sender, session)
+            if known is None:
+                send_reply_safe(
+                    message.sender,
+                    "Sorry — something went wrong handling that message. "
+                    "Please try again.",
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not send the fallback reply to %s.", message.sender)
+
+
+def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     """A plain text message. Priority:
     1. A known routing command -> remember it for this number.
     2. Otherwise, if this number has Vendor Inventory file(s) held while
@@ -89,8 +121,20 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # admin/command handling below so a sales member's part number is always
     # answered, never mistaken for a vendor name. Their reply carries
     # availability and quantity ONLY -- never the vendor.
-    with get_session() as session:
-        sales_member = sales_team.member_name(message.sender, session)
+    # A NEW feature failing must degrade to the OLD behaviour, never to
+    # silence. If the sales tables are not on this server yet, the lookup
+    # raises -- log it and carry on down the handler rather than dying here
+    # and leaving the sender with no reply at all.
+    sales_member = None
+    try:
+        with get_session() as session:
+            sales_member = sales_team.member_name(message.sender, session)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Sales-team lookup failed for %s -- continuing with normal text "
+            "handling so the sender still gets a reply.",
+            message.sender,
+        )
     if sales_member is not None:
         # "confirm [customer]" turns their LAST stock check into a real
         # order. Checked before the part-number path so a confirmation is
@@ -117,6 +161,21 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
             "41341M68P00\n75700TF0901 x 4",
         )
         return
+
+    # Admin answering "where does this vendor's stock go on Dealer Portal?"
+    # ("dp 1", "dp 1367", "dp skip"). Asked once per vendor and remembered,
+    # so this is a short-lived reply, checked before the register commands.
+    if daily_stock.is_admin_sender(message.sender):
+        try:
+            with get_session() as session:
+                handled, reply = dealer_portal.resolve_mapping_reply(
+                    message.text, session
+                )
+            if handled:
+                send_reply_safe(message.sender, reply)
+                return
+        except Exception:  # noqa: BLE001 -- never block the other commands
+            logger.exception("Could not apply the Dealer Portal mapping reply.")
 
     # Founder command "register sales" / "remove sales": the NEXT list from
     # this admin number is the SALES team. The same message may instead carry
@@ -310,8 +369,15 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         # Customer Order files held while waiting for their customer name --
         # checked before vendor files so the answer goes to whichever kind of
         # file this sender actually has waiting.
-        with get_session() as session:
-            held_customer = pending_customer_files.list_for(message.sender, session)
+        held_customer = []
+        try:
+            with get_session() as session:
+                held_customer = pending_customer_files.list_for(message.sender, session)
+        except Exception:  # noqa: BLE001 -- new table; never silence the reply
+            logger.exception(
+                "Held-customer-file lookup failed for %s -- continuing.",
+                message.sender,
+            )
         if held_customer and supplied_name:
             logger.info(
                 "WhatsApp text from %s taken as CUSTOMER NAME %r for %d held file(s).",

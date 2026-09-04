@@ -1032,3 +1032,52 @@ class DealerPortalPush(Base):
         Index("ix_dealer_portal_pushes_account_created", "account_key", "created_at"),
         Index("ix_dealer_portal_pushes_status", "status"),
     )
+
+
+class DealerPortalVendorMapStatus(str, enum.Enum):
+    PENDING = "PENDING"      # admin asked, waiting for their reply
+    CONFIRMED = "CONFIRMED"  # admin picked a dealer -- never ask again
+    SKIPPED = "SKIPPED"      # admin said don't push this vendor at all
+
+
+class DealerPortalVendorMap(Base):
+    """Which Dealer Portal dealer account a ProcureHub vendor's stock belongs
+    to -- decided ONCE by the admin over WhatsApp, then remembered forever.
+
+    Founder, 4 Sep 2026: several DP accounts can share a vendor's name
+    ("A K Motors Fbd" / "A K Motors (Debtors)" / "A K Motors Karol Bagh"), and
+    guessing wrong would file one vendor's stock under another's dealer id.
+    So when the mapping is unknown the push PAUSES and the admin is sent the
+    exact candidate names and ids from DP; their reply is stored here and the
+    question is never asked again.
+
+    This holds only the DECISION -- vendor -> dealer id. It is not a secret:
+    credentials stay in the environment / accounts file and never touch the
+    database (spec section 7.4).
+
+    `dp_dealer_type` is DP's own classification. `cartrend_dealer` marks a
+    CarTrends warehouse (Bijwasan, Maansarovar, Karol Bagh, Noida...), whose
+    stock is exported OUT of DP and must never be pushed back -- recording it
+    here lets that be refused on identity rather than on spelling."""
+
+    __tablename__ = "dealer_portal_vendor_map"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(
+        ForeignKey("vendors.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    vendor_name: Mapped[str] = mapped_column(nullable=False)  # audit copy
+    dp_dealer_id: Mapped[int | None] = mapped_column(default=None)
+    dp_dealer_name: Mapped[str | None] = mapped_column(default=None)
+    dp_dealer_type: Mapped[str | None] = mapped_column(default=None)
+    status: Mapped[DealerPortalVendorMapStatus] = mapped_column(
+        Enum(DealerPortalVendorMapStatus, name="dealer_portal_vendor_map_status"),
+        default=DealerPortalVendorMapStatus.PENDING,
+        nullable=False,
+    )
+    # The candidates offered, so the reply can be matched to what was shown.
+    candidates: Mapped[list] = mapped_column(JSON, default=list)
+    asked_at: Mapped[datetime | None] = mapped_column(default=None)
+    confirmed_at: Mapped[datetime | None] = mapped_column(default=None)
+    confirmed_by: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

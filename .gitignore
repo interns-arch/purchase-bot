@@ -35,3 +35,7 @@ oauth_client.json
 # Backups of config files -- '*.env' does not match '.env.bak', so a stray
 # backup of a secrets file would otherwise be committable.
 *.bak
+
+# Dealer Portal vendor credentials (never commit; the .example is the template)
+backend/dp_accounts.json
+dp_accounts.json
