@@ -133,29 +133,6 @@ def _schedule_dealer_portal_retry() -> None:
     )
 
 
-def _schedule_sales_nudge() -> None:
-    """Optional single reminder for unconfirmed sales quotes. Off unless
-    WHATSAPP_SALES_NUDGE_MINUTES is set."""
-    if not whatsapp_settings.enabled:
-        return
-    if whatsapp_settings.sales_nudge_minutes <= 0:
-        return
-
-    from backend.app.integrations.whatsapp import sales_nudge
-
-    _scheduler.add_job(
-        lambda: _run_safely("sales_quote_nudge", sales_nudge.send_pending_nudges),
-        "interval",
-        minutes=max(whatsapp_settings.sales_nudge_minutes, 1),
-        id="sales_quote_nudge",
-        replace_existing=True,
-    )
-    logger.info(
-        "Sales quote nudge enabled -- one reminder after %d minute(s).",
-        whatsapp_settings.sales_nudge_minutes,
-    )
-
-
 def _schedule_startup_recovery() -> None:
     """One-shot, shortly after boot: re-queue customer orders whose
     allocation was lost to a crash/restart (the in-memory batch queue does
@@ -179,7 +156,6 @@ def start_scheduler() -> None:
     _schedule_whatsapp_daily_jobs()
     _schedule_google_sheet_daily_reset()
     _schedule_dealer_portal_retry()
-    _schedule_sales_nudge()
     _schedule_startup_recovery()
 
     if gmail_settings.enabled:

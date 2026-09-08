@@ -59,8 +59,6 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 # ALTER TABLE once per process. Additive-only -- nothing is ever dropped.
 _SCHEMA_UPGRADES = (
     ("incoming_documents", "stored_path", "VARCHAR"),
-    ("sales_team_members", "last_customer_name", "VARCHAR"),
-    ("sales_team_members", "last_customer_at", "TIMESTAMP"),
 )
 _upgrades_applied = False
 

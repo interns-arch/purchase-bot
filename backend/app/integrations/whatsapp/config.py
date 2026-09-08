@@ -227,40 +227,6 @@ class WhatsAppSettings:
         os.environ.get("WHATSAPP_GROUPING_WINDOW_MINUTES", "10")
     )
 
-    # --- SALES TEAM stock checks (Founder, 3 Sep 2026) -------------------
-    # A registered sales number asks "is this part available?" and gets
-    # availability + quantity back -- never the vendor or the price. The
-    # answer is held as a QUOTE so one word ("confirm Karol Bagh") turns it
-    # into a real order, without retyping the parts.
-    #
-    # How long a quote can still be confirmed. An hour-old answer is not a
-    # safe basis for an order: stock moves. 0 = never expires (not advised).
-    sales_quote_ttl_minutes: int = int(
-        os.environ.get("WHATSAPP_SALES_QUOTE_TTL_MINUTES", "60")
-    )
-    # Past the TTL the quote is not thrown away: on "confirm" the stock is
-    # looked up AGAIN, the fresh quantities are shown, and the member is
-    # asked to confirm those -- so they never retype the parts. This is the
-    # HARD ceiling (hours) beyond which even that is abandoned and they are
-    # asked to send the parts again. 0 = no ceiling.
-    sales_quote_max_age_hours: float = float(
-        os.environ.get("WHATSAPP_SALES_QUOTE_MAX_AGE_HOURS", "24")
-    )
-    # OPTIONAL single reminder: if a quote is still unconfirmed after this
-    # many minutes, ask ONCE "should this be placed as an order?" -- never
-    # repeated. 0 (the default) disables it entirely: with ten people asking
-    # all day, unprompted nudges become noise, so this is opt-in.
-    sales_nudge_minutes: int = int(
-        os.environ.get("WHATSAPP_SALES_NUDGE_MINUTES", "0")
-    )
-    # How long the "same customer as last time?" suggestion stays on offer
-    # (hours). A sales person serves MANY customers, so the suggestion is
-    # always SHOWN and never applied silently -- this only stops the bot
-    # proposing yesterday's customer for today's order. 0 = never suggest.
-    sales_customer_memory_hours: float = float(
-        os.environ.get("WHATSAPP_SALES_CUSTOMER_MEMORY_HOURS", "12")
-    )
-
     @property
     def graph_api_base_url(self) -> str:
         return f"https://graph.facebook.com/{self.graph_api_version}"
