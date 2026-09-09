@@ -53,7 +53,7 @@ COLUMNS: list[tuple[str, str]] = [
     ("delivery_imports", "completed_at"),
     ("vendor_delivery_imports", "completed_at"),
     ("vendor_invoice_imports", "completed_at"),
-    ("purchase_orders", "emailed_at"),
+    ("vendor_purchase_orders", "emailed_at"),
     ("gmail_integration_status", "last_poll_at"),
     ("gmail_integration_status", "last_message_processed_at"),
     ("google_sheets_integration_status", "last_sync_at"),
@@ -64,7 +64,7 @@ COLUMNS: list[tuple[str, str]] = [
     ("dealer_portal_vendor_map", "asked_at"),
     ("dealer_portal_vendor_map", "confirmed_at"),
     ("dealer_portal_pushes", "completed_at"),
-    ("format_memory", "last_used_at"),
+    ("learned_file_formats", "last_used_at"),
 ]
 
 MARKER_TABLE = "ist_backfill_marker"
