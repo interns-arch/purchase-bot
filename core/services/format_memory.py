@@ -14,6 +14,8 @@ column-name dicts consumed by `inventory_import_service.read_table_with_mapping`
 from __future__ import annotations
 
 from datetime import datetime
+
+from core.time_utils import now_ist_naive
 from pathlib import Path
 
 from sqlalchemy import select
@@ -69,7 +71,7 @@ def find_mapping(file_path: Path, session: Session) -> tuple[dict[str, str], str
         return None
 
     row_obj.use_count = (row_obj.use_count or 0) + 1
-    row_obj.last_used_at = datetime.utcnow()
+    row_obj.last_used_at = now_ist_naive()
     session.flush()
 
     mapping = {

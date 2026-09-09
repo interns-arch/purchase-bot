@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from core.ingestion.column_detector import decimal_to_string
 from core.logging_setup import get_logger
-from core.time_utils import now_ist
+from core.time_utils import now_ist, now_ist_naive
 from core.models import (
     CustomerOrder,
     Part,
@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist_naive()
 
 
 def _po_number(order_id: int, vendor: Vendor) -> str:

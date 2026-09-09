@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.integrations.whatsapp.models import WhatsAppPendingCommand
+from core.time_utils import now_ist_naive
 
 
 def _get_row(whatsapp_number: str, session: Session) -> WhatsAppPendingCommand | None:
@@ -47,13 +48,13 @@ def get_fresh_command(
     as expired: it is cleared and None is returned, so a stale conversation
     never routes a new file. `max_age_minutes <= 0` disables the expiry
     (legacy behaviour: a stored command lives until used/overwritten)."""
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     row = _get_row(whatsapp_number, session)
     if row is None:
         return None
     if max_age_minutes > 0 and row.updated_at is not None:
-        if datetime.utcnow() - row.updated_at > timedelta(minutes=max_age_minutes):
+        if now_ist_naive() - row.updated_at > timedelta(minutes=max_age_minutes):
             session.delete(row)
             session.flush()
             return None
@@ -63,11 +64,10 @@ def get_fresh_command(
 def touch_command(whatsapp_number: str, session: Session) -> None:
     """Restart this number's grouping window (each file within the window
     extends it, exactly like the workbook debounce)."""
-    from datetime import datetime
 
     row = _get_row(whatsapp_number, session)
     if row is not None:
-        row.updated_at = datetime.utcnow()
+        row.updated_at = now_ist_naive()
         session.flush()
 
 

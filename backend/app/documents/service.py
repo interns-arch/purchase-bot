@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from core.time_utils import now_ist_naive
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,7 +21,7 @@ from backend.app.documents.models import (
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist_naive()
 
 
 def find_by_whatsapp_message_id(message_id: str, session: Session) -> IncomingDocument | None:

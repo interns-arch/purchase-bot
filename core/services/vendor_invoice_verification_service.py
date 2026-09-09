@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+from core.time_utils import now_ist_naive
 from decimal import Decimal
 from pathlib import Path
 
@@ -68,7 +70,7 @@ class VendorInvoiceVerificationResult:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist_naive()
 
 
 def _vendor_name_from_filename(filename: str) -> str:

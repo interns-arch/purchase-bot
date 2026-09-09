@@ -24,6 +24,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+
+from core.time_utils import now_ist_naive
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -124,7 +126,7 @@ def _vendor_offer_parts(vendor_id: int, session: Session) -> dict[str, VendorInv
 def find_shortfall_items(session: Session, *, window_days: int) -> list[CustomerOrderItem]:
     """Recent order lines whose allocated quantity is still below what the
     customer requested (including lines with no allocation at all)."""
-    cutoff = datetime.utcnow() - timedelta(days=window_days)
+    cutoff = now_ist_naive() - timedelta(days=window_days)
     allocated = (
         select(
             VendorSelection.customer_order_item_id.label("item_id"),

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from core.time_utils import now_ist_naive
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -27,7 +29,7 @@ router = APIRouter(
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist_naive()
 
 
 def _build_status(db: Session) -> GoogleSheetsIntegrationStatusOut:

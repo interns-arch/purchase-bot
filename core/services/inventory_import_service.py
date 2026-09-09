@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+
+from core.time_utils import now_ist_naive
 from decimal import Decimal
 from pathlib import Path
 
@@ -129,7 +131,7 @@ class MasterInventoryRow:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist_naive()
 
 
 def _find_active_import(vendor_id: int, session: Session) -> InventoryImport | None:

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from core.time_utils import now_ist_naive
 from pathlib import Path
 
 from sqlalchemy import select
@@ -76,7 +78,7 @@ class CustomerOrderImportResult:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist_naive()
 
 
 def _read_grid(file_path: Path) -> list[list[str]]:

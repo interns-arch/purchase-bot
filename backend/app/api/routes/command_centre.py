@@ -52,7 +52,7 @@ from core.models import (
 )
 from core.services import delivery_tracking_service
 from core.services.vendor_selection_service import _matchable_part_numbers
-from core.time_utils import now_ist
+from core.time_utils import now_ist, now_ist_naive
 
 router = APIRouter(
     prefix="/api/command-centre",
@@ -429,7 +429,7 @@ def command_centre_alerts(db: Session = Depends(get_db)) -> list[Alert]:
     alerts: list[Alert] = []
     today_utc = _ist_today_start_utc()
     recent_utc = today_utc - timedelta(days=_RECENT_DAYS)
-    now_utc = datetime.utcnow()
+    now_utc = now_ist_naive()
 
     # 1. Import failures today (source, sender, exact reason).
     failures = db.execute(
@@ -707,7 +707,7 @@ def command_centre_order_tower(days: int = 7, db: Session = Depends(get_db)) -> 
     """Customer Order Control Tower (spec §7): allocation status buckets,
     ageing of still-short orders, customer-wise fill rate."""
     since = _window_start(days)
-    now_utc = datetime.utcnow()
+    now_utc = now_ist_naive()
     orders = db.execute(
         select(CustomerOrder, Customer)
         .outerjoin(Customer, CustomerOrder.customer_id == Customer.id)
@@ -816,7 +816,7 @@ def command_centre_po_tower(days: int = 30, db: Session = Depends(get_db)) -> Po
     """Purchase Order Control Tower (spec §11): status, supply completeness
     (from the same Delivery Tracking source, spec §12 rule) and ageing."""
     since = _window_start(days)
-    now_utc = datetime.utcnow()
+    now_utc = now_ist_naive()
     pos = db.execute(
         select(VendorPurchaseOrder).where(VendorPurchaseOrder.created_at >= since)
     ).scalars().all()
@@ -960,7 +960,7 @@ def command_centre_vendor_scorecard(db: Session = Depends(get_db)) -> list[Vendo
     (price competitiveness and due-date timeliness have no data yet):
     fulfilment 25, trust 25, availability 10, discipline 5 -> scaled to 100.
     A vendor with no allocations yet gets no score, never a fake 0."""
-    month_ago = datetime.utcnow() - timedelta(days=30)
+    month_ago = now_ist_naive() - timedelta(days=30)
 
     declared = dict(db.execute(
         select(VendorInventory.vendor_id,
@@ -1111,7 +1111,7 @@ def command_centre_trends(days: int = 30, db: Session = Depends(get_db)) -> list
 
     points: list[TrendPoint] = []
     day = since.date()
-    end = datetime.utcnow().date()
+    end = now_ist_naive().date()
     while day <= end:
         key = day.isoformat()
         ordered = ordered_by_day.get(key, 0.0)
@@ -1236,7 +1236,7 @@ def command_centre_part_intelligence(q: str, db: Session = Depends(get_db)) -> P
         ))
     vendors.sort(key=lambda row: -row.declared)
 
-    month_ago = datetime.utcnow() - timedelta(days=30)
+    month_ago = now_ist_naive() - timedelta(days=30)
     demand = allocated = Decimal(0)
     items = db.execute(
         select(CustomerOrderItem)

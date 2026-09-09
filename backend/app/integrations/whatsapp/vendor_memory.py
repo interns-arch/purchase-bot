@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from core.time_utils import now_ist_naive
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,7 +20,7 @@ from backend.app.integrations.whatsapp.models import WhatsAppVendorMemory
 
 
 def _utcnow() -> datetime:  # patched in tests
-    return datetime.utcnow()
+    return now_ist_naive()
 
 
 def remember(whatsapp_number: str, vendor_name: str, session: Session) -> None:

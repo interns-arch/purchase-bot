@@ -40,7 +40,7 @@ from core.models import (
     DealerPortalVendorMapStatus,
     Vendor,
 )
-from core.time_utils import utcnow_naive
+from core.time_utils import now_ist_naive
 
 logger = get_logger(__name__)
 
@@ -75,7 +75,7 @@ def record_skip(vendor_id: int, vendor_name: str, session, *, reason: str) -> No
         session.add(row)
     row.vendor_name = vendor_name
     row.status = DealerPortalVendorMapStatus.SKIPPED
-    row.confirmed_at = utcnow_naive()
+    row.confirmed_at = now_ist_naive()
     row.confirmed_by = reason
     session.flush()
     logger.info(
@@ -120,7 +120,7 @@ def prepare_question(
         }
         for c in candidates
     ]
-    row.asked_at = utcnow_naive()
+    row.asked_at = now_ist_naive()
     session.flush()
 
     lines = [
@@ -173,7 +173,7 @@ def resolve_reply(text: str, session) -> tuple[bool, str]:
 
     if argument.lower() in {"skip", "none", "never", "nahi", "no"}:
         row.status = DealerPortalVendorMapStatus.SKIPPED
-        row.confirmed_at = utcnow_naive()
+        row.confirmed_at = now_ist_naive()
         row.confirmed_by = "admin"
         session.flush()
         return True, (
@@ -213,7 +213,7 @@ def resolve_reply(text: str, session) -> tuple[bool, str]:
     row.dp_dealer_name = chosen.get("name")
     row.dp_dealer_type = chosen.get("type")
     row.status = DealerPortalVendorMapStatus.CONFIRMED
-    row.confirmed_at = utcnow_naive()
+    row.confirmed_at = now_ist_naive()
     row.confirmed_by = "admin"
     session.flush()
 

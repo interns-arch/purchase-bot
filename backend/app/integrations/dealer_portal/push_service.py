@@ -49,7 +49,7 @@ from backend.app.integrations.dealer_portal.credentials import DealerPortalAccou
 from core.db import get_session
 from core.logging_setup import get_logger
 from core.models import DealerPortalPush, DealerPortalPushStatus
-from core.time_utils import utcnow_naive
+from core.time_utils import now_ist_naive
 
 logger = get_logger(__name__)
 
@@ -277,7 +277,7 @@ def _finish(
             push.status = status
             push.error = error
             push.attempts = (push.attempts or 0) + 1
-            push.completed_at = utcnow_naive()
+            push.completed_at = now_ist_naive()
             if upload is not None:
                 push.batch_id = upload.batch_id
                 push.inserted_count = upload.inserted_count
@@ -356,7 +356,7 @@ def _mark_superseded(push_id: int) -> None:
             if push is not None and push.status == DealerPortalPushStatus.FAILED:
                 push.status = DealerPortalPushStatus.SUCCESS
                 push.error = (push.error or "") + " [resolved by a later push]"
-                push.completed_at = utcnow_naive()
+                push.completed_at = now_ist_naive()
     except Exception:  # noqa: BLE001
         logger.exception("Could not close Dealer Portal push %s.", push_id)
 

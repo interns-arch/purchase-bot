@@ -61,7 +61,7 @@ from backend.app.services.topup_runner import run_topup_for_vendor
 from core.db import get_session
 from core.services import customer_code_service
 from core.logging_setup import get_logger
-from core.time_utils import now_ist, utcnow_naive
+from core.time_utils import now_ist
 
 logger = get_logger(__name__)
 

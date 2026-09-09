@@ -68,6 +68,10 @@ def is_token_revoked(jti: str, session: Session) -> bool:
 
 
 def purge_expired_revoked_tokens(session: Session) -> int:
+    # DELIBERATELY UTC, and the only place left that is. `expires_at` holds a
+    # JWT `exp` claim, which is UTC by definition; it is compared only against
+    # other `exp` values and is never displayed. Everything else in this
+    # application stores naive IST -- see core/time_utils.py.
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     expired = list(
         session.execute(select(RevokedToken).where(RevokedToken.expires_at < now)).scalars()

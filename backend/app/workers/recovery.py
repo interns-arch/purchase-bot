@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from core.time_utils import now_ist_naive
+
 from sqlalchemy import func, select
 
 from backend.app.integrations.whatsapp import allocation_batch
@@ -68,7 +70,7 @@ def requeue_unallocated_recent_orders() -> None:
     try:
         to_queue: list[int] = []
         with get_session() as session:
-            cutoff = datetime.utcnow() - timedelta(hours=RECOVERY_WINDOW_HOURS)
+            cutoff = now_ist_naive() - timedelta(hours=RECOVERY_WINDOW_HOURS)
             orders = session.execute(
                 select(CustomerOrder)
                 .where(CustomerOrder.created_at >= cutoff)
