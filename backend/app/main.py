@@ -18,6 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
+from backend.app.api.routes.advance_orders import api_router as advance_orders_api_router
+from backend.app.api.routes.advance_orders import desk_router as advance_orders_desk_router
 from backend.app.api.routes.command_centre import router as command_centre_router
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
@@ -156,6 +158,9 @@ app.include_router(vendor_invoices_router)
 app.include_router(purchase_orders_router)
 app.include_router(whatsapp_router)
 app.include_router(notifications_router)
+# Advance orders from the sales bot: answer 503 unless ADVANCE_ORDERS_ENABLED=true.
+app.include_router(advance_orders_api_router)
+app.include_router(advance_orders_desk_router)
 
 
 # HEAD is accepted alongside GET: free uptime pingers (UptimeRobot's free

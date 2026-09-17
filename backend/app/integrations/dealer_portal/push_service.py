@@ -34,6 +34,7 @@ order must not interleave.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import defaultdict
 
@@ -234,29 +235,61 @@ def push_account(
         logger.error("Dealer Portal %s: push failed -- %s", account.key, exc)
         return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc))
 
-    if upload.failed_count:
+    status, error = _outcome(upload, rows_sent=result.rows_sent)
+
+    if status is not DealerPortalPushStatus.SUCCESS:
         # A SIGNAL, not noise: these are parts missing from DP's parts
         # master -- exactly the "new SKU we should add" report.
         logger.warning(
-            "Dealer Portal %s: DP REJECTED %d of %d row(s) -- those part numbers "
-            "are not in DP's parts master. batch_id=%s",
+            "Dealer Portal %s: %s -- DP refused %d of %d row(s); those part "
+            "numbers are not in DP's parts master. batch_id=%s",
             account.key,
+            status.value,
             upload.failed_count,
-            upload.total_rows,
+            upload.total_rows or result.rows_sent,
             upload.batch_id,
         )
 
     logger.info(
-        "Dealer Portal %s: pushed OK. batch_id=%s total=%d inserted=%d updated=%d "
+        "Dealer Portal %s: push %s. batch_id=%s total=%d inserted=%d updated=%d "
         "failed=%d",
         account.key,
+        status.value,
         upload.batch_id,
         upload.total_rows,
         upload.inserted_count,
         upload.updated_count,
         upload.failed_count,
     )
-    return _finish(push_id, DealerPortalPushStatus.SUCCESS, error=None, upload=upload)
+    return _finish(push_id, status, error=error, upload=upload)
+
+
+def _outcome(upload, *, rows_sent: int) -> tuple[DealerPortalPushStatus, str | None]:
+    """What an accepted HTTP request actually achieved.
+
+    A 200 from DP only means the CSV was received. Until 17 Sep 2026 that
+    alone was recorded as SUCCESS, so a push where DP refused all four rows
+    (failed=4, inserted=0) looked identical in the audit table to one where
+    all four landed."""
+    if not upload.failed_count:
+        return DealerPortalPushStatus.SUCCESS, None
+
+    total = upload.total_rows or rows_sent
+    landed = upload.inserted_count + upload.updated_count
+    status = (
+        DealerPortalPushStatus.PARTIAL if landed > 0 else DealerPortalPushStatus.REJECTED
+    )
+    summary = (
+        f"DP refused {upload.failed_count} of {total} row(s) as not in its parts "
+        f"master ({landed} landed)."
+    )
+    if upload.raw:
+        try:
+            reply = json.dumps(upload.raw, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            reply = str(upload.raw)
+        summary += f" DP reply: {reply[:1500]}"
+    return status, summary
 
 
 def _finish(

@@ -60,6 +60,14 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 _SCHEMA_UPGRADES = (
     ("incoming_documents", "stored_path", "VARCHAR"),
 )
+# Values added to a Postgres ENUM type after it already existed. Like
+# columns, `create_all` never alters an existing type, and inserting a value
+# the type does not know fails the whole write. SQLite stores these enums as
+# plain strings, so this is a no-op there.
+_ENUM_UPGRADES = (
+    ("dealer_portal_push_status", "REJECTED"),
+    ("dealer_portal_push_status", "PARTIAL"),
+)
 _upgrades_applied = False
 
 
@@ -79,6 +87,17 @@ def _apply_schema_upgrades() -> None:
             continue
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+    if engine.dialect.name == "postgresql":
+        for type_name, value in _ENUM_UPGRADES:
+            with engine.begin() as connection:
+                exists = connection.execute(
+                    text("select 1 from pg_type where typname = :t"), {"t": type_name}
+                ).first()
+                if exists:
+                    connection.execute(
+                        text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}'")
+                    )
 
 
 # How many tables `create_all` was last run for. `create_all` issues ONE

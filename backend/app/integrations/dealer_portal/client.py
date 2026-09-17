@@ -55,6 +55,10 @@ class UploadResult:
     updated_count: int
     failed_count: int
     status: str | None = None
+    # DP's whole JSON reply. Its success schema is undocumented (an empty
+    # object in the OpenAPI spec), so when rows are refused the reply is
+    # kept verbatim rather than guessing which field names the refusals.
+    raw: dict | None = None
 
 
 # Cached login tokens, keyed by account key: {key: (token, expires_at_epoch)}
@@ -202,6 +206,7 @@ def _parse_upload_response(response) -> UploadResult:
         updated_count=int(body.get("updated_count") or 0),
         failed_count=int(body.get("failed_count") or 0),
         status=body.get("status"),
+        raw=body if isinstance(body, dict) else None,
     )
 
 

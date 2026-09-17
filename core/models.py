@@ -971,9 +971,15 @@ class VendorNameAlias(Base):
 
 class DealerPortalPushStatus(str, enum.Enum):
     PENDING = "PENDING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
+    SUCCESS = "SUCCESS"    # DP accepted EVERY row
+    FAILED = "FAILED"      # the request itself failed -- retried by the sweep
     SHADOW = "SHADOW"
+    # The request succeeded but DP refused rows it could not match to its
+    # parts master (17 Sep 2026: a file of part DESCRIPTIONS was recorded as
+    # SUCCESS with failed=4, inserted=0). Neither is retried -- resending the
+    # same part numbers cannot change DP's answer.
+    REJECTED = "REJECTED"  # DP refused every row; nothing landed
+    PARTIAL = "PARTIAL"    # some rows landed, some were refused
 
 
 class DealerPortalPush(Base):

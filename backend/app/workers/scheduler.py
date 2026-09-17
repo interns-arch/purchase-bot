@@ -152,8 +152,35 @@ def _schedule_startup_recovery() -> None:
     )
 
 
+def _schedule_advance_orders() -> None:
+    """Advance orders from the sales bot: send queued vendor questions inside
+    vendor hours and move past vendors who did not answer in time. Does
+    nothing unless ADVANCE_ORDERS_ENABLED=true."""
+    from backend.app.advance_orders.config import advance_order_settings
+
+    if not advance_order_settings.enabled:
+        return
+
+    def _tick() -> None:
+        from backend.app.advance_orders import service
+        from core.db import get_session
+
+        with get_session() as session:
+            service.tick(session)
+
+    _scheduler.add_job(
+        lambda: _run_safely("advance_orders_tick", _tick),
+        "interval",
+        minutes=advance_order_settings.tick_minutes,
+        id="advance_orders_tick",
+        replace_existing=True,
+    )
+    logger.info("Advance orders enabled -- vendor questions checked every %d minute(s).", advance_order_settings.tick_minutes)
+
+
 def start_scheduler() -> None:
     _schedule_whatsapp_daily_jobs()
+    _schedule_advance_orders()
     _schedule_google_sheet_daily_reset()
     _schedule_dealer_portal_retry()
     _schedule_startup_recovery()

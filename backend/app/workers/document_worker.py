@@ -98,6 +98,21 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
             logger.exception("Could not send the fallback reply to %s.", message.sender)
 
 
+def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
+    from backend.app.advance_orders.config import advance_order_settings
+
+    if not advance_order_settings.enabled or not (message.text or "").strip():
+        return False
+    try:
+        from backend.app.advance_orders import service as advance_orders
+
+        with get_session() as session:
+            return advance_orders.handle_vendor_text(message.sender, message.text, session)
+    except Exception:  # noqa: BLE001 -- never let this block the normal text handling
+        logger.exception("Advance-order reply check failed for %s -- continuing.", message.sender)
+        return False
+
+
 def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     """A plain text message. Priority:
     1. A known routing command -> remember it for this number.
@@ -106,6 +121,12 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
        every held file for that vendor (identity from the NAME, never the
        filename).
     3. Otherwise -> reply with the instruction (requirement 6)."""
+    # A vendor answering an advance-order question ("haan 5 din", "nahi")
+    # from the sales bot. Only numbers with an OPEN question are claimed, and
+    # only while ADVANCE_ORDERS_ENABLED=true; everything else continues below.
+    if _advance_order_reply(message):
+        return
+
     # Founder command "send reminder" (daily participation follow-up): only
     # honoured from an admin number, checked before anything else so it can
     # never be mistaken for a vendor name.
