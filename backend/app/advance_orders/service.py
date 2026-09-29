@@ -3,12 +3,18 @@
     create_order()   the sales bot's request -> lines grouped by brand -> the
                      first vendor for each brand is queued
     tick()           (scheduler, every few minutes) sends queued questions
-                     inside vendor hours, and moves past a vendor who has not
-                     answered within ADVANCE_ORDER_VENDOR_WAIT_MINUTES
+                     inside vendor hours, moves past a vendor who has not
+                     answered within ADVANCE_ORDER_VENDOR_WAIT_MINUTES, and
+                     closes quote windows that have run out
     handle_vendor_text()
                      a WhatsApp text from a number with an open question ->
-                     read it -> lines answered -> anything still unanswered
-                     goes to the next vendor for that brand
+                     read it -> a QUOTE is stored per line -> anything still
+                     unanswered goes to the next vendor for that brand
+
+Several vendors are asked about one brand at once (ADVANCE_ORDER_QUOTE_FANOUT),
+their answers are collected as `AdvanceVendorQuote` rows, and `ranking.py`
+picks the winner once they have all answered or the quote window closes. Set
+the fan-out to 1 to get the original first-vendor-wins behaviour back.
     confirm_order()  the customer said yes -> each vendor who has the parts
                      gets the order; admins + purchase team are told
     cancel_order()
@@ -22,13 +28,14 @@ Sending goes through `_send_text` / `_send_template`, which tests replace."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.advance_orders import models as m
+from backend.app.advance_orders import callback, models as m, quotes, ranking
 from backend.app.advance_orders.config import advance_order_settings as cfg
-from backend.app.advance_orders.parser import parse_vendor_reply
+from backend.app.advance_orders.parser import LineAnswer, parse_vendor_reply
 from core.logging_setup import get_logger
 from core.models import Vendor
 from core.time_utils import now_ist_naive
@@ -58,15 +65,29 @@ def _internal_numbers(session: Session) -> list[str]:
 
 
 def _vendor_numbers(vendor_id: int, session: Session) -> list[str]:
+    """Every number this vendor can be asked on: his registered numbers (a
+    stock-sharing vendor) plus his enquiry contacts (`advance_vendor_contacts`,
+    for the vendors who never send stock). Deduplicated, and never an admin
+    number -- the Founder's phone is not a vendor even if a sheet says so."""
+    from backend.app.integrations.whatsapp.config import whatsapp_settings
     from backend.app.integrations.whatsapp.models import WhatsAppRegisteredNumber
 
-    return [
-        n
-        for n in session.execute(
-            select(WhatsAppRegisteredNumber.whatsapp_number).where(WhatsAppRegisteredNumber.vendor_id == vendor_id)
-        ).scalars()
-        if n
-    ]
+    registered = session.execute(
+        select(WhatsAppRegisteredNumber.whatsapp_number).where(WhatsAppRegisteredNumber.vendor_id == vendor_id)
+    ).scalars()
+    contacts = session.execute(
+        select(m.AdvanceVendorContact.whatsapp_number).where(
+            m.AdvanceVendorContact.vendor_id == vendor_id,
+            m.AdvanceVendorContact.active.is_(True),
+        )
+    ).scalars()
+    admins = {_normalize(a) for a in whatsapp_settings.admin_phone_numbers}
+    out: list[str] = []
+    for raw in [*registered, *contacts]:
+        number = _normalize(raw) if raw else ""
+        if number and number not in admins and number not in out:
+            out.append(number)
+    return out
 
 
 def _normalize(number: str) -> str:
@@ -125,12 +146,30 @@ def vendors_for_brand(brand: str, session: Session) -> list[Vendor]:
 
 
 def _brand_for_line(part_number: str, given: str | None, session: Session) -> str:
+    """Which brand's vendors to ask about this part.
+
+    1. the brand the sales bot sent, when it sent one;
+    2. `parts.brand` from the canonical part master;
+    3. `part_brand_hints`, loaded from the Founder's stock sheets;
+    4. otherwise "*", the catch-all vendor list.
+
+    The part number is NORMALISED before looking it up. `parts` stores
+    `canonical_part_number` with every separator stripped (`normalise_part_number`),
+    so the previous lookup -- which only upper-cased -- silently missed any
+    part the sales bot wrote with a dash or a space, and routed it to "*"."""
     if given:
         return _brand(given)
+    from core.ingestion.column_detector import normalise_part_number
     from core.models import Part
 
-    part = session.execute(select(Part).where(Part.canonical_part_number == part_number)).scalar_one_or_none()
-    return _brand(part.brand if part is not None and part.brand else None)
+    key = normalise_part_number(part_number)
+    if not key:
+        return _brand(None)
+    part = session.execute(select(Part).where(Part.canonical_part_number == key)).scalar_one_or_none()
+    if part is not None and part.brand:
+        return _brand(part.brand)
+    hint = session.execute(select(m.PartBrandHint).where(m.PartBrandHint.part_number == key)).scalar_one_or_none()
+    return _brand(hint.brand if hint is not None else None)
 
 
 # ------------------------------------------------------------------ create
@@ -175,45 +214,118 @@ def create_order(payload: dict, session: Session) -> m.AdvanceOrder:
 
 
 # ------------------------------------------------------------------ the loop
-def _open_query_for_brand(order: m.AdvanceOrder, brand: str, session: Session) -> m.AdvanceVendorQuery | None:
-    return session.execute(
-        select(m.AdvanceVendorQuery).where(
-            m.AdvanceVendorQuery.advance_order_id == order.id,
-            m.AdvanceVendorQuery.brand == brand,
-            m.AdvanceVendorQuery.status.in_([m.Q_QUEUED, m.Q_SENT]),
-        )
-    ).scalar_one_or_none()
+def _open_queries_for_brand(
+    order: m.AdvanceOrder, brand: str, session: Session
+) -> list[m.AdvanceVendorQuery]:
+    return list(
+        session.execute(
+            select(m.AdvanceVendorQuery).where(
+                m.AdvanceVendorQuery.advance_order_id == order.id,
+                m.AdvanceVendorQuery.brand == brand,
+                m.AdvanceVendorQuery.status.in_([m.Q_QUEUED, m.Q_SENT]),
+            )
+        ).scalars()
+    )
 
 
 def _asked_vendor_ids(order: m.AdvanceOrder, brand: str, session: Session) -> set[int]:
     return set(
         session.execute(
             select(m.AdvanceVendorQuery.vendor_id).where(
-                m.AdvanceVendorQuery.advance_order_id == order.id, m.AdvanceVendorQuery.brand == brand
+                m.AdvanceVendorQuery.advance_order_id == order.id,
+                m.AdvanceVendorQuery.brand == brand,
             )
         ).scalars()
     )
 
 
+def _resolve_lines(order: m.AdvanceOrder, session: Session, now: datetime) -> bool:
+    """Decide every line whose quotes are all in, or whose window has closed.
+
+    True when at least one line was decided -- the caller uses that to tell
+    the sales bot that something changed."""
+    all_queries = list(
+        session.execute(
+            select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.advance_order_id == order.id)
+        ).scalars()
+    )
+    decided = False
+    for line in order.lines:
+        if line.status != m.LINE_ASKING:
+            continue
+        covering = [q for q in all_queries if line.id in (q.line_ids or [])]
+        if not covering:
+            continue
+        # Pending FOR THIS LINE: asked, and has not yet said anything about it.
+        answered = {x.vendor_id for x in quotes.for_line(line.id, session)}
+        still_open = [
+            q for q in covering if q.status in (m.Q_QUEUED, m.Q_SENT) and q.vendor_id not in answered
+        ]
+        # Wait while a vendor we asked might still answer -- unless the
+        # customer has already waited out the quote window, in which case the
+        # best answer ON THE TABLE beats a longer silence.
+        if still_open and not quotes.window_closed(line, covering, now):
+            continue
+        if quotes.apply_winner(line, session):
+            decided = True
+        # Nothing available yet: the line stays ASKING so the next batch of
+        # vendors for this brand gets asked. It only becomes unavailable once
+        # that list is exhausted -- see _advance below.
+    if decided:
+        session.flush()
+    return decided
+
+
 def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
-    """For every brand with unanswered lines and no open question: queue the
-    next vendor, or -- when nobody is left -- mark those lines unavailable.
-    Then send what can be sent and settle the order's status."""
+    """Decide what can be decided, then keep up to `quote_fanout` vendors in
+    play for every brand that still has unanswered lines. When a brand's
+    vendor list runs out, its remaining lines are marked unavailable."""
     if order.status not in (m.ASKING,):
         return
+    _resolve_lines(order, session, now)
+
     waiting: dict[str, list[m.AdvanceOrderLine]] = {}
     for line in order.lines:
         if line.status == m.LINE_ASKING:
             waiting.setdefault(line.brand, []).append(line)
+
     for brand, lines in waiting.items():
-        if _open_query_for_brand(order, brand, session) is not None:
+        open_queries = _open_queries_for_brand(order, brand, session)
+        slots = cfg.quote_fanout - len(open_queries)
+        if slots <= 0:
             continue
         asked = _asked_vendor_ids(order, brand, session)
-        nxt = next((v for v in vendors_for_brand(brand, session) if v.id not in asked), None)
-        if nxt is None:
+        candidates = [v for v in vendors_for_brand(brand, session) if v.id not in asked][:slots]
+        if not candidates:
+            if open_queries:
+                continue  # somebody we already asked may still answer
+            # "Nobody had it" and "nobody could be reached" are different
+            # facts. Telling a customer the part is unavailable when the truth
+            # is that no message got through would be a false answer.
+            brand_queries = [
+                q
+                for q in session.execute(
+                    select(m.AdvanceVendorQuery).where(
+                        m.AdvanceVendorQuery.advance_order_id == order.id,
+                        m.AdvanceVendorQuery.brand == brand,
+                    )
+                ).scalars()
+            ]
+            unreachable = bool(brand_queries) and all(q.status == m.Q_FAILED for q in brand_queries)
             for line in lines:
                 line.status = m.LINE_UNAVAILABLE
-                line.note = "no vendor had it" if asked else "no vendor listed for this brand"
+                if unreachable:
+                    line.note = "could not reach any vendor on WhatsApp"
+                elif asked:
+                    line.note = "no vendor had it"
+                else:
+                    line.note = "no vendor listed for this brand"
+            if unreachable:
+                _tell_internal(
+                    session,
+                    f"Advance order #{order.id}: brand {brand} ke kisi vendor ko message nahi gaya "
+                    f"({', '.join(line.part_number for line in lines)}). Number check kijiye.",
+                )
             if not asked:
                 _tell_internal(
                     session,
@@ -221,34 +333,46 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                     f"({', '.join(line.part_number for line in lines)}). vendor_brands mein daaliye.",
                 )
             continue
-        session.add(
-            m.AdvanceVendorQuery(
-                advance_order_id=order.id,
-                brand=brand,
-                vendor_id=nxt.id,
-                line_ids=[line.id for line in lines],
-                status=m.Q_QUEUED,
+        for vendor in candidates:
+            session.add(
+                m.AdvanceVendorQuery(
+                    advance_order_id=order.id,
+                    brand=brand,
+                    vendor_id=vendor.id,
+                    line_ids=[line.id for line in lines],
+                    status=m.Q_QUEUED,
+                )
             )
-        )
     session.flush()
     _send_queued(order, session, now)
     _settle(order)
 
 
-def _question_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine]) -> str:
+def _question_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], want_rate: bool) -> str:
     rows = "\n".join(f"{i + 1}. {line.part_number} x{line.qty}" for i, line in enumerate(lines))
     by = f"\n{_fmt_day(order.needed_by)} tak chahiye." if order.needed_by else ""
-    return (
-        "Namaste, Cartrends purchase desk se.\n"
-        f"Ye parts mil jayenge? Kab tak aa sakte hain?\n{rows}{by}\n\n"
-        "Jaise: \"haan 5 din\", \"nahi\", ya har part ke aage likh dijiye."
-    )
+    if want_rate:
+        # No standing discount on file, so the rate is asked for -- beside
+        # each part, because a loose rate across several parts cannot be read.
+        ask = "Ye parts mil jayenge? Har part ka rate aur kitne din mein aa sakte hain?"
+        first = lines[0].part_number if lines else "PART"
+        if len(lines) > 1:
+            example = f'Har part ke aage likhiye, jaise: "{first} rate 450, 3 din" ya "{first} nahi".'
+        else:
+            example = 'Jaise: "rate 450, 3 din" ya "nahi".'
+    else:
+        # The discount is already agreed -- asking about money again would only
+        # invite a number we would then have to reconcile against the sheet.
+        ask = "Ye parts mil jayenge? Kab tak aa sakte hain?"
+        example = 'Jaise: "haan 5 din", "nahi", ya har part ke aage likh dijiye.'
+    return f"Namaste, Cartrends purchase desk se.\n{ask}\n{rows}{by}\n\n{example}"
 
 
 def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
     queued = session.execute(
         select(m.AdvanceVendorQuery).where(
-            m.AdvanceVendorQuery.advance_order_id == order.id, m.AdvanceVendorQuery.status == m.Q_QUEUED
+            m.AdvanceVendorQuery.advance_order_id == order.id,
+            m.AdvanceVendorQuery.status == m.Q_QUEUED,
         )
     ).scalars().all()
     if not queued or not _in_vendor_hours(now):
@@ -259,6 +383,8 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         if not lines:
             q.status = m.Q_CLOSED
             continue
+        terms = quotes.brand_terms(q.vendor_id, q.brand, session)
+        want_rate = quotes.wants_rate(terms)
         numbers = _vendor_numbers(q.vendor_id, session)
         delivered: list[str] = []
         for number in numbers:
@@ -275,19 +401,34 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                         ],
                     )
                 else:
-                    _send_text(number, _question_text(order, lines))
+                    _send_text(number, _question_text(order, lines, want_rate))
                 delivered.append(_normalize(number))
             except Exception:  # noqa: BLE001 -- the next number / vendor is tried
-                logger.exception("Advance order %s: question to vendor %s at %s failed.", order.id, q.vendor_id, number)
+                logger.exception(
+                    "Advance order %s: question to vendor %s at %s failed.",
+                    order.id,
+                    q.vendor_id,
+                    number,
+                )
         q.numbers = delivered
         if delivered:
             q.status = m.Q_SENT
             q.sent_at = now
             q.deadline_at = now + timedelta(minutes=cfg.vendor_wait_minutes)
-            logger.info("Advance order %s: asked vendor %s about %s.", order.id, q.vendor_id, q.brand)
+            logger.info(
+                "Advance order %s: asked vendor %s about %s (%s).",
+                order.id,
+                q.vendor_id,
+                q.brand,
+                "rate + days" if want_rate else "days only",
+            )
         else:
             q.status = m.Q_FAILED
-            logger.warning("Advance order %s: vendor %s could not be messaged (no number / send failed).", order.id, q.vendor_id)
+            logger.warning(
+                "Advance order %s: vendor %s could not be messaged (no number / send failed).",
+                order.id,
+                q.vendor_id,
+            )
     session.flush()
     # A vendor who could not be reached is skipped straight away.
     if any(q.status == m.Q_FAILED for q in queued):
@@ -303,18 +444,44 @@ def _settle(order: m.AdvanceOrder) -> None:
     logger.info("Advance order %s is %s.", order.id, order.status)
 
 
+def _snapshot(order: m.AdvanceOrder) -> tuple[str, tuple[tuple[int, str], ...]]:
+    return order.status, tuple((line.id, line.status) for line in order.lines)
+
+
+def _notify_if_changed(
+    order: m.AdvanceOrder, before: tuple[str, tuple[tuple[int, str], ...]], session: Session
+) -> None:
+    """Push to the sales bot when a line was decided or the order settled.
+    Silent otherwise -- a vendor saying "nahi" to one of three asked is not
+    news the bot can act on."""
+    after = _snapshot(order)
+    if after == before:
+        return
+    event = (
+        callback.EVENT_ORDER_SETTLED
+        if before[0] == m.ASKING and order.status != m.ASKING
+        else callback.EVENT_QUOTE_UPDATED
+    )
+    callback.notify(event, order_out(order, session))
+
+
 def tick(session: Session, now: datetime | None = None) -> None:
-    """Send what is queued (inside vendor hours) and move past silent vendors."""
+    """Send what is queued (inside vendor hours), move past silent vendors,
+    and decide lines whose quote window has closed."""
     now = now or now_ist_naive()
     overdue = session.execute(
-        select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.status == m.Q_SENT, m.AdvanceVendorQuery.deadline_at < now)
+        select(m.AdvanceVendorQuery).where(
+            m.AdvanceVendorQuery.status == m.Q_SENT, m.AdvanceVendorQuery.deadline_at < now
+        )
     ).scalars().all()
     for q in overdue:
         q.status = m.Q_TIMEOUT
         logger.info("Advance order %s: vendor %s did not answer in time.", q.advance_order_id, q.vendor_id)
     session.flush()
     for order in session.execute(select(m.AdvanceOrder).where(m.AdvanceOrder.status == m.ASKING)).scalars():
+        before = _snapshot(order)
         _advance(order, session, now)
+        _notify_if_changed(order, before, session)
 
 
 # ------------------------------------------------------------------ replies
@@ -330,40 +497,116 @@ def handle_vendor_text(sender: str, text: str, session: Session, now: datetime |
         .where(m.AdvanceVendorQuery.status == m.Q_SENT)
         .order_by(m.AdvanceVendorQuery.sent_at.desc())
     ).scalars().all()
-    q = next((x for x in open_queries if number in (x.numbers or [])), None)
-    if q is None:
+    mine: list[m.AdvanceVendorQuery] = []
+    for x in open_queries:
+        if number not in (x.numbers or []):
+            continue
+        # A question whose order has moved on, or whose lines have all been
+        # decided, can no longer be answered. It is closed here rather than
+        # left to catch -- and swallow -- this vendor's reply to a LIVE one.
+        live_order = session.get(m.AdvanceOrder, x.advance_order_id)
+        live = (
+            live_order is not None
+            and live_order.status == m.ASKING
+            and any(line.id in (x.line_ids or []) and line.status == m.LINE_ASKING for line in live_order.lines)
+        )
+        if live:
+            mine.append(x)
+        else:
+            x.status = m.Q_CLOSED
+    if not mine:
         return False
+    # ONE NUMBER, SEVERAL VENDORS. The Founder's sheet has numbers shared by
+    # two or three vendor names (919831799000 is listed for Anv Marketing,
+    # Mahesh Motors and Wow Trexim). If more than one of them has an open
+    # question, a reply from that number cannot be pinned to one vendor --
+    # taking the latest would file one vendor's price under another's name.
+    # So it is not guessed: the admin sees the text and records it by hand.
+    vendor_ids = {x.vendor_id for x in mine}
+    if len(vendor_ids) > 1:
+        names = [
+            (session.get(Vendor, vid).name if session.get(Vendor, vid) else str(vid))
+            for vid in sorted(vendor_ids)
+        ]
+        _tell_internal(
+            session,
+            f"Advance order: {number} ek hi number hai {len(names)} vendors ka "
+            f"({', '.join(names)}), aur sabse sawaal khula hai. Ye jawab kiska hai, "
+            f"pata nahi chal sakta:\n\"{text[:300]}\"\n"
+            "Desk pe sahi vendor ke naam se daal dijiye (Advance Orders page).",
+        )
+        return True
+    q = mine[0]  # the latest question -- the original rule
+    if len(mine) > 1:
+        # Several live enquiries to this one vendor. If the reply names part
+        # numbers belonging to exactly one of them, that is the one he means.
+        import re as _re
+
+        said = {_re.sub(r"[^A-Z0-9]", "", tok.upper()) for tok in _re.findall(r"[A-Za-z0-9-]{5,}", text or "")}
+        named = []
+        for x in mine:
+            o = session.get(m.AdvanceOrder, x.advance_order_id)
+            parts = {_re.sub(r"[^A-Z0-9]", "", line.part_number.upper()) for line in o.lines if line.id in (x.line_ids or [])}
+            if parts & said:
+                named.append(x)
+        if len(named) == 1:
+            q = named[0]
     order = session.get(m.AdvanceOrder, q.advance_order_id)
     if order is None or order.status != m.ASKING:
         q.status = m.Q_CLOSED
         return False
     by_id = {line.id: line for line in order.lines}
     lines = [by_id[i] for i in q.line_ids if i in by_id and by_id[i].status == m.LINE_ASKING]
-    answers = parse_vendor_reply(text, [(line.id, line.part_number, line.qty) for line in lines], now.date())
+    terms = quotes.brand_terms(q.vendor_id, q.brand, session)
+    want_rate = quotes.wants_rate(terms)
+    answers = parse_vendor_reply(
+        text, [(line.id, line.part_number, line.qty) for line in lines], now.date(), want_rate
+    )
+    vendor = session.get(Vendor, q.vendor_id)
+    vendor_label = vendor.name if vendor else "vendor"
     if not answers:
-        vendor = session.get(Vendor, q.vendor_id)
         _tell_internal(
             session,
-            f"Advance order #{order.id}: {vendor.name if vendor else 'vendor'} ka jawab samajh nahi aaya:\n\"{text[:300]}\"\n"
+            f"Advance order #{order.id}: {vendor_label} ka jawab samajh nahi aaya:\n\"{text[:300]}\"\n"
             f"Parts: {', '.join(line.part_number + ' x' + str(line.qty) for line in lines)}",
         )
         return True
+
+    # A number that might be the rate, but was not labelled as one. Guessing
+    # it would put an invented price in front of a customer, so those lines
+    # are NOT recorded; the admin reads the vendor's own words instead.
+    ambiguous = [line for line in lines if answers.get(line.id) is not None and answers[line.id].ambiguous]
+    clean = [line for line in lines if answers.get(line.id) is not None and not answers[line.id].ambiguous]
+    if ambiguous:
+        _tell_internal(
+            session,
+            f"Advance order #{order.id}: {vendor_label} ne rate saaf nahi likha:\n\"{text[:300]}\"\n"
+            f"Parts: {', '.join(line.part_number + ' x' + str(line.qty) for line in ambiguous)}\n"
+            "Desk pe haath se daal dijiye (Advance Orders page).",
+        )
+    if not clean:
+        # Nothing usable arrived. The question stays open, so a clarifying
+        # reply from the vendor is still read, and the desk can type it in.
+        return True
+
     q.status = m.Q_REPLIED
     q.replied_at = now
     q.reply_text = text[:1000]
-    for line in lines:
-        ans = answers.get(line.id)
-        if ans is None:
-            continue  # not answered -> the next vendor is asked about it
-        if ans.available:
-            line.status = m.LINE_AVAILABLE
-            line.vendor_id = q.vendor_id
-            line.available_qty = min(ans.available_qty, line.qty) if ans.available_qty else line.qty
-            line.eta_date = ans.eta
-        # "nahi": stays asking, so the next vendor for the brand is asked
-        # about it; only when nobody is left is it marked unavailable.
+    for line in clean:
+        quotes.record(
+            order_id=order.id,
+            line=line,
+            vendor_id=q.vendor_id,
+            answer=answers[line.id],
+            terms=terms,
+            session=session,
+            query_id=q.id,
+            raw_reply=text,
+        )
     session.flush()
+    before = _snapshot(order)
     _advance(order, session, now)
+    _notify_if_changed(order, before, session)
     return True
 
 
@@ -439,35 +682,137 @@ def set_line_answer(
     vendor_id: int | None = None,
     available_qty: int | None = None,
     eta: date | None = None,
+    tat_days: int | None = None,
+    quoted_rate: Decimal | None = None,
+    mrp: Decimal | None = None,
+    force: bool = True,
 ) -> m.AdvanceOrder:
-    """An admin who got the answer on the phone records it here."""
+    """An admin who got the answer on the phone records it here.
+
+    `force=True` (the default, and the original behaviour) makes this vendor
+    the answer for the line outright -- the admin has decided. `force=False`
+    stores it as one more quote and lets the ranking choose, which is what you
+    want when typing in a reply the parser refused as ambiguous."""
     line = next((x for x in order.lines if x.id == line_id), None)
     if line is None:
         raise ValueError("no such line")
     if order.status != m.ASKING:
         raise ValueError(f"order is {order.status}")
+    before = _snapshot(order)
+
+    if tat_days is None and eta is not None:
+        tat_days = max(0, (eta - now_ist_naive().date()).days)
+    if eta is None and tat_days is not None:
+        eta = now_ist_naive().date() + timedelta(days=tat_days)
+
+    if vendor_id is not None:
+        quotes.record(
+            order_id=order.id,
+            line=line,
+            vendor_id=vendor_id,
+            answer=LineAnswer(
+                available=available,
+                available_qty=available_qty,
+                eta=eta,
+                tat_days=tat_days,
+                quoted_rate=quoted_rate,
+                mrp=mrp,
+            ),
+            terms=quotes.brand_terms(vendor_id, line.brand, session),
+            session=session,
+            raw_reply=None,
+            source="admin",
+        )
+
+    if not force and vendor_id is not None:
+        # One more quote on the table -- let the ranking decide, exactly as it
+        # would for a WhatsApp reply. If nobody has it yet the line stays
+        # open, because other vendors asked may still say yes.
+        quotes.apply_winner(line, session)
+        session.flush()
+        _settle(order)
+        _notify_if_changed(order, before, session)
+        return order
+
     line.status = m.LINE_AVAILABLE if available else m.LINE_UNAVAILABLE
     line.vendor_id = vendor_id if available else None
     line.available_qty = (min(available_qty, line.qty) if available_qty else line.qty) if available else None
     line.eta_date = eta if available else None
+    line.tat_days = tat_days if available else None
+    if available and vendor_id is not None:
+        chosen = next(
+            (x for x in quotes.for_line(line.id, session) if x.vendor_id == vendor_id), None
+        )
+        if chosen is not None:
+            line.mrp = chosen.mrp
+            line.discount_pct = chosen.discount_pct
+            line.net_price = chosen.net_price
+            line.winning_quote_id = chosen.id
     line.note = "entered by admin"
     session.flush()
     _settle(order)
+    _notify_if_changed(order, before, session)
     return order
+
+
+def _money(value: Decimal | None) -> str | None:
+    """Decimals travel as strings: JSON floats would round a rupee figure."""
+    return ranking.fmt_money(value)
+
+
+def _quote_out(quote: m.AdvanceVendorQuote, vendors: dict[int, str], brand: str, session: Session) -> dict:
+    terms = quotes.brand_terms(quote.vendor_id, brand, session)
+    band = ranking.tat_band(quote.tat_days)
+    return {
+        "id": quote.id,
+        "vendor_id": quote.vendor_id,
+        "vendor_name": vendors.get(quote.vendor_id),
+        "available": quote.available,
+        "available_qty": quote.available_qty,
+        "tat_days": quote.tat_days,
+        "tat_band": ranking.band_label(band),
+        "eta_date": quote.eta_date.isoformat() if quote.eta_date else None,
+        "mrp": _money(quote.mrp),
+        "quoted_rate": _money(quote.quoted_rate),
+        "discount_pct": _money(quote.discount_pct),
+        "net_price": _money(quote.net_price),
+        "price_source": quote.price_source,
+        "source": quote.source,
+        # The vendor's standing terms, so the desk can judge a quote the
+        # ranking does not score (payment terms, pickup).
+        "terms": {
+            "discount_type": terms.discount_type if terms else None,
+            "discount_note": terms.discount_note if terms else None,
+            "transport": terms.transport if terms else None,
+            "payment_terms": terms.payment_terms if terms else None,
+        },
+        "raw_reply": quote.raw_reply,
+        "received_at": quote.created_at.isoformat() if quote.created_at else None,
+    }
 
 
 def order_out(order: m.AdvanceOrder, session: Session) -> dict:
     """What the sales bot reads. Vendor names are included for the desk; the
-    sales bot never shows them to a customer."""
+    sales bot never shows them to a customer.
+
+    Every key this returned before quotes existed is still here with the same
+    meaning, so a sales bot written against the old shape keeps working. The
+    new keys are additions only: the winning quote's figures on each line,
+    `best_quote`, and `quotes` -- every vendor's answer, best first."""
     vendors = {v.id: v.name for v in session.execute(select(Vendor)).scalars()} if order.lines else {}
-    return {
-        "id": order.id,
-        "external_ref": order.external_ref,
-        "status": order.status,
-        "customer": {"portal_id": order.customer_portal_id, "name": order.customer_name, "phone": order.customer_phone},
-        "needed_by": order.needed_by.isoformat() if order.needed_by else None,
-        "confirmed_at": order.confirmed_at.isoformat() if order.confirmed_at else None,
-        "lines": [
+    lines_out = []
+    for line in order.lines:
+        ranked = quotes.ranked_for_line(line, session)
+        ranked_ids = [r.quote.id for r in ranked]
+        all_quotes = quotes.for_line(line.id, session)
+        # Available quotes in rank order, then the refusals, newest first.
+        ordered = [r.quote for r in ranked] + sorted(
+            (x for x in all_quotes if x.id not in ranked_ids),
+            key=lambda x: x.created_at or datetime.min,
+            reverse=True,
+        )
+        winner = next((x for x in all_quotes if x.id == line.winning_quote_id), None)
+        lines_out.append(
             {
                 "id": line.id,
                 "part_number": line.part_number,
@@ -479,7 +824,25 @@ def order_out(order: m.AdvanceOrder, session: Session) -> dict:
                 "eta_date": line.eta_date.isoformat() if line.eta_date else None,
                 "vendor_name": vendors.get(line.vendor_id) if line.vendor_id else None,
                 "note": line.note,
+                # --- added with quote comparison -----------------------------
+                "vendor_id": line.vendor_id,
+                "tat_days": line.tat_days,
+                "tat_band": ranking.band_label(ranking.tat_band(line.tat_days)) if line.status == m.LINE_AVAILABLE else None,
+                "mrp": _money(line.mrp),
+                "discount_pct": _money(line.discount_pct),
+                "net_price": _money(line.net_price),
+                "best_quote": _quote_out(winner, vendors, line.brand, session) if winner else None,
+                "quote_count": len(all_quotes),
+                "quotes": [_quote_out(x, vendors, line.brand, session) for x in ordered],
             }
-            for line in order.lines
-        ],
+        )
+    return {
+        "id": order.id,
+        "external_ref": order.external_ref,
+        "status": order.status,
+        "customer": {"portal_id": order.customer_portal_id, "name": order.customer_name, "phone": order.customer_phone},
+        "needed_by": order.needed_by.isoformat() if order.needed_by else None,
+        "confirmed_at": order.confirmed_at.isoformat() if order.confirmed_at else None,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+        "lines": lines_out,
     }

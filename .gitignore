@@ -39,3 +39,4 @@ oauth_client.json
 # Dealer Portal vendor credentials (never commit; the .example is the template)
 backend/dp_accounts.json
 dp_accounts.json
+.venv/

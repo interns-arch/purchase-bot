@@ -18,6 +18,7 @@ const NAV_GROUPS = [
     items: [
       { to: "/vendor-inventory", label: "Vendor Inventory" },
       { to: "/customer-orders", label: "Customer Orders" },
+      { to: "/advance-orders", label: "Advance Orders" },
       { to: "/vendor-comparison", label: "Vendor Comparison" },
       { to: "/purchase-orders", label: "Purchase Orders" },
       { to: "/vendor-invoices", label: "Vendor Invoices" },
@@ -49,6 +50,8 @@ const PAGE_PURPOSE = {
   "/customer-orders": "Orders received from customers, and what each one asked for.",
   "/vendor-comparison":
     "Which vendors have the parts an order needs — and reserve stock against them.",
+  "/advance-orders":
+    "Parts not in stock: which vendors were asked, what each quoted, and who was chosen.",
   "/purchase-orders": "Purchase orders raised for vendors, ready to send.",
   "/vendor-invoices": "Invoices vendors sent, checked against what we ordered.",
   "/delivery-tracking": "What was ordered versus what actually arrived.",

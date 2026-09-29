@@ -34,5 +34,52 @@ class AdvanceOrderSettings:
     # How often the scheduler sends queued questions and moves past silent vendors.
     tick_minutes: int = max(1, _int("ADVANCE_ORDER_TICK_MINUTES", 5))
 
+    # --- quote comparison --------------------------------------------------
+    # How many vendors are asked about one brand AT THE SAME TIME. 1 restores
+    # the original first-vendor-wins behaviour exactly. Above 1, the answers
+    # are collected and ranked, which is the only way a discount can be
+    # compared -- you cannot compare what you never asked for.
+    quote_fanout: int = max(1, _int("ADVANCE_ORDER_QUOTE_FANOUT", 3))
+    # How long the answers are collected before the best one is taken. A line
+    # is decided as soon as every asked vendor has answered, so this is the
+    # cap, not the wait. Kept below vendor_wait_minutes by default so a
+    # customer is never left waiting on a silent vendor.
+    quote_window_minutes: int = max(5, _int("ADVANCE_ORDER_QUOTE_WINDOW_MINUTES", 60))
+
+    # TAT BANDS, in days, as upper bounds: "1,3,7,15" means same/next day,
+    # 2-3 days, 4-7, 8-15, then everything slower. The Founder's rule is that
+    # a better TAT beats a better discount -- but only across a band, so
+    # "one day sooner, nine percent worse" never wins. Two vendors inside one
+    # band are equal on time and the higher discount decides.
+    tat_bands: list[int] = [
+        int(x) for x in (os.environ.get("ADVANCE_ORDER_TAT_BANDS") or "1,3,7,15").split(",") if x.strip().isdigit()
+    ] or [1, 3, 7, 15]
+
+    # A RATE vendor has no standing percentage, so he is asked for a rate --
+    # in ONE message listing every part, with the reply shape spelled out
+    # ("TT-100 rate 450, 3 din"). A rate written beside a part number is read;
+    # a loose rate while several parts were asked is refused as ambiguous and
+    # goes to the admin (see parser.parse_vendor_reply). One message per part
+    # was tried and rejected: WhatsApp does not say which message a reply
+    # answers, and the first reply closed the question, losing the second.
+
+    # --- handing the answer back to the sales bot --------------------------
+    # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},
+    # which keeps working either way. Set it and ProcureHub POSTs the order
+    # (same JSON the GET returns) when a line is first quoted and again when
+    # the order settles. Best-effort: a callback failure is logged and retried,
+    # and can never hold up a vendor conversation.
+    callback_url: str = (os.environ.get("ADVANCE_ORDER_CALLBACK_URL") or "").strip()
+    # Sent as X-Api-Key, and as an X-Signature HMAC of the body when set.
+    callback_secret: str = (os.environ.get("ADVANCE_ORDER_CALLBACK_SECRET") or "").strip()
+    callback_timeout_seconds: float = float(os.environ.get("ADVANCE_ORDER_CALLBACK_TIMEOUT_SECONDS") or 20)
+    callback_max_attempts: int = max(1, _int("ADVANCE_ORDER_CALLBACK_MAX_ATTEMPTS", 4))
+    # SHADOW: compute and log exactly what would be POSTed, send nothing.
+    # Mirrors AI_SHADOW_MODE and DEALER_PORTAL_SHADOW. Default false, because
+    # the callback is inert anyway until callback_url is set.
+    callback_shadow: bool = (
+        os.environ.get("ADVANCE_ORDER_CALLBACK_SHADOW", "false").strip().lower() == "true"
+    )
+
 
 advance_order_settings = AdvanceOrderSettings()

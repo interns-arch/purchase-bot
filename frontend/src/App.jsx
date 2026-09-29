@@ -25,6 +25,9 @@ const IntegrationStatusPage = lazy(() =>
 const DeliveryTrackingPage = lazy(() =>
   import("./pages/DeliveryTrackingPage").then((m) => ({ default: m.DeliveryTrackingPage }))
 );
+const AdvanceOrdersPage = lazy(() =>
+  import("./pages/AdvanceOrdersPage").then((m) => ({ default: m.AdvanceOrdersPage }))
+);
 const VendorInvoicesPage = lazy(() =>
   import("./pages/VendorInvoicesPage").then((m) => ({ default: m.VendorInvoicesPage }))
 );
@@ -102,6 +105,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <VendorInvoicesPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/advance-orders"
+              element={
+                <ProtectedRoute>
+                  <AdvanceOrdersPage />
                 </ProtectedRoute>
               }
             />

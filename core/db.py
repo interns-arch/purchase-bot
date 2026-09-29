@@ -59,6 +59,25 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 # ALTER TABLE once per process. Additive-only -- nothing is ever dropped.
 _SCHEMA_UPGRADES = (
     ("incoming_documents", "stored_path", "VARCHAR"),
+    # Advance-order quote comparison. These tables are imported at startup, so
+    # on an existing database they already exist -- empty -- and create_all
+    # will not add the new columns to them. Every type here is valid on both
+    # SQLite and Postgres. `discount_type` carries a DEFAULT so any row made
+    # before this change reads as a percentage vendor with no percentage on
+    # file -- which `quotes.wants_rate()` treats as "no terms known", so that
+    # vendor keeps the original availability-and-days question unchanged.
+    ("vendor_brands", "discount_type", "VARCHAR DEFAULT 'percent'"),
+    ("vendor_brands", "discount_pct", "NUMERIC(6, 3)"),
+    ("vendor_brands", "discount_note", "VARCHAR"),
+    ("vendor_brands", "transport", "VARCHAR"),
+    ("vendor_brands", "payment_terms", "VARCHAR"),
+    ("vendor_brands", "can_share_stock", "BOOLEAN"),
+    ("vendor_brands", "updated_at", "TIMESTAMP"),
+    ("advance_order_lines", "tat_days", "INTEGER"),
+    ("advance_order_lines", "mrp", "NUMERIC(18, 4)"),
+    ("advance_order_lines", "discount_pct", "NUMERIC(6, 3)"),
+    ("advance_order_lines", "net_price", "NUMERIC(18, 4)"),
+    ("advance_order_lines", "winning_quote_id", "INTEGER"),
 )
 # Values added to a Postgres ENUM type after it already existed. Like
 # columns, `create_all` never alters an existing type, and inserting a value
