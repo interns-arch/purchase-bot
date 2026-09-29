@@ -360,16 +360,19 @@ picks which of the two setups below is used; you only need to complete one.
    from Google Sheets setup, §8) and enable the **Gmail API**
    (APIs & Services -> Library -> search "Gmail API" -> Enable).
 2. Configure the OAuth consent screen (APIs & Services -> OAuth consent
-   screen) -- "Internal" if using Google Workspace, "External" otherwise
-   (add the mailbox as a test user if the app stays in "Testing" mode).
+   screen) -- **"Internal"** if using Google Workspace (cartrends.net is),
+   "External" otherwise. **Do not leave an External app in "Testing"**:
+   Google expires its refresh tokens after 7 days, and Gmail + Sheets then
+   fail every week with `invalid_grant: Token has been expired or revoked`.
+   An External app must be switched to "In production" (Publish app).
 3. Create credentials: APIs & Services -> Credentials -> Create Credentials
    -> OAuth client ID -> Application type **Desktop app**. Download the
    client ID and client secret.
-4. Run a one-time consent flow to mint a refresh token (any short local
-   script using `google-auth-oauthlib`'s `InstalledAppFlow` with scope
-   `https://www.googleapis.com/auth/gmail.modify` works -- this only needs
-   to be done once per mailbox; the refresh token doesn't expire unless
-   revoked). **If you also use Google Sheets Sync (§8), mint the token with
+4. Mint the refresh token with
+   `python -m backend.scripts.generate_google_token` (it requests both
+   scopes below and verifies the result). With an Internal or published app
+   this is needed once per mailbox. A token minted while the app was in
+   "Testing" keeps its 7-day life -- re-mint after changing the setting. **If you also use Google Sheets Sync (§8), mint the token with
    BOTH scopes in the same consent:**
    `https://www.googleapis.com/auth/gmail.modify` **and**
    `https://www.googleapis.com/auth/spreadsheets` -- the two integrations
