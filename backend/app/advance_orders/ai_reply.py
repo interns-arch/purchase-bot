@@ -53,6 +53,24 @@ SYSTEM = (
 )
 
 
+def _without_part_numbers(text: str, parts: list[str]) -> str:
+    """The reply with every part number taken out. Found live, 1 Oct 2026:
+    in "16510M68K10 ka rate 450" the digits of the part number (16510, 68,
+    10) were counted as numbers the vendor wrote, so an invented quantity of
+    10 passed the check. A part number is never a quantity, a day or a rate."""
+    asked = {_key(p) for p in parts}
+    kept = []
+    for token in re.split(r"(\s+)", text):
+        bare = token.strip(".,;:!?()")
+        has_letter = any(c.isalpha() for c in bare)
+        has_digit = any(c.isdigit() for c in bare)
+        if (has_letter and has_digit and len(bare) >= 5) or (bare and _key(bare) in asked):
+            kept.append(" ")
+        else:
+            kept.append(token)
+    return "".join(kept)
+
+
 def _numbers_in(text: str) -> set[Decimal]:
     found: set[Decimal] = set()
     for token in re.findall(r"\d+(?:[.,]\d+)?", text):
@@ -104,8 +122,9 @@ def read(text: str, lines: list[tuple[int, str, int]], today: date, want_rate: b
         return None
 
     by_key = {_key(part): (lid, qty) for lid, part, qty in lines}
-    numbers = _numbers_in(text)
-    days_ok = _allowed_days(text)
+    said = _without_part_numbers(text, [part for _lid, part, _qty in lines])
+    numbers = _numbers_in(said)
+    days_ok = _allowed_days(said)
     out: dict[int, LineAnswer] = {}
 
     def traced(value) -> Decimal | None | bool:

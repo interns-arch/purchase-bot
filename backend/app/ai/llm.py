@@ -48,7 +48,10 @@ GEMINI_MODELS = {
     "reply": os.environ.get("GEMINI_REPLY_MODEL", "gemini-3.5-flash").strip(),
     "vision": os.environ.get("GEMINI_VISION_MODEL", "gemini-3.5-flash").strip(),
 }
-NVIDIA_TEXT_MODEL = (os.environ.get("AI_LLM_NVIDIA_MODEL") or "meta/llama-3.1-8b-instruct").strip()
+# meta/llama-3.1-8b-instruct was RETIRED by NVIDIA (HTTP 410, found live 1 Oct
+# 2026). Of 65 chat models only 9 answer for this account; this one returns
+# clean JSON in ~0.3 s and routed 7/7 staff messages correctly.
+NVIDIA_TEXT_MODEL = (os.environ.get("AI_LLM_NVIDIA_MODEL") or "meta/llama-3.2-11b-vision-instruct").strip()
 TIMEOUT = float(os.environ.get("AI_LLM_TIMEOUT_SECONDS", "30"))
 TEMPERATURE = 0.2  # the sales bot's setting: low creativity
 ORDER = [p.strip() for p in (os.environ.get("AI_LLM_PROVIDERS") or "gemini,nvidia").split(",") if p.strip()]
