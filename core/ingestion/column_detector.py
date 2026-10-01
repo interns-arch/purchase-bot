@@ -279,6 +279,43 @@ def is_parseable_quantity(value: Any) -> bool:
     return True
 
 
+# A stock count written with its unit: "4SET", "2 PCS", "10 Nos.", "1 pair".
+# Only COUNT units -- each one means "this many of the item". Measures such as
+# LTR / KG / ML are deliberately absent: "5 LTR" may be one 5-litre can, and
+# turning it into 5 pieces of stock would be a guess.
+_COUNT_UNITS = (
+    "SETS", "SET", "PCS", "PC", "PIECES", "PIECE", "NOS", "NO", "NUMBERS",
+    "PAIRS", "PAIR", "PRS", "PKTS", "PKT", "PACKETS", "PACKET", "BOXES", "BOX",
+    "UNITS", "UNIT", "EA", "EACH", "QTY",
+)
+_UNIT_QUANTITY = re.compile(
+    r"^\s*(-?\d[\d,]*(?:\.\d+)?)\s*(?:" + "|".join(_COUNT_UNITS) + r")\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_count_unit(value: Any) -> Any:
+    """'4SET' -> '4'. Anything that is not exactly <number><count unit> is
+    returned unchanged, so it parses (or fails) exactly as before."""
+    if value is None:
+        return value
+    match = _UNIT_QUANTITY.match(str(value))
+    return match.group(1) if match else value
+
+
+def is_parseable_stock_quantity(value: Any) -> bool:
+    """Like `is_parseable_quantity`, but also accepts a count written with its
+    unit ("4SET", "2 PCS"). For VENDOR STOCK quantities only: the shared
+    `parse_quantity` stays strict because customer orders, deliveries,
+    invoices, prices and MRP all go through it."""
+    return is_parseable_quantity(_strip_count_unit(value))
+
+
+def parse_stock_quantity(value: Any) -> Decimal:
+    """`parse_quantity` for vendor stock -- see `is_parseable_stock_quantity`."""
+    return parse_quantity(_strip_count_unit(value))
+
+
 def decimal_to_string(value: Decimal) -> str:
     """
     Format Decimal without unnecessary trailing zeroes.

@@ -32,9 +32,11 @@ from core.ingestion.column_detector import (
     find_optional_column,
     find_secondary_part_columns,
     is_parseable_quantity,
+    is_parseable_stock_quantity,
     normalise_header,
     normalise_part_number,
     parse_quantity,
+    parse_stock_quantity,
 )
 from core.ingestion.csv_reader import read_csv_grid, read_csv_rows
 from core.ingestion.excel_reader import read_excel_grid, read_excel_rows
@@ -542,7 +544,7 @@ def run_import(
             error_count += 1
             continue
 
-        if not is_parseable_quantity(raw_quantity):
+        if not is_parseable_stock_quantity(raw_quantity):
             session.add(
                 ImportErrorRecord(
                     import_id=import_row.id,
@@ -555,7 +557,8 @@ def run_import(
             error_count += 1
             continue
 
-        quantity = parse_quantity(raw_quantity)
+        # Stock may carry its unit ("4SET", "2 PCS") -- see parse_stock_quantity.
+        quantity = parse_stock_quantity(raw_quantity)
         if quantity < 0:
             # Stock can never be negative (DB enforces it with
             # ck_vendor_inventory_qty_nonneg) -- reject just this row instead
