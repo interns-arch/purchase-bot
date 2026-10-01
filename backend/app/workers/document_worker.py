@@ -39,6 +39,7 @@ from backend.app.integrations.whatsapp import (
     daily_stock,
     failed_file,
     pending_customer_files,
+    pdf_choice,
     pending_vendor_files,
     registry,
     vendor_memory,
@@ -261,6 +262,27 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
                 )
                 _process_text_order(message.sender, order, customer_id=registered.party_id)
                 return
+        # The vendor answering "stock list hai ya bill?" about a PDF he sent.
+        # Only while a PDF is actually held for him -- otherwise "stock" is an
+        # ordinary message, handled below exactly as before.
+        if registered.party_type == "vendor":
+            choice = pdf_choice.answer(message.text)
+            if choice is not None:
+                with get_session() as session:
+                    held = pdf_choice.take(message.sender, session) if pdf_choice.has_pending(message.sender, session) else []
+                if held:
+                    document_type = (
+                        IncomingDocumentType.VENDOR_INVOICE if choice == "invoice" else IncomingDocumentType.VENDOR_INVENTORY
+                    )
+                    for row in held:
+                        logger.info(
+                            "Vendor %s says held PDF '%s' is a %s.", registered.name, row.original_filename, choice
+                        )
+                        _process_registered_file(
+                            message.sender, registered, Path(row.staged_path), row, document_type
+                        )
+                    return
+
         # A registered VENDOR may type his stock instead of sending a file.
         # Only a message that actually reads as part + quantity lines is
         # taken; "good morning sir" and "kal aayega" stay ignored.
@@ -822,6 +844,10 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
     the notification mirror as with every import."""
     suffix = Path(message.filename or "").suffix.lower()
     if party.party_type == "vendor":
+        # A vendor PDF used to be an invoice by definition. Vendors also send
+        # stock lists as PDF, so the type is decided after download, from
+        # what the PDF says (`pdf_choice.classify_vendor_pdf`). Until then
+        # it is provisionally an invoice, the old behaviour.
         document_type = (
             IncomingDocumentType.VENDOR_INVOICE
             if suffix == ".pdf"
@@ -877,11 +903,43 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
         )
         return
 
+    if party.party_type == "vendor" and suffix == ".pdf":
+        kind, why = pdf_choice.classify_vendor_pdf(file_path)
+        logger.info("Vendor PDF '%s' from %s read as %s (%s).", message.filename, party.name, kind, why)
+        if kind == "unclear":
+            with get_session() as session:
+                pdf_choice.hold(
+                    message.sender,
+                    party.party_id,
+                    file_path,
+                    message.filename or file_path.name,
+                    session,
+                    media_id=message.media_id,
+                    message_id=message.message_id,
+                )
+            send_reply_safe(message.sender, pdf_choice.QUESTION)
+            return
+        # "scanned" goes down the stock path too: the importer refuses it
+        # with the reason, so it is recorded in the File Inbox and the admin
+        # gets the file -- and the vendor is told to send Excel or type it.
+        document_type = (
+            IncomingDocumentType.VENDOR_INVOICE if kind == "invoice" else IncomingDocumentType.VENDOR_INVENTORY
+        )
+
+    _process_registered_file(message.sender, party, file_path, message, document_type)
+
+
+def _process_registered_file(sender: str, party, file_path, message, document_type: IncomingDocumentType) -> None:
+    """Import a registered party's already-downloaded file and reply once."""
     metadata = DocumentMetadata(
-        sender=message.sender,
-        caption=message.caption,  # audit only -- identity comes from the registry
-        external_message_id=message.message_id,
-        original_filename=message.filename,
+        sender=sender,
+        caption=getattr(message, "caption", None),  # audit only -- identity comes from the registry
+        external_message_id=getattr(message, "message_id", None),
+        original_filename=(
+            getattr(message, "filename", None)
+            or getattr(message, "original_filename", None)  # a held PDF
+            or Path(file_path).name
+        ),
         document_type_hint=document_type,
         vendor_id_hint=party.party_id if party.party_type == "vendor" else None,
         customer_id_hint=party.party_id if party.party_type == "customer" else None,
@@ -889,19 +947,23 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
     try:
         # This path sends its own reply below -- never two for one file.
         result = _process_staged_file(
-            file_path, metadata, message.filename, message.media_id, notify_sender=False
+            file_path,
+            metadata,
+            metadata.original_filename,
+            getattr(message, "media_id", None),
+            notify_sender=False,
         )
     except Exception:
         # process_document reports normal failures via the result status; an
         # exception here is infrastructure-level. The admin already got the
         # error toast/mirror -- the sender still deserves a reply.
         send_reply_safe(
-            message.sender,
+            sender,
             "❌ Something went wrong while processing this file. Our team has "
             "been notified -- please try again later.",
         )
         raise
-    send_reply_safe(message.sender, _registered_result_reply(party, result, document_type))
+    send_reply_safe(sender, _registered_result_reply(party, result, document_type))
 
 
 def _registered_result_reply(party, result, document_type: IncomingDocumentType) -> str:

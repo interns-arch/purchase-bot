@@ -58,7 +58,9 @@ from core.services.part_resolution_service import (  # noqa: F401 -- resolve_par
     resolve_parts_bulk,
 )
 
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
+# .pdf: a text-based stock list, read by core.ingestion.pdf_reader into the
+# same rows an Excel file gives (a scanned PDF is refused with a reason).
+SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls", ".pdf"}
 DEFAULT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
 DEFAULT_MAX_ROW_COUNT = 200_000
 
@@ -185,6 +187,10 @@ def _validate_extension_and_size(
 def _read_file(file_path: Path) -> ParsedFile:
     if file_path.suffix.lower() == ".csv":
         return read_csv_rows(file_path)
+    if file_path.suffix.lower() == ".pdf":
+        from core.ingestion.pdf_reader import read_pdf_rows
+
+        return read_pdf_rows(file_path)
     return read_excel_rows(file_path)
 
 
@@ -275,6 +281,10 @@ def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, st
     at the first fully-blank row."""
     if file_path.suffix.lower() == ".csv":
         grid = read_csv_grid(file_path)
+    elif file_path.suffix.lower() == ".pdf":
+        from core.ingestion.pdf_reader import pdf_grid
+
+        grid = pdf_grid(file_path)
     else:
         grid = read_excel_grid(file_path)
 

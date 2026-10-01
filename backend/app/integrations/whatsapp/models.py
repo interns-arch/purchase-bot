@@ -169,3 +169,23 @@ class WhatsAppPendingCustomerFile(Base):
     staged_path: Mapped[str] = mapped_column()
     original_filename: Mapped[str] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WhatsAppPendingPdfChoice(Base):
+    """A registered vendor's PDF that could not be told apart as a stock list
+    or a bill, held while the bot asks him "stock list hai ya bill?".
+
+    Its own table, not `whatsapp_pending_vendor_files`: that one holds files
+    waiting for a VENDOR NAME, and a reply meant for one question must never
+    be read as the answer to the other. Persisted so a restart keeps it."""
+
+    __tablename__ = "whatsapp_pending_pdf_choices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True)
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("vendors.id", ondelete="CASCADE"))
+    staged_path: Mapped[str] = mapped_column()
+    original_filename: Mapped[str] = mapped_column()
+    media_id: Mapped[str | None] = mapped_column(default=None)
+    message_id: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
