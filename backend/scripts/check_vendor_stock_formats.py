@@ -571,6 +571,10 @@ def _check_sheet_tabs() -> None:
     b_id, _ = vendor_with("Sheet Vendor B", [["TT-100", "OIL FILTER", 7, 450]])
     own_id, _ = vendor_with("Bijwasan Warehouse", [["OWN0001", "CLIP", 40, 5]])
     old_id, _ = vendor_with("Sheet Vendor Old", [["OLD0001", "CLIP", 9, 5]], yesterday=True)
+    # The live spellings of the company's own warehouses (1 Oct 2026).
+    vendor_with("BIJWASHAN STOCK", [["BJW0001", "CLIP", 40, 5]])
+    vendor_with("JAIPUR STOCK", [["JPR0001", "CLIP", 40, 5]])
+    vendor_with("Jaipurwala Traders", [["JWT0001", "CLIP", 3, 5]])
 
     with get_session() as s:
         headers, table = dealer_stock.team_format_table(a_id, s)
@@ -582,6 +586,8 @@ def _check_sheet_tabs() -> None:
     parts = {row[2] for row in table}
     check("DEALER STOCK lists every vendor who sent stock today", {"0050048", "1701AAA06701N", "TT-100"} <= parts)
     check("...but not the company's own warehouse", "OWN0001" not in parts)
+    check("...nor 'BIJWASHAN STOCK' / 'JAIPUR STOCK' (the Portal's own exclusion list)", "BJW0001" not in parts and "JPR0001" not in parts)
+    check("...while a real vendor merely NAMED like a warehouse stays", "JWT0001" in parts)
     check("...and not a vendor whose stock is not from today", "OLD0001" not in parts)
     a_rows = [row for row in table if row[0] == a_code]
     check("...with the vendor's code and name on each of his rows", len(a_rows) == 2 and all(row[1] == "Sheet Vendor A" for row in a_rows))

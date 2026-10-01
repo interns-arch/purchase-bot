@@ -114,14 +114,33 @@ def fresh_vendor_ids(session: Session) -> set[int]:
     )
 
 
+def is_company_stock(name: str | None, *, flag: bool = False) -> bool:
+    """CarTrends' own warehouse stock -- never dealer stock.
+
+    The SAME two rules the Dealer Portal push applies (credentials.py), so the
+    tab and the Portal can never disagree: the own-stock setting
+    (OWN_STOCK_VENDOR_NAME), and the Portal's exclusion list
+    (DEALER_PORTAL_EXCLUDE_VENDORS: Bijvasan, Bijwasan, Bijwashan, Mansarovar,
+    Mansarover, Maansarovar, Jaipur), matched as whole words. Found live on
+    1 Oct 2026: "BIJWASHAN STOCK" and "JAIPUR STOCK" passed the own-stock
+    setting alone (it has no "Bijwashan" spelling and no Jaipur)."""
+    from backend.app.integrations.dealer_portal.config import dealer_portal_settings
+    from core.services.own_stock import is_own_stock_vendor
+
+    if is_own_stock_vendor(name, flag=flag):
+        return True
+    from backend.app.integrations.dealer_portal.credentials import matches_name
+
+    return any(matches_name(pattern, name or "") for pattern in dealer_portal_settings.exclude_vendors)
+
+
 def dealer_stock_table(session: Session) -> tuple[list[str], list[list]]:
     from core.models import InventoryImport, Vendor, VendorInventory
-    from core.services.own_stock import is_own_stock_vendor
 
     fresh = fresh_vendor_ids(session)
     vendors = [
         v for v in session.execute(select(Vendor).where(Vendor.id.in_(fresh)).order_by(Vendor.vendor_code)).scalars()
-        if not is_own_stock_vendor(v.name, flag=bool(v.is_own_stock))
+        if not is_company_stock(v.name, flag=bool(v.is_own_stock))
     ]
     table = []
     for vendor in vendors:
