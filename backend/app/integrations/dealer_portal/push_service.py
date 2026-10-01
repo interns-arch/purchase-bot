@@ -320,7 +320,39 @@ def _finish(
         logger.exception("Could not record Dealer Portal push %s.", push_id)
     if note:
         logger.info("Dealer Portal push %s: %s.", push_id, note)
+    _tell_team(push_id, status, error, upload)
     return status
+
+
+def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, upload) -> None:
+    """A push the Portal refused, in part or whole, is news the team must
+    hear -- until now it only reached the server log. Shown on the web and
+    mirrored to the admin WhatsApp. Retries of a FAILED push do not repeat
+    the alert. Never raises."""
+    try:
+        if status not in (DealerPortalPushStatus.REJECTED, DealerPortalPushStatus.PARTIAL, DealerPortalPushStatus.FAILED):
+            return
+        with get_session() as session:
+            push = session.get(DealerPortalPush, push_id)
+            if push is None or (status == DealerPortalPushStatus.FAILED and (push.attempts or 0) > 1):
+                return
+            account = push.account_key
+        landed = (getattr(upload, "inserted_count", 0) or 0) + (getattr(upload, "updated_count", 0) or 0)
+        refused = getattr(upload, "failed_count", 0) or 0
+        if status == DealerPortalPushStatus.FAILED:
+            title = f"Dealer Portal upload failed ({account})"
+            detail = f"{error or 'no reason given'}. It will be retried automatically."
+        else:
+            title = f"Dealer Portal refused {refused} row(s) ({account})"
+            detail = (
+                f"{landed} row(s) landed, {refused} refused -- usually parts that are not in the "
+                f"Portal's own parts list. {error or ''}".strip()
+            )
+        from backend.app.notifications import broker
+
+        broker.publish("warning" if status == DealerPortalPushStatus.PARTIAL else "error", title, detail)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not announce Dealer Portal push %s.", push_id)
 
 
 def retry_failed_pushes() -> int:
