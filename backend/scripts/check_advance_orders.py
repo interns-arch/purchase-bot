@@ -445,6 +445,78 @@ def _check_quote_comparison(check, service, m, cfg, get_session, Vendor, TestCli
     cfg.enabled = False
     cfg.quote_fanout = 1
 
+    _check_one_by_one(check, service, m, cfg, get_session, Vendor)
+
+
+def _check_one_by_one(check, service, m, cfg, get_session, Vendor) -> None:
+    """[14] Founder's rules for advance orders (1 Oct 2026): one vendor at a
+    time brand-wise, next only after a refusal; a partial answer sends the
+    rest on; nobody has it -> a person's WhatsApp."""
+    from decimal import Decimal
+
+    sent: list[tuple[str, str]] = []
+    service._send_text = lambda to, body: sent.append((to, body))
+    to = lambda number: [b for t, b in sent if t == number]  # noqa: E731
+
+    print("\n[14] one vendor at a time; partial answers; nobody has it")
+    cfg.quote_fanout = 1
+    cfg.split_partial = True
+    cfg.human_numbers = ["919888000111"]
+    with get_session() as s:
+        vs = [Vendor(name=f"Brand Vendor {i}", vendor_code=f"BV{i}_CT") for i in (1, 2, 3)]
+        s.add_all(vs)
+        s.flush()
+        for i, v in enumerate(vs, start=1):
+            s.add(m.VendorBrand(brand="HYUNDAI", vendor_id=v.id, priority=i, discount_type=m.DISC_PERCENT, discount_pct=Decimal(str(10 + i))))
+            s.add(m.AdvanceVendorContact(vendor_id=v.id, whatsapp_number=f"91920000000{i}"))
+        ids = [v.id for v in vs]
+    t = datetime(2026, 10, 1, 11, 0)
+    service.now_ist_naive = lambda: t
+    sent.clear()
+    with get_session() as s:
+        order = service.create_order({"external_ref": "ADV-1BY1", "customer": {"name": "Sharma Auto"}, "lines": [{"part_number": "HY-500", "brand": "HYUNDAI", "qty": 10}]}, s)
+        oid = order.id
+    check("only the FIRST vendor is asked", bool(to("919200000001")) and not to("919200000002") and not to("919200000003"))
+    with get_session() as s:
+        service.handle_vendor_text("919200000001", "nahi", s, t + timedelta(minutes=5))
+    check("after his 'nahi', the SECOND vendor is asked -- and only him", bool(to("919200000002")) and not to("919200000003"))
+    with get_session() as s:
+        service.handle_vendor_text("919200000002", "sirf 3 milenge, 2 din", s, t + timedelta(minutes=9))
+    with get_session() as s:
+        o = s.get(m.AdvanceOrder, oid)
+        got = [(l.qty, l.status, l.vendor_id) for l in o.lines]
+    check("a partial 'sirf 3' of 10: vendor 2 gets his 3 ...", (3, m.LINE_AVAILABLE, ids[1]) in got)
+    check("...and the other 7 stay open, so the total is still 10", (7, m.LINE_ASKING, None) in got and sum(q for q, _, _ in got) == 10)
+    check("...and only the remaining 7 go to the third vendor", any("HY-500 x7" in b for b in to("919200000003")))
+    sent.clear()
+    with get_session() as s:
+        service.handle_vendor_text("919200000003", "nahi", s, t + timedelta(minutes=15))
+    with get_session() as s:
+        o = s.get(m.AdvanceOrder, oid)
+        rest = next(l for l in o.lines if l.qty == 7)
+        status = o.status
+    check("every vendor refused the 7: they are marked not found", rest.status == m.LINE_UNAVAILABLE)
+    human = to("919888000111")
+    check("...and the person's WhatsApp gets part, brand and quantity", len(human) == 1 and "HY-500 (HYUNDAI) x7" in human[0] and "Sharma Auto" in human[0])
+    check("the order is still QUOTED for the 3 that were found", status == m.QUOTED)
+
+    # With several vendors asked at once, a vendor who already said yes to
+    # the whole line covers the remainder -- nobody is asked twice.
+    cfg.quote_fanout = 3
+    sent.clear()
+    with get_session() as s:
+        order = service.create_order({"external_ref": "ADV-CARRY", "lines": [{"part_number": "HY-600", "brand": "HYUNDAI", "qty": 10}]}, s)
+        oid2 = order.id
+    with get_session() as s:
+        service.handle_vendor_text("919200000003", "sirf 4, kal", s, t + timedelta(minutes=3))
+        service.handle_vendor_text("919200000002", "haan 5 din", s, t + timedelta(minutes=4))
+        service.handle_vendor_text("919200000001", "nahi", s, t + timedelta(minutes=5))
+    with get_session() as s:
+        o = s.get(m.AdvanceOrder, oid2)
+        got = sorted((l.qty, l.status, l.vendor_id) for l in o.lines)
+    check("vendor 3's 4 (faster) and vendor 2's 'haan' cover all 10 between them", got == sorted([(4, m.LINE_AVAILABLE, ids[2]), (6, m.LINE_AVAILABLE, ids[1])]))
+    cfg.quote_fanout = 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

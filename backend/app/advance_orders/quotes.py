@@ -195,8 +195,14 @@ def window_closed(
     return min(sent) + timedelta(minutes=cfg.quote_window_minutes) <= now
 
 
-def apply_winner(line: m.AdvanceOrderLine, session: Session) -> bool:
-    """Copy the best available quote onto the line. True when one existed."""
+def apply_winner(line: m.AdvanceOrderLine, session: Session, _depth: int = 0) -> bool:
+    """Copy the best available quote onto the line. True when one existed.
+
+    A vendor who has only part of the line ("sirf 3" of 10) gets HIS part:
+    the line becomes 3, and a new line for the other 7 is opened for the next
+    vendor (`ADVANCE_ORDER_SPLIT_PARTIAL`). Any other vendor who already said
+    yes to the line is carried over to the remainder, so he is not asked
+    twice. The quantity the sales bot asked for, added up, never changes."""
     ordered = ranked_for_line(line, session)
     if not ordered:
         return False
@@ -215,4 +221,48 @@ def apply_winner(line: m.AdvanceOrderLine, session: Session) -> bool:
     logger.info(
         "Advance line %s decided: vendor %s (%s).", line.id, quote.vendor_id, line.note
     )
+
+    have = quote.available_qty
+    if cfg.split_partial and have and 0 < have < line.qty and _depth < 25:
+        remainder = line.qty - have
+        line.qty = have
+        line.available_qty = have
+        line.note = f"{line.note} - had {have} of {have + remainder}"
+        rest = m.AdvanceOrderLine(
+            part_number=line.part_number,
+            part_name=line.part_name,
+            brand=line.brand,
+            qty=remainder,
+            status=m.LINE_ASKING,
+            note=f"rest of {line.part_number}: {remainder} still to find",
+        )
+        line.order.lines.append(rest)
+        session.flush()
+        carried = False
+        for other in ordered[1:]:
+            source = other.quote
+            session.add(
+                m.AdvanceVendorQuote(
+                    advance_order_id=line.advance_order_id,
+                    advance_order_line_id=rest.id,
+                    vendor_id=source.vendor_id,
+                    query_id=source.query_id,
+                    available=True,
+                    available_qty=min(source.available_qty or remainder, remainder),
+                    tat_days=source.tat_days,
+                    eta_date=source.eta_date,
+                    mrp=source.mrp,
+                    quoted_rate=source.quoted_rate,
+                    discount_pct=source.discount_pct,
+                    net_price=source.net_price,
+                    price_source=source.price_source,
+                    raw_reply=source.raw_reply,
+                    source=source.source,
+                )
+            )
+            carried = True
+        session.flush()
+        logger.info("Advance line %s split: %s from vendor %s, %s still to find.", line.id, have, quote.vendor_id, remainder)
+        if carried:
+            apply_winner(rest, session, _depth + 1)
     return True

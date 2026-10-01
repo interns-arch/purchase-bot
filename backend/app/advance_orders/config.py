@@ -39,7 +39,12 @@ class AdvanceOrderSettings:
     # the original first-vendor-wins behaviour exactly. Above 1, the answers
     # are collected and ranked, which is the only way a discount can be
     # compared -- you cannot compare what you never asked for.
-    quote_fanout: int = max(1, _int("ADVANCE_ORDER_QUOTE_FANOUT", 3))
+    #
+    # Founder, 1 Oct 2026: ask ONE vendor at a time, brand-wise, and the next
+    # only after a refusal -- so the default is 1. With 1 the first vendor who
+    # says yes wins, and vendors are asked in their brand priority order
+    # (best known discount first, from VENDOR BRAND MAPPING.xlsx).
+    quote_fanout: int = max(1, _int("ADVANCE_ORDER_QUOTE_FANOUT", 1))
     # How long the answers are collected before the best one is taken. A line
     # is decided as soon as every asked vendor has answered, so this is the
     # cap, not the wait. Kept below vendor_wait_minutes by default so a
@@ -62,6 +67,18 @@ class AdvanceOrderSettings:
     # goes to the admin (see parser.parse_vendor_reply). One message per part
     # was tried and rejected: WhatsApp does not say which message a reply
     # answers, and the first reply closed the question, losing the second.
+
+    # A vendor who has only PART of a line ("sirf 3" of 10): the line becomes
+    # his 3, and a new line for the other 7 goes on to the next vendor. The
+    # total asked for never changes. false = his 3 is the answer, as before.
+    split_partial: bool = (os.environ.get("ADVANCE_ORDER_SPLIT_PARTIAL", "true").strip().lower() == "true")
+
+    # Who is told when NO vendor has a part (Founder, 1 Oct 2026: "send the
+    # query to a human person's WhatsApp"). Comma-separated. Blank = the admin
+    # numbers and purchase team, until the Founder names the person.
+    human_numbers: list[str] = [
+        part.strip() for part in (os.environ.get("ADVANCE_ORDER_HUMAN_NUMBERS") or "").split(",") if part.strip()
+    ]
 
     # --- handing the answer back to the sales bot --------------------------
     # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},

@@ -289,6 +289,7 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
         if line.status == m.LINE_ASKING:
             waiting.setdefault(line.brand, []).append(line)
 
+    not_found: list[m.AdvanceOrderLine] = []
     for brand, lines in waiting.items():
         open_queries = _open_queries_for_brand(order, brand, session)
         slots = cfg.quote_fanout - len(open_queries)
@@ -320,6 +321,7 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                     line.note = "no vendor had it"
                 else:
                     line.note = "no vendor listed for this brand"
+                not_found.append(line)
             if unreachable:
                 _tell_internal(
                     session,
@@ -344,8 +346,34 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                 )
             )
     session.flush()
+    if not_found:
+        _tell_human(session, order, not_found)
     _send_queued(order, session, now)
     _settle(order)
+
+
+def _tell_human(session: Session, order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine]) -> None:
+    """Every vendor said no: one message, per order, to the person who takes
+    it from here (Founder, 1 Oct 2026). Part, brand and quantity on each line,
+    and why. Goes to ADVANCE_ORDER_HUMAN_NUMBERS, or the admins and purchase
+    team until that is set."""
+    who = order.customer_name or order.customer_phone or "customer"
+    rows = "\n".join(
+        f"{i}. {line.part_number} ({line.brand}) x{line.qty} - {line.note or 'not found'}"
+        for i, line in enumerate(lines, start=1)
+    )
+    body = (
+        f"🔎 Advance order #{order.id} ({who}): ye part kisi vendor ke paas nahi mile:\n"
+        f"{rows}\n\n"
+        "Kripya dekh lijiye. Desk: Advance Orders page."
+    )
+    numbers = [_normalize(n) for n in cfg.human_numbers] or _internal_numbers(session)
+    for number in dict.fromkeys(n for n in numbers if n):
+        try:
+            _send_text(number, body)
+        except Exception:  # noqa: BLE001 -- one failed alert must not stop the rest
+            logger.exception("Advance order: could not tell %s about unfound parts.", number)
+    logger.info("Advance order %s: %d part(s) not found anywhere -- sent to %d person(s).", order.id, len(lines), len(numbers))
 
 
 def _question_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], want_rate: bool) -> str:
