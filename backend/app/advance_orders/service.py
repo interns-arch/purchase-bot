@@ -44,18 +44,19 @@ logger = get_logger(__name__)
 
 
 # ------------------------------------------------------------------ sending
-def _send_text(to: str, body: str) -> None:
+def _send_text(to: str, body: str) -> str | None:
+    """Send, and return the WhatsApp message id when there is one."""
     from backend.app.integrations.whatsapp.client import WhatsAppClient
     from backend.app.integrations.whatsapp.config import whatsapp_settings
 
-    WhatsAppClient(whatsapp_settings).send_text_message(to, body)
+    return WhatsAppClient(whatsapp_settings).send_text_message(to, body)
 
 
-def _send_template(to: str, name: str, language: str, params: list[str]) -> None:
+def _send_template(to: str, name: str, language: str, params: list[str]) -> str | None:
     from backend.app.integrations.whatsapp.client import WhatsAppClient
     from backend.app.integrations.whatsapp.config import whatsapp_settings
 
-    WhatsAppClient(whatsapp_settings).send_template_message(to, name, language, params)
+    return WhatsAppClient(whatsapp_settings).send_template_message(to, name, language, params)
 
 
 def _internal_numbers(session: Session) -> list[str]:
@@ -474,10 +475,11 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         want_rate = quotes.wants_rate(terms)
         numbers = _vendor_numbers(q.vendor_id, session)
         delivered: list[str] = []
+        sent_ids: dict[str, str] = {}
         for number in numbers:
             try:
                 if cfg.vendor_template:
-                    _send_template(
+                    message_id = _send_template(
                         number,
                         cfg.vendor_template,
                         cfg.template_language,
@@ -488,8 +490,10 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                         ],
                     )
                 else:
-                    _send_text(number, _question_text(order, lines, want_rate))
+                    message_id = _send_text(number, _question_text(order, lines, want_rate))
                 delivered.append(_normalize(number))
+                if isinstance(message_id, str) and message_id:
+                    sent_ids[message_id] = _normalize(number)
             except Exception:  # noqa: BLE001 -- the next number / vendor is tried
                 logger.exception(
                     "Advance order %s: question to vendor %s at %s failed.",
@@ -498,6 +502,7 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                     number,
                 )
         q.numbers = delivered
+        q.message_ids = sent_ids or None
         if delivered:
             q.status = m.Q_SENT
             q.sent_at = now
@@ -600,6 +605,39 @@ def _expire(order: m.AdvanceOrder, session: Session) -> None:
     if open_lines:
         _tell_human(session, order, open_lines)
     _settle(order)
+
+
+def handle_delivery_failure(message_id: str, recipient: str, error_code: int | None, error_title: str | None, session: Session) -> bool:
+    """WhatsApp reported that a question to a vendor was NOT delivered.
+
+    Most often 131047: he has not messaged the bot in 24 hours, so only an
+    approved template reaches him (ADVANCE_ORDER_VENDOR_TEMPLATE). Without
+    this, the question counted as sent and the order waited the full
+    VENDOR_WAIT_MINUTES for a reply that could never come. Now that number
+    is dropped at once; when none of the vendor's numbers got it, he is
+    skipped and the NEXT vendor is asked straight away. True when the report
+    belonged to an advance-order question."""
+    number = _normalize(recipient) if recipient else ""
+    for q in session.execute(select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.status == m.Q_SENT)).scalars():
+        ids = q.message_ids or {}
+        if message_id not in ids:
+            continue
+        failed_number = ids.get(message_id) or number
+        q.message_ids = {k: v for k, v in ids.items() if k != message_id} or None
+        q.numbers = [n for n in (q.numbers or []) if n != failed_number]
+        why = f"WhatsApp did not deliver ({error_code or '?'}: {error_title or 'no reason'})"
+        if not q.numbers:
+            q.status = m.Q_FAILED
+            q.reply_text = why
+        logger.warning("Advance order %s: question to vendor %s at %s not delivered -- %s.", q.advance_order_id, q.vendor_id, failed_number, why)
+        session.flush()
+        order = session.get(m.AdvanceOrder, q.advance_order_id)
+        if order is not None and q.status == m.Q_FAILED:
+            before = _snapshot(order)
+            _advance(order, session, now_ist_naive())
+            _notify_if_changed(order, before, session)
+        return True
+    return False
 
 
 # ------------------------------------------------------------------ replies

@@ -29,6 +29,15 @@ class WhatsAppNotConfiguredError(Exception):
     """Raised when the client is used without a configured access token."""
 
 
+def _message_id(response) -> str | None:
+    """The wamid in a /messages reply ({"messages": [{"id": "wamid..."}]}),
+    or None. Never raises -- a sent message stays sent."""
+    try:
+        return ((response.json() or {}).get("messages") or [{}])[0].get("id")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _with_retries(description: str, call: Callable[[], _T]) -> _T:
     last_exc: Exception | None = None
     for attempt, backoff in enumerate((0, *_RETRY_BACKOFF_SECONDS), start=1):
@@ -105,7 +114,7 @@ class WhatsAppClient:
 
         return _with_retries(f"download_media({media_url})", _call)
 
-    def send_text_message(self, to: str, body: str) -> None:
+    def send_text_message(self, to: str, body: str) -> str | None:
         """Send a plain-text WhatsApp message back to `to` (an inbound sender
         number). Used only for the routing command prompts/confirmations --
         never to deliver business documents to a vendor. Requires
@@ -127,7 +136,7 @@ class WhatsAppClient:
             "text": {"preview_url": False, "body": body},
         }
 
-        def _call() -> None:
+        def _call() -> str | None:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(
                     url,
@@ -135,8 +144,11 @@ class WhatsAppClient:
                     json=payload,
                 )
                 response.raise_for_status()
+                return _message_id(response)
 
-        _with_retries(f"send_text_message({to})", _call)
+        # The WhatsApp message id (wamid) -- what a later delivery report
+        # names. Callers that do not need it simply ignore it.
+        return _with_retries(f"send_text_message({to})", _call)
 
     def send_template_message(
         self,
@@ -144,7 +156,7 @@ class WhatsAppClient:
         template_name: str,
         language_code: str = "en",
         body_parameters: list[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Send a PRE-APPROVED template message (Meta requirement for
         business-initiated messages outside the 24h customer-service window
         -- e.g. the fixed-time morning stock request and pending-vendor
@@ -179,7 +191,7 @@ class WhatsAppClient:
             "template": template,
         }
 
-        def _call() -> None:
+        def _call() -> str | None:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(
                     url,
@@ -187,8 +199,9 @@ class WhatsAppClient:
                     json=payload,
                 )
                 response.raise_for_status()
+                return _message_id(response)
 
-        _with_retries(f"send_template_message({template_name} -> {to})", _call)
+        return _with_retries(f"send_template_message({template_name} -> {to})", _call)
 
     def upload_media(self, content: bytes, filename: str, mime_type: str) -> str:
         """Upload a document to WhatsApp's media store and return its media id

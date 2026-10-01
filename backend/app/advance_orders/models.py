@@ -169,6 +169,9 @@ class AdvanceVendorQuery(Base):
     line_ids: Mapped[list] = mapped_column(JSON, default=list)
     # The vendor's WhatsApp numbers this was sent to; a reply from any of them counts.
     numbers: Mapped[list] = mapped_column(JSON, default=list)
+    # {wamid: number} for every message this question went out as, so a
+    # WhatsApp delivery report ("failed", 131047) can be matched back to it.
+    message_ids: Mapped[dict | None] = mapped_column(JSON, default=None)
     status: Mapped[str] = mapped_column(default=Q_QUEUED)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(default=None)

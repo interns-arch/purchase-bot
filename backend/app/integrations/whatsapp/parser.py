@@ -120,3 +120,37 @@ def parse_text_messages(payload: dict) -> list[IncomingWhatsAppText]:
                 )
 
     return texts
+
+
+
+@dataclass
+class DeliveryStatus:
+    """WhatsApp's report on a message WE sent (entry[].changes[].value.statuses[]).
+    `status` is sent / delivered / read / failed. A failed one carries the
+    reason -- most often 131047: the person has not messaged in 24 hours, so
+    only an approved template can reach them."""
+
+    message_id: str
+    recipient: str
+    status: str
+    error_code: int | None = None
+    error_title: str | None = None
+
+
+def parse_delivery_statuses(payload: dict) -> list[DeliveryStatus]:
+    out: list[DeliveryStatus] = []
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            for raw in (change.get("value") or {}).get("statuses", []) or []:
+                errors = raw.get("errors") or [{}]
+                code = errors[0].get("code")
+                out.append(
+                    DeliveryStatus(
+                        message_id=raw.get("id", ""),
+                        recipient=raw.get("recipient_id", ""),
+                        status=raw.get("status", ""),
+                        error_code=int(code) if isinstance(code, (int, str)) and str(code).isdigit() else None,
+                        error_title=errors[0].get("title") or errors[0].get("message"),
+                    )
+                )
+    return out

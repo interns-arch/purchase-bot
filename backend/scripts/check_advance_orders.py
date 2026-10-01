@@ -447,6 +447,7 @@ def _check_quote_comparison(check, service, m, cfg, get_session, Vendor, TestCli
 
     _check_one_by_one(check, service, m, cfg, get_session, Vendor)
     _check_dealer_stock(check, service, m, cfg, get_session, Vendor)
+    _check_delivery_failure(check, service, m, cfg, get_session, Vendor)
 
 
 def _check_one_by_one(check, service, m, cfg, get_session, Vendor) -> None:
@@ -627,6 +628,59 @@ def _check_dealer_stock(check, service, m, cfg, get_session, Vendor) -> None:
     got = client.get(f"/api/advance-orders/{res.json()['id']}", headers={"X-Api-Key": "check-key"})
     check("...and GET /api/advance-orders/{id} reads it back", got.status_code == 200 and got.json()["kind"] == "dealer_stock")
     check("no key: 401", client.post("/api/dealer-stock-orders", json={"lines": [{"part_number": "X", "qty": 1}]}).status_code == 401)
+    cfg.enabled = False
+
+
+def _check_delivery_failure(check, service, m, cfg, get_session, Vendor) -> None:
+    """[16] WhatsApp says a question was not delivered: move on at once."""
+    from decimal import Decimal
+
+    from backend.app.api.routes import whatsapp as webhook_routes
+    from backend.app.integrations.whatsapp.parser import parse_delivery_statuses
+
+    print("\n[16] a question WhatsApp could not deliver moves on at once")
+    sent: list[tuple[str, str]] = []
+    counter = {"n": 0}
+
+    def fake_send(to, body):
+        counter["n"] += 1
+        sent.append((to, body))
+        return f"wamid.TEST{counter['n']}"
+
+    service._send_text = fake_send
+    cfg.quote_fanout = 1
+    cfg.enabled = True
+    with get_session() as s:
+        v1, v2 = Vendor(name="Unreachable One", vendor_code="UR1_CT"), Vendor(name="Reachable Two", vendor_code="RT2_CT")
+        s.add_all([v1, v2])
+        s.flush()
+        s.add_all([
+            m.VendorBrand(brand="SKODA2", vendor_id=v1.id, priority=1, discount_type=m.DISC_PERCENT, discount_pct=Decimal("12")),
+            m.VendorBrand(brand="SKODA2", vendor_id=v2.id, priority=2, discount_type=m.DISC_PERCENT, discount_pct=Decimal("10")),
+            m.AdvanceVendorContact(vendor_id=v1.id, whatsapp_number="919400000001"),
+            m.AdvanceVendorContact(vendor_id=v2.id, whatsapp_number="919400000002"),
+        ])
+    t = datetime(2026, 10, 1, 13, 0)
+    service.now_ist_naive = lambda: t
+    with get_session() as s:
+        order = service.create_order({"external_ref": "ADV-UNREACH", "lines": [{"part_number": "SK-1", "brand": "SKODA2", "qty": 1}]}, s)
+        oid = order.id
+    first = next(i for i, (to, _) in enumerate(sent) if to == "919400000001")
+    wamid = f"wamid.TEST{first + 1}"
+    with get_session() as s:
+        stored = [q.message_ids or {} for q in s.query(m.AdvanceVendorQuery).filter_by(advance_order_id=oid)]
+    check("the question remembers the WhatsApp message id it went out as", any(ids.get(wamid) == "919400000001" for ids in stored))
+    payload = {"entry": [{"changes": [{"value": {"statuses": [{"id": wamid, "recipient_id": "919400000001", "status": "failed", "errors": [{"code": 131047, "title": "Re-engagement message"}]}]}}]}]}
+    reports = parse_delivery_statuses(payload)
+    check("WhatsApp's failure report is read: 131047", len(reports) == 1 and reports[0].error_code == 131047)
+    webhook_routes._handle_delivery_failure(reports[0])
+    with get_session() as s:
+        queries = {q.vendor_id: q.status for q in s.query(m.AdvanceVendorQuery).filter_by(advance_order_id=oid)}
+        names = {v.id: v.name for v in s.query(Vendor).all()}
+    by_name = {names[k]: v for k, v in queries.items()}
+    check("the unreachable vendor is marked failed, not left waiting 2 hours", by_name.get("Unreachable One") == m.Q_FAILED)
+    check("...and the next vendor is asked straight away", any(to == "919400000002" for to, _ in sent) and by_name.get("Reachable Two") == m.Q_SENT)
+    check("a report for some other message changes nothing", not service.handle_delivery_failure("wamid.UNKNOWN", "91", 131047, "x", get_session().__enter__()))
     cfg.enabled = False
 
 if __name__ == "__main__":

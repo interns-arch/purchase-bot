@@ -83,6 +83,7 @@ _SCHEMA_UPGRADES = (
     ("advance_orders", "deadline_at", "TIMESTAMP"),
     ("advance_order_lines", "dealer_id", "INTEGER"),
     ("advance_order_lines", "stock_import_id", "INTEGER"),
+    ("advance_vendor_queries", "message_ids", "JSON"),
 )
 # Values added to a Postgres ENUM type after it already existed. Like
 # columns, `create_all` never alters an existing type, and inserting a value

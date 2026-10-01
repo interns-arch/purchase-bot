@@ -21,6 +21,7 @@ from backend.app.database.session import get_db
 from backend.app.integrations.whatsapp import status_service
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.integrations.whatsapp.parser import (
+    parse_delivery_statuses,
     parse_text_messages,
     parse_webhook_payload,
 )
@@ -76,6 +77,13 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
     for message in documents:
         background_tasks.add_task(handle_incoming_whatsapp_message, message)
 
+    # Delivery reports for messages WE sent. A failed one (e.g. 131047: the
+    # person has not written in 24 h) for an advance-order question moves the
+    # order on to the next vendor at once.
+    for report in parse_delivery_statuses(payload):
+        if report.status == "failed" and report.message_id:
+            background_tasks.add_task(_handle_delivery_failure, report)
+
     logger.info(
         "WhatsApp webhook received %d text message(s) and %d document attachment(s).",
         len(texts),
@@ -84,3 +92,29 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
     return JSONResponse(
         {"status": "received", "text_count": len(texts), "document_count": len(documents)}
     )
+
+
+
+def _handle_delivery_failure(report) -> None:
+    """Never raises: a delivery report must not break the webhook."""
+    try:
+        from backend.app.advance_orders.config import advance_order_settings
+        from core.db import get_session
+
+        logger.warning(
+            "WhatsApp could not deliver %s to %s: %s %s",
+            report.message_id,
+            report.recipient,
+            report.error_code,
+            report.error_title,
+        )
+        if not advance_order_settings.enabled:
+            return
+        from backend.app.advance_orders import service as advance_orders
+
+        with get_session() as session:
+            advance_orders.handle_delivery_failure(
+                report.message_id, report.recipient, report.error_code, report.error_title, session
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not handle a WhatsApp delivery report.")
