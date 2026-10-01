@@ -36,7 +36,10 @@ logger = get_logger(__name__)
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 MODEL = os.environ.get("AI_VISION_MODEL", "meta/llama-3.2-90b-vision-instruct").strip()
 FALLBACK_MODEL = os.environ.get("AI_VISION_FALLBACK_MODEL", "meta/llama-3.2-11b-vision-instruct").strip()
-TIMEOUT_SECONDS = float(os.environ.get("AI_VISION_TIMEOUT_SECONDS", "120"))
+# Per model. Measured live 1 Oct 2026: the 90b endpoint sometimes queues past
+# 2 minutes while 11b answers in seconds -- a vendor should not wait that
+# long, so the first model gets 45 s and then the fallback is tried.
+TIMEOUT_SECONDS = float(os.environ.get("AI_VISION_TIMEOUT_SECONDS", "45"))
 ENABLED = os.environ.get("AI_VISION_ENABLED", "true").strip().lower() == "true"
 # Inline images are kept small: NVIDIA's hosted endpoints refuse large inline
 # payloads, and a stock list stays legible well below this.
