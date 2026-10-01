@@ -12,7 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _DOCUMENT_MESSAGE_TYPE = "document"
+_IMAGE_MESSAGE_TYPE = "image"
 _TEXT_MESSAGE_TYPE = "text"
+_IMAGE_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 
 
 @dataclass
@@ -24,6 +26,10 @@ class IncomingWhatsAppMessage:
     media_id: str
     filename: str
     mime_type: str | None
+    # A PHOTO (WhatsApp "image" message) rather than a document. Only a
+    # registered vendor's photo is read -- as a stock list, confirmed with him
+    # before import. Everyone else's photos are ignored, as they always were.
+    is_photo: bool = False
 
 
 @dataclass
@@ -43,6 +49,26 @@ def parse_webhook_payload(payload: dict) -> list[IncomingWhatsAppMessage]:
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for raw_message in value.get("messages", []):
+                if raw_message.get("type") == _IMAGE_MESSAGE_TYPE:
+                    image = raw_message.get("image", {})
+                    media_id = image.get("id")
+                    sender = raw_message.get("from")
+                    if media_id and sender:
+                        mime = image.get("mime_type")
+                        extension = _IMAGE_EXTENSIONS.get((mime or "").split(";")[0].strip(), "jpg")
+                        messages.append(
+                            IncomingWhatsAppMessage(
+                                sender=sender,
+                                message_id=raw_message.get("id", ""),
+                                timestamp=raw_message.get("timestamp"),
+                                caption=image.get("caption"),
+                                media_id=media_id,
+                                filename=f"photo_{media_id}.{extension}",
+                                mime_type=mime,
+                                is_photo=True,
+                            )
+                        )
+                    continue
                 if raw_message.get("type") != _DOCUMENT_MESSAGE_TYPE:
                     continue
 

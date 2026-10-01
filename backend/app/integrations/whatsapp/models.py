@@ -189,3 +189,24 @@ class WhatsAppPendingPdfChoice(Base):
     media_id: Mapped[str | None] = mapped_column(default=None)
     message_id: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WhatsAppPendingPhotoStock(Base):
+    """Stock lines read off a vendor's PHOTO (or scanned PDF), waiting for him
+    to confirm "haan" before they are imported.
+
+    Only the LINES are kept, never treated as stock until he agrees: a
+    misread digit is caught by the one person who knows his own stock.
+    One row per number -- a newer photo replaces an unanswered older one."""
+
+    __tablename__ = "whatsapp_pending_photo_stock"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True)
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("vendors.id", ondelete="CASCADE"))
+    # [{"part": "...", "qty": "5", "description": "..."}]
+    lines: Mapped[list] = mapped_column(JSON, default=list)
+    unreadable: Mapped[list] = mapped_column(JSON, default=list)
+    source_filename: Mapped[str | None] = mapped_column(default=None)
+    model: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

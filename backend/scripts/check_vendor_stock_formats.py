@@ -97,6 +97,7 @@ def main() -> int:
     _check_typed_stock()
     _check_pdf_stock()
     _check_docx_txt()
+    _check_photos()
 
     print("\n" + ("ALL CHECKS PASSED" if failures == 0 else f"{failures} CHECK(S) FAILED"))
     return 0 if failures == 0 else 1
@@ -383,6 +384,109 @@ def _check_docx_txt() -> None:
     junk.write_text("Please call me tomorrow regarding payment.\nThanks", encoding="utf-8")
     status, stock = _import("Txt Junk Vendor", junk)
     check("a .txt with no stock in it fails loudly and imports nothing", status == "FAILED" and not stock)
+
+
+
+def _check_photos() -> None:
+    """[5] a stock list sent as a PHOTO, confirmed with the vendor."""
+    import shutil
+
+    from backend.app.ai import vision
+    from backend.app.integrations.whatsapp import photo_stock
+    from backend.app.integrations.whatsapp.models import WhatsAppRegisteredNumber
+    from backend.app.integrations.whatsapp.parser import IncomingWhatsAppMessage, IncomingWhatsAppText, parse_webhook_payload
+    from backend.app.workers import document_worker as worker
+    from core.db import get_session
+    from core.models import Vendor
+    from core.services.inventory_import_service import get_active_inventory
+
+    print("\n[5] stock lists sent as a photo")
+    payload = {"entry": [{"changes": [{"value": {"messages": [{"from": "919", "id": "i1", "type": "image", "image": {"id": "MEDIA", "mime_type": "image/jpeg"}}]}}]}]}
+    msgs = parse_webhook_payload(payload)
+    check("a WhatsApp photo reaches the worker, marked as a photo", len(msgs) == 1 and msgs[0].is_photo and msgs[0].filename.endswith(".jpg"))
+
+    parsed = photo_stock.read_lines("16510M68K10 5\n2630002752 ?\n? 7\n**TT-100 3**")
+    check("the model's '?' lines are reported, never imported", [l.part_number for l in parsed.lines] == ["16510M68K10", "TT-100"] and len(parsed.unreadable) == 2)
+    check("'haan' / 'nahi' are read as yes / no", photo_stock.answer("haan") == "yes" and photo_stock.answer("Nahi") == "no" and photo_stock.answer("haan 5 din") is None)
+
+    with get_session() as s:
+        vendor = Vendor(name="Photo Vendor", vendor_code="PHV_CT")
+        s.add(vendor)
+        s.flush()
+        vendor_id = vendor.id
+        s.add(WhatsAppRegisteredNumber(whatsapp_number="919555000333", vendor_id=vendor_id))
+    seed = _write_csv(_TMP / "photo_seed.csv", [["PartNo", "Part Description", "Qty"], ["16510M68K10", "OIL FILTER", "1"], ["KEEP0001", "CLIP", "9"]])
+    from core.services import inventory_import_service as imp
+
+    with get_session() as s:
+        imp.run_import(vendor_id, seed, s)
+
+    replies: list[str] = []
+    worker.send_reply_safe = lambda to, body: replies.append(body)
+    model_says = {"text": "16510M68K10 5\n2630002752 12\nTT-100 3"}
+    vision.read_stock_image = lambda image: (model_says["text"], "fake-vision")
+    photo = _TMP / "photo.jpg"
+    photo.write_bytes(b"not really a jpeg")
+    worker.download_document_media = lambda media_id, filename, client: photo
+
+    def send_photo(sender="919555000333") -> None:
+        worker.handle_incoming_whatsapp_message(
+            IncomingWhatsAppMessage(sender=sender, message_id="p", timestamp=None, caption=None, media_id="m", filename="photo_m.jpg", mime_type="image/jpeg", is_photo=True)
+        )
+
+    def text(body: str, sender="919555000333") -> None:
+        worker._handle_incoming_whatsapp_text(IncomingWhatsAppText(sender=sender, message_id="t", text=body))
+
+    def stock() -> dict:
+        with get_session() as s:
+            return {r.vendor_part_number: r.quantity_available for r in get_active_inventory(vendor_id, s)}
+
+    replies.clear()
+    send_photo()
+    shown = "\n".join(replies)
+    check("he is told the photo arrived, then shown every line read", replies and "Photo mil gayi" in replies[0] and "16510M68K10 — 5" in shown and "TT-100 — 3" in shown and "haan" in replies[-1])
+    check("NOTHING is imported before he says haan", stock().get("16510M68K10") == Decimal("1"))
+
+    replies.clear()
+    text("haan")
+    after = stock()
+    check("'haan' imports the photo's lines", after.get("16510M68K10") == Decimal("5") and after.get("TT-100") == Decimal("3"))
+    check("...and only those: his other parts are kept", after.get("KEEP0001") == Decimal("9"))
+    check("...and he is told what changed", replies and "Stock updated" in replies[-1])
+
+    replies.clear()
+    model_says["text"] = "16510M68K10 99"
+    send_photo()
+    text("nahi")
+    check("'nahi' cancels it: nothing changes", stock().get("16510M68K10") == Decimal("5") and replies and "cancel" in replies[-1].lower())
+
+    replies.clear()
+    text("haan")
+    check("'haan' with no photo waiting is not taken as a confirmation", stock().get("16510M68K10") == Decimal("5"))
+
+    replies.clear()
+    model_says["text"] = "I cannot read this image."
+    send_photo()
+    check("an unreadable photo is reported, nothing held", replies and replies[-1].startswith("❌") and stock().get("16510M68K10") == Decimal("5"))
+
+    replies.clear()
+    model_says["text"] = "16510M68K10 5"
+    send_photo(sender="919000999888")
+    check("a photo from an unregistered number is ignored, as before", not replies)
+
+    # A scanned PDF goes to the same reader, page by page.
+    pdfs = _pdfs()
+    scanned = _TMP / "scan_in.pdf"
+    shutil.copy(pdfs["scanned"], scanned)
+    worker.download_document_media = lambda media_id, filename, client: scanned
+    model_says["text"] = "SCAN0001 4"
+    replies.clear()
+    worker.handle_incoming_whatsapp_message(
+        IncomingWhatsAppMessage(sender="919555000333", message_id="s", timestamp=None, caption=None, media_id="m", filename="scan.pdf", mime_type="application/pdf")
+    )
+    check("a scanned PDF is read like a photo and confirmed first", any("SCAN0001 — 4" in r for r in replies) and "SCAN0001" not in stock())
+    text("haan")
+    check("...and imported on haan", stock().get("SCAN0001") == Decimal("4"))
 
 
 if __name__ == "__main__":

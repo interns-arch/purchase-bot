@@ -41,6 +41,7 @@ from backend.app.integrations.whatsapp import (
     pending_customer_files,
     pdf_choice,
     pending_vendor_files,
+    photo_stock,
     registry,
     vendor_memory,
     vendor_text_stock,
@@ -123,6 +124,12 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
        every held file for that vendor (identity from the NAME, never the
        filename).
     3. Otherwise -> reply with the instruction (requirement 6)."""
+    # A vendor confirming the stock read off his PHOTO ("haan" / "nahi").
+    # Only while a photo is actually waiting for him, and only for a plain
+    # yes/no -- anything else he types goes on as usual.
+    if _photo_stock_reply(message):
+        return
+
     # A vendor answering an advance-order question ("haan 5 din", "nahi")
     # from the sales bot. Only numbers with an OPEN question are claimed, and
     # only while ADVANCE_ORDERS_ENABLED=true; everything else continues below.
@@ -407,6 +414,81 @@ def _apply_customer_contacts_safe(sender: str, rows) -> None:
         )
 
 
+def _photo_stock_reply(message: IncomingWhatsAppText) -> bool:
+    """True when this text answered a pending photo-stock question. Never raises."""
+    try:
+        choice = photo_stock.answer(message.text)
+        if choice is None:
+            return False
+        with get_session() as session:
+            if not photo_stock.has_pending(message.sender, session):
+                return False
+            held = photo_stock.take(message.sender, session)
+        if held is None:
+            return False  # expired: the text is handled as an ordinary message
+        vendor_id, parsed = held
+        if choice == "no":
+            send_reply_safe(message.sender, photo_stock.CANCELLED)
+            return True
+        _process_text_stock(message.sender, parsed, vendor_id=vendor_id)
+        return True
+    except Exception:  # noqa: BLE001 -- never block the other handlers
+        logger.exception("Photo-stock confirmation from %s failed.", message.sender)
+        return False
+
+
+def _handle_vendor_photo(message: IncomingWhatsAppMessage, party) -> None:
+    """A registered vendor's photo of his stock list. Never raises."""
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        image = Path(file_path).read_bytes()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not download photo %s from %s.", message.media_id, message.sender)
+        send_reply_safe(message.sender, "❌ Photo receive nahi hui. Please dobara bhejiye.")
+        return
+    _read_photos_and_ask(message.sender, party, [image], message.filename)
+
+
+def _read_photos_and_ask(sender: str, party, images: list[bytes], source_filename: str | None) -> None:
+    """Read one or more images (a photo, or a scanned PDF's pages), then show
+    the vendor every line and ask him to confirm. Never raises."""
+    from backend.app.ai import vision
+
+    try:
+        send_reply_safe(sender, photo_stock.RECEIVED)
+        texts, used_model, why = [], None, ""
+        for image in images:
+            text, info = vision.read_stock_image(image)
+            if text:
+                texts.append(text)
+                used_model = info
+            else:
+                why = info
+        parsed = photo_stock.read_lines("\n".join(texts)) if texts else None
+        if parsed is None or not parsed.is_stock_list:
+            send_reply_safe(sender, photo_stock.CANNOT_READ.format(why=why or "koi part number aur quantity nahi mili"))
+            notifications_text = (
+                f"Photo stock from {party.name} ({sender}) could not be read: {why or 'no part/qty lines found'}."
+            )
+            logger.warning(notifications_text)
+            return
+        with get_session() as session:
+            photo_stock.hold(sender, party.party_id, parsed, session, source_filename=source_filename, model=used_model)
+        for body in photo_stock.confirmation_messages(parsed):
+            send_reply_safe(sender, body)
+        logger.info(
+            "Photo stock from %s read by %s: %d line(s), %d unreadable -- waiting for haan.",
+            party.name,
+            used_model,
+            len(parsed.lines),
+            len(parsed.unreadable),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not read the photo stock from %s.", sender)
+        send_reply_safe(sender, photo_stock.CANNOT_READ.format(why="technical problem"))
+
+
 def _process_text_stock(sender: str, stock, *, vendor_id: int) -> None:
     """Apply a vendor's TYPED stock list to his stock and run it through the
     same pipeline a stock file takes. Never raises.
@@ -589,6 +671,20 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
         message.media_id,
         message.message_id,
     )
+
+    # A PHOTO. Only a registered vendor's is read (as a stock list, confirmed
+    # with him before import). Everyone else's photos are ignored, exactly as
+    # they were before photos were parsed at all.
+    if getattr(message, "is_photo", False):
+        party = None
+        if whatsapp_settings.registry_enabled:
+            with get_session() as session:
+                party = registry.lookup(message.sender, session)
+        if party is not None and party.party_type == "vendor":
+            _handle_vendor_photo(message, party)
+        else:
+            logger.info("WhatsApp photo from %s ignored (not a registered vendor).", message.sender)
+        return
 
     # Founder contact-list upload: an admin file captioned "register"/
     # "contacts" (or following a "register" text) UPDATES THE NUMBER REGISTRY
@@ -919,9 +1015,19 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
                 )
             send_reply_safe(message.sender, pdf_choice.QUESTION)
             return
-        # "scanned" goes down the stock path too: the importer refuses it
-        # with the reason, so it is recorded in the File Inbox and the admin
-        # gets the file -- and the vendor is told to send Excel or type it.
+        if kind == "scanned":
+            # No text in it: a scanned page. Read like a photo, page by page,
+            # and confirmed with the vendor before anything is imported.
+            try:
+                from backend.app.ai import vision
+
+                images = vision.pdf_pages_as_images(Path(file_path).read_bytes())
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not render scanned PDF %s.", file_path)
+                images = []
+            if images:
+                _read_photos_and_ask(message.sender, party, images, message.filename)
+                return
         document_type = (
             IncomingDocumentType.VENDOR_INVOICE if kind == "invoice" else IncomingDocumentType.VENDOR_INVENTORY
         )
