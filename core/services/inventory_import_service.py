@@ -60,7 +60,8 @@ from core.services.part_resolution_service import (  # noqa: F401 -- resolve_par
 
 # .pdf: a text-based stock list, read by core.ingestion.pdf_reader into the
 # same rows an Excel file gives (a scanned PDF is refused with a reason).
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls", ".pdf"}
+# .docx / .txt: see core.ingestion.docx_txt_reader.
+SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls", ".pdf", ".docx", ".txt"}
 DEFAULT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
 DEFAULT_MAX_ROW_COUNT = 200_000
 
@@ -191,6 +192,14 @@ def _read_file(file_path: Path) -> ParsedFile:
         from core.ingestion.pdf_reader import read_pdf_rows
 
         return read_pdf_rows(file_path)
+    if file_path.suffix.lower() == ".docx":
+        from core.ingestion.docx_txt_reader import read_docx_rows
+
+        return read_docx_rows(file_path)
+    if file_path.suffix.lower() == ".txt":
+        from core.ingestion.docx_txt_reader import read_txt_rows
+
+        return read_txt_rows(file_path)
     return read_excel_rows(file_path)
 
 
@@ -285,6 +294,14 @@ def _read_inventory_table(file_path: Path) -> tuple[list[str], list[dict[str, st
         from core.ingestion.pdf_reader import pdf_grid
 
         grid = pdf_grid(file_path)
+    elif file_path.suffix.lower() == ".docx":
+        from core.ingestion.docx_txt_reader import docx_grid
+
+        grid = docx_grid(file_path)
+    elif file_path.suffix.lower() == ".txt":
+        from core.ingestion.docx_txt_reader import txt_grid
+
+        grid = txt_grid(file_path)
     else:
         grid = read_excel_grid(file_path)
 

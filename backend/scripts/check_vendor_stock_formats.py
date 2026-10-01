@@ -47,7 +47,9 @@ def _import(vendor_name: str, path: Path):
     from core.services import inventory_import_service as imp
 
     with get_session() as s:
-        vendor = Vendor(name=vendor_name, vendor_code=vendor_name[:3].upper() + "_CT")
+        import uuid
+
+        vendor = Vendor(name=vendor_name, vendor_code="T" + uuid.uuid4().hex[:6].upper() + "_CT")
         s.add(vendor)
         s.flush()
         vendor_id = vendor.id
@@ -94,6 +96,7 @@ def main() -> int:
 
     _check_typed_stock()
     _check_pdf_stock()
+    _check_docx_txt()
 
     print("\n" + ("ALL CHECKS PASSED" if failures == 0 else f"{failures} CHECK(S) FAILED"))
     return 0 if failures == 0 else 1
@@ -318,6 +321,68 @@ def _check_typed_stock() -> None:
     check("...including the Rate of the part he just updated", rates.get("1701AAA06701N") not in (None, ""))
     reply = replies[-1][1] if replies else ""
     check("the vendor is told exactly what changed", "1701AAA06701N 7" in reply and "NEWPART1234 4" in reply and "unchanged" in reply)
+
+
+
+def _make_docx(path: Path, tables: list[list[list[str]]], paragraphs: list[str] = ()) -> Path:
+    """A minimal real .docx (zip of WordprocessingML), built with the stdlib."""
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    def cell(text: str) -> str:
+        return f"<w:tc><w:p><w:r><w:t>{escape(text)}</w:t></w:r></w:p></w:tc>"
+
+    body = "".join(f"<w:p><w:r><w:t>{escape(p)}</w:t></w:r></w:p>" for p in paragraphs)
+    for table in tables:
+        body += "<w:tbl>" + "".join("<w:tr>" + "".join(cell(c) for c in row) + "</w:tr>" for row in table) + "</w:tbl>"
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}</w:body></w:document>"
+    )
+    types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", types)
+        archive.writestr("word/document.xml", document)
+    return path
+
+
+def _check_docx_txt() -> None:
+    """[4] stock lists sent as a Word document or a text file."""
+    print("\n[4] stock lists as Word (.docx) and text (.txt)")
+    docx = _make_docx(
+        _TMP / "stock.docx",
+        [
+            [["Note", "for office use"]],  # a table that is NOT the stock table
+            [["Part No", "Description", "MRP", "Stock"]] + [[f"WD{i:05d}", "CLIP", str(50 + i), str(i % 4)] for i in range(12)],
+        ],
+        paragraphs=["ESS AAY AUTOMOTIVE", "Stock as on 30-09-2026"],
+    )
+    status, stock = _import("Word Vendor", docx)
+    check("a Word table is read, skipping a table that is not the stock list", status == "COMPLETED" and len(stock) == 12)
+    check("...MRP is not the quantity", stock.get("WD00005") == Decimal("1"))
+
+    table_txt = _TMP / "stock_table.txt"
+    table_txt.write_text("Part No\tName\tClosing Stock\n" + "".join(f"TX{i:04d}\tBULB\t{i + 2}\n" for i in range(8)), encoding="utf-8")
+    status, stock = _import("Txt Table Vendor", table_txt)
+    check("a tab-separated .txt table is read", status == "COMPLETED" and len(stock) == 8 and stock.get("TX0003") == Decimal("5"))
+
+    typed_txt = _TMP / "typed.txt"
+    typed_txt.write_text("Aaj ka stock\n16510M68K10 5\nTT-100 oil filter 3 pcs\n1701AAA06701N 0\n2630002752\n", encoding="utf-8")
+    status, stock = _import("Txt Typed Vendor", typed_txt)
+    check("a .txt typed list is read like a WhatsApp message", stock.get("16510M68K10") == Decimal("5") and stock.get("TT-100") == Decimal("3") and stock.get("1701AAA06701N") == Decimal("0"))
+    check("...a part without a quantity is rejected and reported, not imported as 1", "2630002752" not in stock and status == "COMPLETED_WITH_ERRORS")
+
+    junk = _TMP / "notes.txt"
+    junk.write_text("Please call me tomorrow regarding payment.\nThanks", encoding="utf-8")
+    status, stock = _import("Txt Junk Vendor", junk)
+    check("a .txt with no stock in it fails loudly and imports nothing", status == "FAILED" and not stock)
 
 
 if __name__ == "__main__":
