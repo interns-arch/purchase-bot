@@ -64,6 +64,7 @@ def hold(
             original_filename=original_filename,
             media_id=media_id,
             message_id=message_id,
+            created_at=now_ist_naive(),
         )
     )
     session.flush()

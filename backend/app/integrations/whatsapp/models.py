@@ -210,3 +210,19 @@ class WhatsAppPendingPhotoStock(Base):
     source_filename: Mapped[str | None] = mapped_column(default=None)
     model: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class AiConversationMessage(Base):
+    """What a staff member and the purchase bot's AI assistant said to each
+    other -- the assistant's memory, like the sales bot's (AutoFlow keeps the
+    last 20 messages per chat in Postgres). "hi" from staff starts afresh.
+    `role`: "in" (staff wrote), "out" (bot replied), "pending" (an action
+    waiting for the staff member's haan, e.g. sending reminders)."""
+
+    __tablename__ = "ai_conversation_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True)
+    role: Mapped[str] = mapped_column()
+    text: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

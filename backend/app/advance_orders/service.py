@@ -718,6 +718,31 @@ def handle_vendor_text(sender: str, text: str, session: Session, now: datetime |
     answers = parse_vendor_reply(
         text, [(line.id, line.part_number, line.qty) for line in lines], now.date(), want_rate
     )
+    # The fixed rules could not read it all -- ask the AI, whose answer is
+    # kept only where every number is in the vendor's own words (ai_reply).
+    # A part the fixed rules read cleanly keeps the fixed rules' reading.
+    #
+    # Also when the reply carries a number the fixed rules did not use: "stock
+    # me 3 hi bache hain" reads to them as "available" (all 10), the 3 left
+    # unread. Then the AI's reading -- still checked against his words -- wins.
+    from backend.app.advance_orders.parser import _residual_numbers
+
+    unread_numbers = bool(answers) and bool(_residual_numbers(text))
+    if not answers or any(a.ambiguous for a in answers.values()) or len(answers) < len(lines) or unread_numbers:
+        from backend.app.advance_orders import ai_reply
+
+        ai_answers = ai_reply.read(
+            text, [(line.id, line.part_number, line.qty) for line in lines], now.date(), want_rate
+        )
+        if ai_answers:
+            merged = {k: v for k, v in (answers or {}).items() if not v.ambiguous}
+            for line_id, answer in ai_answers.items():
+                if unread_numbers:
+                    merged[line_id] = answer
+                else:
+                    merged.setdefault(line_id, answer)
+            answers = merged
+
     vendor = session.get(Vendor, q.vendor_id)
     vendor_label = vendor.name if vendor else "vendor"
     if not answers:

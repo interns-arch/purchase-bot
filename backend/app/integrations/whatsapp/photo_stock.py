@@ -82,6 +82,7 @@ def hold(number: str, vendor_id: int, parsed: ParsedStockText, session: Session,
             unreadable=list(parsed.unreadable),
             source_filename=source_filename,
             model=model,
+            created_at=now_ist_naive(),
         )
     )
     session.flush()

@@ -372,6 +372,13 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
             )
             _process_pending_vendor_files(message.sender, vendor_name, held)
             return
+        # STAFF (admins, purchase team) asking in plain words -- answered by
+        # the AI assistant from the database. Last of all, so every command
+        # above still wins; with no AI, staff get the instructions as before.
+        from backend.app.ai import staff_assistant
+
+        if staff_assistant.is_staff(message.sender) and staff_assistant.handle(message.sender, message.text):
+            return
         logger.info(
             "WhatsApp text from %s is not a routing command (%r) -- replying with instructions.",
             message.sender,

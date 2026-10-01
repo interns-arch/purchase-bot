@@ -57,7 +57,9 @@ PROMPT = (
 
 
 def is_configured() -> bool:
-    return ENABLED and bool(settings.nvidia_api_key or settings.ai_api_key)
+    from backend.app.ai import llm
+
+    return ENABLED and (llm.is_configured("gemini") or bool(settings.nvidia_api_key or settings.ai_api_key))
 
 
 def shrink(image_bytes: bytes) -> bytes:
@@ -130,14 +132,51 @@ def _ask(model: str, jpeg: bytes) -> str | None:
     return content if isinstance(content, str) and content.strip() else None
 
 
+_GEMINI_SYSTEM = (
+    "You transcribe a photo of an auto-parts stock list. Reply with JSON only: "
+    '{"rows": [{"part": "<part number exactly as printed>", "quantity": <stock number or null>}]}. '
+    "One entry per table row. The quantity is the stock / closing stock / qty column -- never MRP, "
+    "rate, price or amount. If a part number or quantity cannot be read, use null. Do not guess."
+)
+
+
+def _gemini_lines(jpeg: bytes) -> str | None:
+    """Gemini first (the sales bot's vision model), as PART QTY lines; a row it
+    could not read becomes 'PART ?', which the photo flow reports, never imports."""
+    from backend.app.ai import llm
+
+    if not llm.is_configured("gemini"):
+        return None
+    data, provider = llm.ask_json(_GEMINI_SYSTEM, "Read the stock list in this photo.", purpose="vision", image=(jpeg, "image/jpeg"))
+    if provider != "gemini" or not data or not isinstance(data.get("rows"), list):
+        return None
+    lines = []
+    for row in data["rows"]:
+        if not isinstance(row, dict) or not row.get("part"):
+            continue
+        quantity = row.get("quantity")
+        lines.append(f"{row['part']} {quantity if quantity not in (None, '') else '?'}")
+    return "\n".join(lines) or None
+
+
 def read_stock_image(image_bytes: bytes) -> tuple[str | None, str]:
     """The lines read off one image, and which model read them (or why not)."""
-    if not is_configured():
-        return None, "photo reading is not configured (AI_VISION_ENABLED / NVIDIA_API_KEY)"
+    from backend.app.ai import llm
+
+    if not (ENABLED and (llm.is_configured("gemini") or settings.nvidia_api_key or settings.ai_api_key)):
+        return None, "photo reading is not configured (AI_VISION_ENABLED / GEMINI_API_KEY / NVIDIA_API_KEY)"
     try:
         jpeg = shrink(image_bytes)
     except Exception as exc:  # noqa: BLE001 -- an unreadable image is a reason, not a crash
         return None, f"the image could not be opened ({exc})"
+    try:
+        text = _gemini_lines(jpeg)
+    except Exception:  # noqa: BLE001
+        text = None
+    if text:
+        return text, "gemini:" + llm.GEMINI_MODELS["vision"]
+    if not (settings.nvidia_api_key or settings.ai_api_key):
+        return None, "Gemini could not read the image"
     for model in [MODEL, FALLBACK_MODEL]:
         if not model:
             continue
