@@ -42,6 +42,7 @@ from backend.app.integrations.whatsapp import (
     pending_vendor_files,
     registry,
     vendor_memory,
+    vendor_text_stock,
 )
 from backend.app.integrations.whatsapp.client import WhatsAppClient
 from backend.app.integrations.whatsapp.commands import WhatsAppCommand
@@ -260,6 +261,20 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
                 )
                 _process_text_order(message.sender, order, customer_id=registered.party_id)
                 return
+        # A registered VENDOR may type his stock instead of sending a file.
+        # Only a message that actually reads as part + quantity lines is
+        # taken; "good morning sir" and "kal aayega" stay ignored.
+        if registered.party_type == "vendor" and vendor_text_stock.ENABLED:
+            stock = vendor_text_stock.parse_stock_text(message.text)
+            if stock.is_stock_list:
+                logger.info(
+                    "WhatsApp text from registered vendor %s (%s) read as STOCK: %d part(s).",
+                    message.sender,
+                    registered.name,
+                    len(stock.lines),
+                )
+                _process_text_stock(message.sender, stock, vendor_id=registered.party_id)
+                return
         logger.info(
             "WhatsApp text from registered %s number %s (%s) ignored: %r",
             registered.party_type,
@@ -367,6 +382,45 @@ def _apply_customer_contacts_safe(sender: str, rows) -> None:
             sender,
             "Sorry — that customer list could not be applied. Please check the "
             "numbers and try again.",
+        )
+
+
+def _process_text_stock(sender: str, stock, *, vendor_id: int) -> None:
+    """Apply a vendor's TYPED stock list to his stock and run it through the
+    same pipeline a stock file takes. Never raises.
+
+    The typed lines are applied inside his current stock (merge mode, the
+    default) -- see `vendor_text_stock`. The CSV produced is staged and
+    processed exactly like an uploaded file, so the Google Sheet, Dealer
+    Portal push, top-up and admin notifications all happen as usual."""
+    try:
+        with get_session() as session:
+            outcome = vendor_text_stock.build_stock_csv(vendor_id, stock, session)
+        stamp = now_ist().strftime("%Y%m%d_%H%M%S_%f")
+        file_name = f"whatsapp_text_stock_{stamp}_{(sender or 'x')[-4:]}.csv"
+        file_path = staging.save_incoming_bytes(outcome.csv_bytes, file_name, DocumentSource.WHATSAPP)
+        metadata = DocumentMetadata(
+            sender=sender,
+            caption=None,
+            original_filename=file_name,
+            document_type_hint=IncomingDocumentType.VENDOR_INVENTORY,
+            vendor_id_hint=vendor_id,
+        )
+        result = _process_staged_file(file_path, metadata, file_name, notify_sender=False)
+        if _is_successful_inventory_import(result):
+            send_reply_safe(sender, vendor_text_stock.reply_text(outcome, stock))
+        else:
+            reason = getattr(result, "message", None) or "the list could not be read"
+            send_reply_safe(
+                sender,
+                f"❌ Stock not updated: {str(reason)[:200]}\n"
+                "Please send one part per line: part number and quantity, e.g. 16510M68K10 5",
+            )
+    except Exception:  # noqa: BLE001 -- a typed list must never kill the worker
+        logger.exception("Could not process the typed stock list from %s.", sender)
+        send_reply_safe(
+            sender,
+            "Sorry — your stock list could not be processed. Please re-send it, or send it as an Excel file.",
         )
 
 
