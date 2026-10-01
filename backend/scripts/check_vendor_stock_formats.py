@@ -20,6 +20,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'check.db').as_posix()}"
 os.environ["AI_FALLBACK_ENABLED"] = "false"
 os.environ["WHATSAPP_ACCESS_TOKEN"] = ""
 os.environ["WHATSAPP_ADMIN_PHONE_NUMBER"] = ""
+os.environ["OWN_STOCK_VENDOR_NAME"] = "Bijwasan"
 
 failures = 0
 
@@ -98,6 +99,7 @@ def main() -> int:
     _check_pdf_stock()
     _check_docx_txt()
     _check_photos()
+    _check_sheet_tabs()
 
     print("\n" + ("ALL CHECKS PASSED" if failures == 0 else f"{failures} CHECK(S) FAILED"))
     return 0 if failures == 0 else 1
@@ -487,6 +489,119 @@ def _check_photos() -> None:
     check("a scanned PDF is read like a photo and confirmed first", any("SCAN0001 — 4" in r for r in replies) and "SCAN0001" not in stock())
     text("haan")
     check("...and imported on haan", stock().get("SCAN0001") == Decimal("4"))
+
+
+
+class _FakeSheet:
+    """Records what would be written to Google Sheets."""
+
+    def __init__(self):
+        self.tabs: dict[str, dict] = {}
+
+    def worksheet(self, title):
+        import gspread
+
+        if title not in self.tabs:
+            raise gspread.WorksheetNotFound(title)
+        return _FakeTab(self, title)
+
+    def add_worksheet(self, title, rows, cols):
+        self.tabs[title] = {"rows": rows, "cols": cols, "cells": {}, "raw": []}
+        return _FakeTab(self, title)
+
+
+class _FakeTab:
+    def __init__(self, book, title):
+        self.book, self.title = book, title
+        self.data = book.tabs[title]
+
+    row_count = property(lambda self: self.data["rows"])
+    col_count = property(lambda self: self.data["cols"])
+
+    def resize(self, rows, cols):
+        self.data.update(rows=rows, cols=cols)
+
+    def clear(self):
+        self.data["cells"] = {}
+
+    def update(self, values, start, value_input_option=None):
+        self.data["raw"].append(value_input_option)
+        first = int(start[1:])
+        for offset, row in enumerate(values):
+            self.data["cells"][first + offset] = row
+
+    def format(self, *_args, **_kwargs):
+        pass
+
+    def rows(self):
+        return [self.data["cells"][k] for k in sorted(self.data["cells"])]
+
+
+def _check_sheet_tabs() -> None:
+    """[6] vendor tabs in the team's format, and the DEALER STOCK tab."""
+    import time as _time
+    from datetime import datetime, timedelta
+
+    from backend.app.integrations.google_sheets import dealer_stock
+    from core.db import get_session
+    from core.models import InventoryImport, Vendor
+
+    print("\n[6] Google Sheet: team-format vendor tabs and DEALER STOCK")
+    from openpyxl import Workbook
+
+    def vendor_with(name, rows, *, yesterday=False):
+        book = Workbook()
+        sheet = book.active
+        sheet.append(["Part No.", "Name", "Closing Stock", "Rate"])
+        for r in rows:
+            sheet.append(r)
+        path = _TMP / f"{name.replace(' ', '_')}.xlsx"
+        book.save(path)
+        _import(name, path)
+        with get_session() as s:
+            v = s.execute(select(Vendor).where(Vendor.name == name)).scalar_one()
+            if yesterday:
+                for imp in s.execute(select(InventoryImport).where(InventoryImport.vendor_id == v.id)).scalars():
+                    imp.created_at = datetime.utcnow() - timedelta(days=2)
+            return v.id, v.vendor_code
+
+    from sqlalchemy import select
+
+    a_id, a_code = vendor_with("Sheet Vendor A", [["0050048", "BOLT", 3, 12], ["1701AAA06701N", "HEAD LAMP LH", 2, 2835]])
+    b_id, _ = vendor_with("Sheet Vendor B", [["TT-100", "OIL FILTER", 7, 450]])
+    own_id, _ = vendor_with("Bijwasan Warehouse", [["OWN0001", "CLIP", 40, 5]])
+    old_id, _ = vendor_with("Sheet Vendor Old", [["OLD0001", "CLIP", 9, 5]], yesterday=True)
+
+    with get_session() as s:
+        headers, table = dealer_stock.team_format_table(a_id, s)
+    check("a vendor tab is in the team's format, Rate kept", headers == ["PartNo", "Part Description", "Stock", "Rate"])
+    check("...with the description and stock filled in", table[0][:3] == ["0050048", "BOLT", 3])
+
+    with get_session() as s:
+        headers, table = dealer_stock.dealer_stock_table(s)
+    parts = {row[2] for row in table}
+    check("DEALER STOCK lists every vendor who sent stock today", {"0050048", "1701AAA06701N", "TT-100"} <= parts)
+    check("...but not the company's own warehouse", "OWN0001" not in parts)
+    check("...and not a vendor whose stock is not from today", "OLD0001" not in parts)
+    a_rows = [row for row in table if row[0] == a_code]
+    check("...with the vendor's code and name on each of his rows", len(a_rows) == 2 and all(row[1] == "Sheet Vendor A" for row in a_rows))
+
+    book = _FakeSheet()
+    dealer_stock.write_tab(book, "DEALER STOCK", headers, table)
+    written = book.worksheet("DEALER STOCK").rows()
+    check("the tab is written header first", written[0] == dealer_stock.DEALER_HEADERS)
+    check("part numbers keep their leading zeros (written as text, RAW)", any(r[2] == "0050048" for r in written[1:]) and set(book.tabs["DEALER STOCK"]["raw"]) == {"RAW"})
+
+    calls = []
+    real = dealer_stock.rebuild_dealer_stock_safe
+    dealer_stock.rebuild_dealer_stock_safe = lambda: calls.append(1)
+    dealer_stock.DEBOUNCE_SECONDS = 0.3
+    dealer_stock.DEALER_STOCK_ENABLED = True
+    for _ in range(5):
+        dealer_stock.request_rebuild()
+    _time.sleep(0.8)
+    dealer_stock.rebuild_dealer_stock_safe = real
+    check("a burst of 5 vendor files rebuilds DEALER STOCK once", len(calls) == 1)
 
 
 if __name__ == "__main__":

@@ -125,6 +125,18 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
     # original values -- nothing renamed or filtered. Identical rule to the
     # consolidated Vendor_Inventory.xlsx (one format for both outputs); the
     # normalized columns remain internal, for comparison/allocation only.
+    from backend.app.integrations.google_sheets import dealer_stock
+
+    if dealer_stock.VENDOR_TAB_FORMAT != "exact":
+        # The purchase team's own format: PartNo / Part Description / Stock
+        # (+ MRP, Rate). See dealer_stock.py.
+        headers, table = dealer_stock.team_format_table(vendor_id, session)
+        worksheet_title = (vendor.vendor_code or vendor.name or f"V{vendor.id}").strip()
+        client = _build_client()
+        spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
+        dealer_stock.write_tab(spreadsheet, worksheet_title, headers, table)
+        return
+
     raw_headers, raw_rows = inventory_import_service.get_active_raw_table(vendor_id, session)
     if raw_headers:
         values = [raw_headers] + raw_rows
@@ -204,6 +216,10 @@ def reset_sheet_for_new_day() -> None:
             logger.exception("Sheet daily reset: could not delete worksheet %r.", title)
 
     logger.info("Sheet daily reset: removed %d stale vendor tab(s): %s", len(removed), removed)
+    # DEALER STOCK follows the same "today only" rule as the vendor tabs.
+    from backend.app.integrations.google_sheets import dealer_stock
+
+    dealer_stock.rebuild_dealer_stock_safe()
     if removed:
         notifications.broker.publish(
             "info",
@@ -249,4 +265,8 @@ def sync_vendor_inventory_to_sheet_safe(vendor_id: int, session: Session) -> boo
             vendor_name=vendor_name,
         )
     notifications.publish_sheet_sync(True, vendor_name)
+    # The combined DEALER STOCK tab, debounced -- one rebuild per burst.
+    from backend.app.integrations.google_sheets import dealer_stock
+
+    dealer_stock.request_rebuild()
     return True
