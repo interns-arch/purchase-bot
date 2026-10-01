@@ -80,6 +80,10 @@ class AdvanceOrderSettings:
         part.strip() for part in (os.environ.get("ADVANCE_ORDER_HUMAN_NUMBERS") or "").split(",") if part.strip()
     ]
 
+    # Case 2: how long a dealer-stock order may take, end to end, before what
+    # is still open is reported to a person (Founder: 12 hours).
+    dealer_stock_window_hours: int = max(1, _int("ADVANCE_ORDER_DEALER_STOCK_WINDOW_HOURS", 12))
+
     # --- handing the answer back to the sales bot --------------------------
     # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},
     # which keeps working either way. Set it and ProcureHub POSTs the order

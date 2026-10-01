@@ -26,6 +26,10 @@ NO_VENDOR = "no_vendor"  # every line has an answer, nobody has any of it
 CONFIRMED = "confirmed"  # the customer said yes; the vendors were told
 CANCELLED = "cancelled"
 
+# AdvanceOrder.kind
+KIND_ADVANCE = "advance"  # case 3: not in stock anywhere -- availability, then the customer confirms
+KIND_DEALER_STOCK = "dealer_stock"  # case 2: a vendor has it -- ORDER it from him now
+
 # AdvanceOrderLine.status
 LINE_ASKING = "asking"
 LINE_AVAILABLE = "available"
@@ -105,6 +109,11 @@ class AdvanceOrder(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
     confirmed_at: Mapped[datetime | None] = mapped_column(default=None)
+    # "advance" (case 3) or "dealer_stock" (case 2) -- see KIND_*.
+    kind: Mapped[str] = mapped_column(default=KIND_ADVANCE)
+    # Case 2's overall window (Founder: 12 hours). Lines still open at this
+    # moment are reported as not found, to a person.
+    deadline_at: Mapped[datetime | None] = mapped_column(default=None)
 
     lines: Mapped[list[AdvanceOrderLine]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="AdvanceOrderLine.id"
@@ -126,6 +135,13 @@ class AdvanceOrderLine(Base):
     eta_date: Mapped[date | None] = mapped_column(default=None)
     vendor_id: Mapped[int | None] = mapped_column(ForeignKey("vendors.id", ondelete="SET NULL"), default=None)
     note: Mapped[str | None] = mapped_column(default=None)
+    # Case 2: the Dealer Portal dealer whose stock showed the part, when the
+    # sales bot knows it -- that vendor is asked first.
+    dealer_id: Mapped[int | None] = mapped_column(default=None)
+    # Case 2: the vendor's stock file (InventoryImport id) this line was
+    # ordered against. Pieces ordered count against THAT file only, so his
+    # next stock file starts the count afresh -- by identity, not by clock.
+    stock_import_id: Mapped[int | None] = mapped_column(default=None)
 
     # --- the winning quote, copied here when the line is decided -----------
     # `advance_vendor_quotes` keeps every vendor's answer; these columns hold

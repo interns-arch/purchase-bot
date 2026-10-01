@@ -213,7 +213,12 @@ function OrderCard({ order, onAnswer }) {
           #{order.id} {order.external_ref ? `· ${order.external_ref}` : ""}
           {order.customer?.name ? ` · ${order.customer.name}` : ""}
         </h2>
-        <StatusPill status={upper(order.status)} />
+        <span style={{ display: "flex", gap: 6 }}>
+          <span className={"pill pill--" + (order.kind === "dealer_stock" ? "info" : "neutral")}>
+            {order.kind === "dealer_stock" ? "Dealer stock order" : "Advance order"}
+          </span>
+          <StatusPill status={upper(order.status)} />
+        </span>
       </div>
       <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "0 0 10px" }}>
         {order.created_at ? `Received ${formatDateTime(order.created_at)}` : ""}

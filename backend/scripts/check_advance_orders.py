@@ -446,6 +446,7 @@ def _check_quote_comparison(check, service, m, cfg, get_session, Vendor, TestCli
     cfg.quote_fanout = 1
 
     _check_one_by_one(check, service, m, cfg, get_session, Vendor)
+    _check_dealer_stock(check, service, m, cfg, get_session, Vendor)
 
 
 def _check_one_by_one(check, service, m, cfg, get_session, Vendor) -> None:
@@ -517,6 +518,116 @@ def _check_one_by_one(check, service, m, cfg, get_session, Vendor) -> None:
     check("vendor 3's 4 (faster) and vendor 2's 'haan' cover all 10 between them", got == sorted([(4, m.LINE_AVAILABLE, ids[2]), (6, m.LINE_AVAILABLE, ids[1])]))
     cfg.quote_fanout = 1
 
+
+
+def _check_dealer_stock(check, service, m, cfg, get_session, Vendor) -> None:
+    """[15] case 2: the part IS in vendors' stock -- the purchase bot ORDERS it."""
+    import csv
+    import tempfile
+    from decimal import Decimal
+    from pathlib import Path
+
+    from backend.app.integrations.whatsapp.models import WhatsAppRegisteredNumber
+    from core.models import DealerPortalVendorMap, DealerPortalVendorMapStatus
+    from core.services import inventory_import_service as imp
+
+    sent: list[tuple[str, str]] = []
+    service._send_text = lambda to, body: sent.append((to, body))
+    to = lambda number: [b for t, b in sent if t == number]  # noqa: E731
+    print("\n[15] dealer stock: the purchase bot orders from vendors who hold the part")
+    cfg.quote_fanout = 1
+    cfg.human_numbers = ["919888000111"]
+    tmp = Path(tempfile.mkdtemp())
+
+    def stock_file(name, rows):
+        path = tmp / f"{name}.csv"
+        with path.open("w", newline="") as fh:
+            csv.writer(fh).writerows([["PartNo", "Part Description", "Qty"]] + rows)
+        return path
+
+    with get_session() as s:
+        big = Vendor(name="Stock Big", vendor_code="SBG_CT")
+        small = Vendor(name="Stock Small", vendor_code="SSM_CT")
+        brand_only = Vendor(name="Brand Only", vendor_code="BRO_CT")
+        s.add_all([big, small, brand_only])
+        s.flush()
+        s.add_all([
+            WhatsAppRegisteredNumber(whatsapp_number="919300000001", vendor_id=big.id),
+            WhatsAppRegisteredNumber(whatsapp_number="919300000002", vendor_id=small.id),
+            m.AdvanceVendorContact(vendor_id=brand_only.id, whatsapp_number="919300000003"),
+            m.VendorBrand(brand="KIA2", vendor_id=brand_only.id, priority=1, discount_type=m.DISC_PERCENT, discount_pct=Decimal("9")),
+            DealerPortalVendorMap(vendor_id=small.id, vendor_name="Stock Small", dp_dealer_id=7181, status=DealerPortalVendorMapStatus.CONFIRMED),
+        ])
+        ids = {"big": big.id, "small": small.id, "brand": brand_only.id}
+    with get_session() as s:
+        imp.run_import(ids["big"], stock_file("big", [["DS-100", "OIL FILTER", "10"]]), s)
+    with get_session() as s:
+        imp.run_import(ids["small"], stock_file("small", [["DS100", "OIL FILTER", "4"]]), s)
+
+    t = datetime(2026, 10, 1, 12, 0)
+    service.now_ist_naive = lambda: t
+    sent.clear()
+    with get_session() as s:
+        order = service.create_order({"kind": m.KIND_DEALER_STOCK, "external_ref": "DS-A", "customer": {"name": "Gupta Motors"},
+                                      "lines": [{"part_number": "DS-100", "brand": "KIA2", "qty": 5, "dealer_id": 7181}]}, s)
+        oid = order.id
+    check("the vendor behind the Portal dealer the sales bot named is asked first", bool(to("919300000002")) and not to("919300000001"))
+    check("...and the message is an ORDER, not a question about availability", "Order (ref DS-" in to("919300000002")[0])
+    with get_session() as s:
+        service.handle_vendor_text("919300000002", "sirf 4 milenge, kal", s, t + timedelta(minutes=5))
+    with get_session() as s:
+        got = sorted((l.qty, l.status, l.vendor_id) for l in s.get(m.AdvanceOrder, oid).lines)
+    check("he had 4 of 5: his 4 are ORDERED", (4, m.LINE_ORDERED, ids["small"]) in got)
+    check("...he is thanked with exactly what to send", any("Order pakka" in b and "DS-100 x4" in b for b in to("919300000002")))
+    check("...and the last 1 goes to the next vendor holding it", any("DS-100 x1" in b for b in to("919300000001")))
+    with get_session() as s:
+        service.handle_vendor_text("919300000001", "ok 2 din", s, t + timedelta(minutes=9))
+    with get_session() as s:
+        o = s.get(m.AdvanceOrder, oid)
+        out = service.order_out(o, s)
+    check("all 5 ordered: the order is CONFIRMED", o.status == m.CONFIRMED)
+    check("the sales bot reads it back: kind, vendors, ETA", out["kind"] == "dealer_stock" and {l["vendor_name"] for l in out["lines"]} == {"Stock Small", "Stock Big"} and all(l["status"] == "ordered" for l in out["lines"]))
+
+    sent.clear()
+    with get_session() as s:
+        order = service.create_order({"kind": m.KIND_DEALER_STOCK, "external_ref": "DS-B", "lines": [{"part_number": "DS-100", "brand": "KIA2", "qty": 20}]}, s)
+        oid2 = order.id
+    check("stock already ordered is not offered again: the small vendor (4 of 4 ordered) is skipped", bool(to("919300000001")) and not to("919300000002"))
+    with get_session() as s:
+        service.handle_vendor_text("919300000001", "nahi", s, t + timedelta(minutes=20))
+    check("nobody else holds it: the brand's vendors are asked next", bool(to("919300000003")))
+    with get_session() as s:
+        service.handle_vendor_text("919300000003", "nahi", s, t + timedelta(minutes=25))
+    with get_session() as s:
+        o2 = s.get(m.AdvanceOrder, oid2)
+    check("every vendor said no: not found, and the person is told", o2.status == m.NO_VENDOR and any("DS-100 (KIA2) x20" in b for b in to("919888000111")))
+
+    sent.clear()
+    with get_session() as s:
+        order = service.create_order({"kind": m.KIND_DEALER_STOCK, "external_ref": "DS-C", "lines": [{"part_number": "NOBODY-1", "brand": "KIA2", "qty": 1}]}, s)
+        oid3 = order.id
+    with get_session() as s:
+        service.tick(s, t + timedelta(hours=13))
+    with get_session() as s:
+        o3 = s.get(m.AdvanceOrder, oid3)
+    check("12 hours with no answer: what is open is reported to the person", o3.status == m.NO_VENDOR and any("NOBODY-1" in b and "12 h" in b for b in to("919888000111")))
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.app.api.routes import advance_orders as routes
+
+    app = FastAPI()
+    app.include_router(routes.dealer_stock_router)
+    app.include_router(routes.api_router)
+    client = TestClient(app)
+    cfg.enabled, cfg.api_key = True, "check-key"
+    res = client.post("/api/dealer-stock-orders", json={"external_ref": "DS-API", "lines": [{"part_number": "DS-100", "qty": 1, "dealer_id": 7181}]}, headers={"X-Api-Key": "check-key"})
+    check("POST /api/dealer-stock-orders: 201, kind dealer_stock", res.status_code == 201 and res.json()["kind"] == "dealer_stock")
+    got = client.get(f"/api/advance-orders/{res.json()['id']}", headers={"X-Api-Key": "check-key"})
+    check("...and GET /api/advance-orders/{id} reads it back", got.status_code == 200 and got.json()["kind"] == "dealer_stock")
+    check("no key: 401", client.post("/api/dealer-stock-orders", json={"lines": [{"part_number": "X", "qty": 1}]}).status_code == 401)
+    cfg.enabled = False
 
 if __name__ == "__main__":
     sys.exit(main())

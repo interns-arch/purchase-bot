@@ -190,7 +190,10 @@ def create_order(payload: dict, session: Session) -> m.AdvanceOrder:
         requested_by=payload.get("requested_by"),
         needed_by=date.fromisoformat(needed) if needed else None,
         status=m.ASKING,
+        kind=m.KIND_DEALER_STOCK if payload.get("kind") == m.KIND_DEALER_STOCK else m.KIND_ADVANCE,
     )
+    if order.kind == m.KIND_DEALER_STOCK:
+        order.deadline_at = now_ist_naive() + timedelta(hours=cfg.dealer_stock_window_hours)
     for line in payload.get("lines") or []:
         part = str(line.get("part_number") or "").strip().upper()
         qty = int(line.get("qty") or 0)
@@ -202,6 +205,7 @@ def create_order(payload: dict, session: Session) -> m.AdvanceOrder:
                 part_name=line.get("part_name"),
                 brand=_brand_for_line(part, line.get("brand"), session),
                 qty=qty,
+                dealer_id=int(line["dealer_id"]) if line.get("dealer_id") not in (None, "") else None,
             )
         )
     if not order.lines:
@@ -284,10 +288,16 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
         return
     _resolve_lines(order, session, now)
 
+    if order.kind == m.KIND_DEALER_STOCK:
+        _mark_ordered(order, session)
+
+    # Case 3 bundles a brand's parts into one question per vendor. Case 2
+    # routes each part on its own: who holds THIS part decides who is asked.
     waiting: dict[str, list[m.AdvanceOrderLine]] = {}
     for line in order.lines:
         if line.status == m.LINE_ASKING:
-            waiting.setdefault(line.brand, []).append(line)
+            key = f"#{line.id}" if order.kind == m.KIND_DEALER_STOCK else line.brand
+            waiting.setdefault(key, []).append(line)
 
     not_found: list[m.AdvanceOrderLine] = []
     for brand, lines in waiting.items():
@@ -296,7 +306,7 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
         if slots <= 0:
             continue
         asked = _asked_vendor_ids(order, brand, session)
-        candidates = [v for v in vendors_for_brand(brand, session) if v.id not in asked][:slots]
+        candidates = [v for v in _candidates(order, brand, lines, session) if v.id not in asked][:slots]
         if not candidates:
             if open_queries:
                 continue  # somebody we already asked may still answer
@@ -349,7 +359,49 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
     if not_found:
         _tell_human(session, order, not_found)
     _send_queued(order, session, now)
+    if order.kind == m.KIND_DEALER_STOCK:
+        _mark_ordered(order, session)
     _settle(order)
+
+
+def _candidates(order: m.AdvanceOrder, key: str, lines: list[m.AdvanceOrderLine], session: Session) -> list[Vendor]:
+    """Who may be asked next for this group of lines, first to last."""
+    if order.kind != m.KIND_DEALER_STOCK:
+        return vendors_for_brand(key, session)
+    from backend.app.advance_orders import stock_routing
+
+    line = lines[0]
+    holders = [session.get(Vendor, h.vendor_id) for h in stock_routing.stock_holders(line, session)]
+    seen = {v.id for v in holders if v is not None}
+    # Nobody (else) holds it: the brand's vendors, as in case 3.
+    fallback = [v for v in vendors_for_brand(line.brand, session) if v.id not in seen]
+    return [v for v in holders if v is not None] + fallback
+
+
+def _mark_ordered(order: m.AdvanceOrder, session: Session) -> None:
+    """Case 2: a vendor's yes to the ORDER makes the line ordered, and he is
+    thanked with exactly what he is to send."""
+    for line in order.lines:
+        if line.status != m.LINE_AVAILABLE:
+            continue
+        line.status = m.LINE_ORDERED
+        if line.vendor_id:
+            from backend.app.advance_orders.stock_routing import active_import_id
+
+            line.stock_import_id = active_import_id(line.vendor_id, session)
+        qty = line.available_qty or line.qty
+        body = (
+            f"✅ Order pakka (Cartrends ref DS-{order.id}):\n"
+            f"{line.part_number} x{qty}"
+            + (f" - {_fmt_day(line.eta_date)} tak" if line.eta_date else "")
+            + "\nDhanyavaad."
+        )
+        for number in _vendor_numbers(line.vendor_id, session) if line.vendor_id else []:
+            try:
+                _send_text(number, body)
+            except Exception:  # noqa: BLE001
+                logger.exception("Dealer-stock order %s: thank-you to %s failed.", order.id, number)
+    session.flush()
 
 
 def _tell_human(session: Session, order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine]) -> None:
@@ -377,6 +429,13 @@ def _tell_human(session: Session, order: m.AdvanceOrder, lines: list[m.AdvanceOr
 
 
 def _question_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], want_rate: bool) -> str:
+    if order.kind == m.KIND_DEALER_STOCK:
+        rows = "\n".join(f"{i + 1}. {line.part_number} x{line.qty}" for i, line in enumerate(lines))
+        by = f"\n{_fmt_day(order.needed_by)} tak chahiye." if order.needed_by else ""
+        return (
+            f"Namaste, Cartrends purchase desk se. Order (ref DS-{order.id}):\n{rows}{by}\n\n"
+            'Bhej sakte hain? Reply: *ok* (bhej denge, kitne din mein), *nahi*, ya *sirf 3* (agar kam hai).'
+        )
     rows = "\n".join(f"{i + 1}. {line.part_number} x{line.qty}" for i, line in enumerate(lines))
     by = f"\n{_fmt_day(order.needed_by)} tak chahiye." if order.needed_by else ""
     if want_rate:
@@ -468,7 +527,15 @@ def _settle(order: m.AdvanceOrder) -> None:
         return
     if any(line.status == m.LINE_ASKING for line in order.lines):
         return
-    order.status = m.QUOTED if any(line.status == m.LINE_AVAILABLE for line in order.lines) else m.NO_VENDOR
+    if order.kind == m.KIND_DEALER_STOCK:
+        # The vendors have already been ordered from; nothing waits for a
+        # customer's yes, so the order is done.
+        ordered = any(line.status == m.LINE_ORDERED for line in order.lines)
+        order.status = m.CONFIRMED if ordered else m.NO_VENDOR
+        if ordered:
+            order.confirmed_at = now_ist_naive()
+    else:
+        order.status = m.QUOTED if any(line.status == m.LINE_AVAILABLE for line in order.lines) else m.NO_VENDOR
     logger.info("Advance order %s is %s.", order.id, order.status)
 
 
@@ -508,8 +575,31 @@ def tick(session: Session, now: datetime | None = None) -> None:
     session.flush()
     for order in session.execute(select(m.AdvanceOrder).where(m.AdvanceOrder.status == m.ASKING)).scalars():
         before = _snapshot(order)
-        _advance(order, session, now)
+        if order.kind == m.KIND_DEALER_STOCK and order.deadline_at is not None and now >= order.deadline_at:
+            _expire(order, session)
+        else:
+            _advance(order, session, now)
         _notify_if_changed(order, before, session)
+
+
+def _expire(order: m.AdvanceOrder, session: Session) -> None:
+    """Case 2's window is over: what is still open is not found -- told to a
+    person -- and what was ordered stands."""
+    open_lines = [line for line in order.lines if line.status == m.LINE_ASKING]
+    for line in open_lines:
+        line.status = m.LINE_UNAVAILABLE
+        line.note = f"not found within {cfg.dealer_stock_window_hours} h"
+    for q in session.execute(
+        select(m.AdvanceVendorQuery).where(
+            m.AdvanceVendorQuery.advance_order_id == order.id,
+            m.AdvanceVendorQuery.status.in_([m.Q_QUEUED, m.Q_SENT]),
+        )
+    ).scalars():
+        q.status = m.Q_CLOSED
+    session.flush()
+    if open_lines:
+        _tell_human(session, order, open_lines)
+    _settle(order)
 
 
 # ------------------------------------------------------------------ replies
@@ -854,6 +944,7 @@ def order_out(order: m.AdvanceOrder, session: Session) -> dict:
                 "note": line.note,
                 # --- added with quote comparison -----------------------------
                 "vendor_id": line.vendor_id,
+                "dealer_id": line.dealer_id,
                 "tat_days": line.tat_days,
                 "tat_band": ranking.band_label(ranking.tat_band(line.tat_days)) if line.status == m.LINE_AVAILABLE else None,
                 "mrp": _money(line.mrp),
@@ -872,5 +963,7 @@ def order_out(order: m.AdvanceOrder, session: Session) -> dict:
         "needed_by": order.needed_by.isoformat() if order.needed_by else None,
         "confirmed_at": order.confirmed_at.isoformat() if order.confirmed_at else None,
         "created_at": order.created_at.isoformat() if order.created_at else None,
+        "kind": order.kind or m.KIND_ADVANCE,
+        "deadline_at": order.deadline_at.isoformat() if order.deadline_at else None,
         "lines": lines_out,
     }

@@ -6,6 +6,11 @@ For the sales bot (X-Api-Key = ADVANCE_ORDER_API_KEY, no user login):
     POST /api/advance-orders/{id}/confirm     the customer said yes
     POST /api/advance-orders/{id}/cancel
 
+Case 2 -- the part IS in dealer stock, so the purchase bot ORDERS it now:
+    POST /api/dealer-stock-orders             {external_ref, customer, lines[{part_number,
+                                              brand, qty, dealer_id?}]} -> same shape as GET
+    GET  /api/advance-orders/{id}             works for both kinds (`kind` tells them apart)
+
 For the desk (normal login):
     GET  /api/advance-orders                  recent orders
     POST /api/advance-orders/{id}/lines/{line_id}/answer
@@ -72,6 +77,21 @@ class AdvanceOrderIn(BaseModel):
     lines: list[LineIn] = Field(min_length=1)
 
 
+class DealerStockLineIn(LineIn):
+    # The Dealer Portal dealer whose stock showed the part, when known; that
+    # vendor is asked first.
+    dealer_id: int | None = None
+
+
+class DealerStockOrderIn(BaseModel):
+    external_ref: str | None = None
+    source: str | None = "autoflow"
+    customer: CustomerIn = CustomerIn()
+    requested_by: str | None = None
+    needed_by: date | None = None
+    lines: list[DealerStockLineIn] = Field(min_length=1)
+
+
 class ConfirmIn(BaseModel):
     line_ids: list[int] | None = None
 
@@ -109,6 +129,26 @@ def _get(order_id: int, db: Session) -> m.AdvanceOrder:
 def create_advance_order(body: AdvanceOrderIn, db: Session = Depends(get_db)) -> dict:
     payload = body.model_dump()
     payload["needed_by"] = body.needed_by.isoformat() if body.needed_by else None
+    try:
+        order = service.create_order(payload, db)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    return service.order_out(order, db)
+
+
+dealer_stock_router = APIRouter(prefix="/api/dealer-stock-orders", tags=["advance-orders"])
+
+
+@dealer_stock_router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_api_key)])
+def create_dealer_stock_order(body: DealerStockOrderIn, db: Session = Depends(get_db)) -> dict:
+    """Case 2: the sales bot found the part in dealer stock. The vendors who
+    hold it are ORDERED from, one at a time; the answer is read back with
+    GET /api/advance-orders/{id}."""
+    payload = body.model_dump()
+    payload["needed_by"] = body.needed_by.isoformat() if body.needed_by else None
+    payload["kind"] = m.KIND_DEALER_STOCK
     try:
         order = service.create_order(payload, db)
         db.commit()

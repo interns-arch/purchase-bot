@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 
 from backend.app.api.routes.advance_orders import api_router as advance_orders_api_router
 from backend.app.api.routes.advance_orders import desk_router as advance_orders_desk_router
+from backend.app.api.routes.advance_orders import dealer_stock_router as dealer_stock_orders_router
 from backend.app.api.routes.command_centre import router as command_centre_router
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
@@ -161,6 +162,7 @@ app.include_router(notifications_router)
 # Advance orders from the sales bot: answer 503 unless ADVANCE_ORDERS_ENABLED=true.
 app.include_router(advance_orders_api_router)
 app.include_router(advance_orders_desk_router)
+app.include_router(dealer_stock_orders_router)
 
 
 # HEAD is accepted alongside GET: free uptime pingers (UptimeRobot's free
