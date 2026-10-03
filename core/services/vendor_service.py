@@ -201,6 +201,44 @@ def get_vendor_by_name(name: str, session: Session) -> Vendor | None:
     return similar
 
 
+def _is_abbreviation(short: str, full: str) -> bool:
+    """'bj' -> 'bijwashan': same first letter and every letter of `short`
+    appears in `full` in order. Used only to RANK suggestions shown to a
+    human -- never to match a vendor automatically."""
+    short, full = short.replace(" ", ""), full.replace(" ", "")
+    if not short or not full or short[0] != full[0]:
+        return False
+    position = 0
+    for char in short:
+        position = full.find(char, position)
+        if position < 0:
+            return False
+        position += 1
+    return True
+
+
+def suggest_vendor_names(name: str, session: Session, *, limit: int = 3) -> list[str]:
+    """Existing vendor names that `name` most plausibly meant, best first --
+    for the "did you mean" question when a typed name matches nothing
+    ('bJ STOCK' -> ['BIJWASHAN STOCK', ...]). Suggestions only; the sender
+    always confirms."""
+    from difflib import SequenceMatcher
+
+    wanted = normalise_vendor_name(name)
+    if not wanted:
+        return []
+    scored: list[tuple[float, str]] = []
+    for vendor in session.execute(select(Vendor)).scalars():
+        candidate = normalise_vendor_name(vendor.name)
+        score = SequenceMatcher(None, wanted, candidate).ratio()
+        if _is_abbreviation(wanted, candidate):
+            score = max(score, 0.6)
+        if score >= 0.4:
+            scored.append((score, vendor.name))
+    scored.sort(key=lambda item: (-item[0], item[1].lower()))
+    return [vendor_name for _score, vendor_name in scored[:limit]]
+
+
 class VendorNameInUseError(ValueError):
     """The spelling being declared already belongs to a DIFFERENT vendor that
     holds its own stock. An alias would be ignored (a real vendor always wins

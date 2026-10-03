@@ -370,7 +370,11 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
                 vendor_name,
                 len(held),
             )
-            _process_pending_vendor_files(message.sender, vendor_name, held)
+            confirmed = _confirm_vendor_name(
+                message.sender, vendor_name, f"{len(held)} held file(s)"
+            )
+            if confirmed is not None:
+                _process_pending_vendor_files(message.sender, confirmed, held)
             return
         # STAFF (admins, purchase team) asking in plain words -- answered by
         # the AI assistant from the database. Last of all, so every command
@@ -622,6 +626,50 @@ def _process_pending_customer_files(sender: str, customer_name: str, held) -> No
         finally:
             with get_session() as session:
                 pending_customer_files.remove(row.id, session)
+
+
+_NEW_VENDOR_PREFIX = "new "
+
+
+def _confirm_vendor_name(sender: str, vendor_name: str, filename_hint: str) -> str | None:
+    """The vendor name to import under, or None when the sender must confirm
+    it first (the caller keeps the file held).
+
+    A name that resolves to an existing vendor (exact, case/filler-tolerant,
+    remembered alias or one-letter typo -- `vendor_service.get_vendor_by_name`)
+    is used as-is. A name that matches NOTHING is never onboarded silently: a
+    typo like 'bJ STOCK' would otherwise create a brand-new vendor and import
+    the whole sheet under it (wrong own-stock status, wrong Dealer Stock
+    sheet). The sender is shown the closest existing vendors and must either
+    reply with one of them or reply 'NEW <name>' to create a new vendor."""
+    from core.services import vendor_service
+
+    if vendor_name.lower().startswith(_NEW_VENDOR_PREFIX):
+        confirmed = vendor_name[len(_NEW_VENDOR_PREFIX):].strip()
+        return confirmed or None
+
+    with get_session() as session:
+        if vendor_service.get_vendor_by_name(vendor_name, session) is not None:
+            return vendor_name
+        suggestions = vendor_service.suggest_vendor_names(vendor_name, session)
+
+    logger.info(
+        "WhatsApp vendor name %r from %s matches no existing vendor -- holding %s "
+        "and asking the sender to confirm (suggestions: %s).",
+        vendor_name,
+        sender,
+        filename_hint,
+        suggestions,
+    )
+    lines = [f"No vendor named '{vendor_name}' exists, so {filename_hint} was NOT imported yet."]
+    if suggestions:
+        lines.append("Did you mean one of these? Reply with the exact name:")
+        lines.extend(f"• {suggestion}" for suggestion in suggestions)
+    else:
+        lines.append("Reply with the correct vendor name.")
+    lines.append(f"If this really is a new vendor, reply: NEW {vendor_name}")
+    send_reply_safe(sender, "\n".join(lines))
+    return None
 
 
 def _process_pending_vendor_files(sender: str, vendor_name: str, held) -> None:
@@ -1176,6 +1224,20 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
     vendor_name = (message.caption or "").strip()
     if command.document_type == IncomingDocumentType.VENDOR_INVENTORY:
         window = whatsapp_settings.grouping_window_minutes
+        if vendor_name:
+            # A captioned name that matches no vendor is held, not onboarded
+            # (see `_confirm_vendor_name`). Grouped names below were already
+            # confirmed when they were first supplied.
+            confirmed = _confirm_vendor_name(
+                message.sender, vendor_name, f"'{message.filename}'"
+            )
+            if confirmed is None:
+                with get_session() as session:
+                    pending_vendor_files.add(
+                        message.sender, str(file_path), message.filename, session
+                    )
+                return
+            vendor_name = confirmed
         if not vendor_name:
             with get_session() as session:
                 remembered = vendor_memory.recall(message.sender, window, session)
