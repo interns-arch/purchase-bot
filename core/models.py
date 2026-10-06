@@ -93,7 +93,7 @@ class Vendor(Base):
     name: Mapped[str] = mapped_column(nullable=False)
     # Permanent identifier used throughout the app for inventory imports
     # (see core.services.vendor_code_service) -- <first two letters of
-    # name>_CT, e.g. "AR_CT", with a numeric suffix on collision. NOT the
+    # CT_<initials of the name>, e.g. "CT_AR" (was AR_CT before 5 Oct 2026). NOT the
     # same thing as `whatsapp_number` below: multiple vendors share a single
     # WhatsApp Business number, so the sender's phone number can never
     # identify which vendor a file came from -- only the vendor code

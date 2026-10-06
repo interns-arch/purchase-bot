@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from backend.app.database.session import get_db
-from backend.app.integrations.whatsapp import status_service
+from backend.app.integrations.whatsapp import chat_log, status_service
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.integrations.whatsapp.parser import (
     parse_delivery_statuses,
@@ -83,6 +83,27 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
     for report in parse_delivery_statuses(payload):
         if report.status == "failed" and report.message_id:
             background_tasks.add_task(_handle_delivery_failure, report)
+        if report.message_id:
+            background_tasks.add_task(
+                chat_log.update_status,
+                report.message_id,
+                report.status,
+                f"{report.error_code} {report.error_title}".strip() if report.error_code or report.error_title else None,
+            )
+
+    # The Chats page: every incoming text / file / photo, kept permanently.
+    for text_message in texts:
+        background_tasks.add_task(
+            chat_log.log_incoming, text_message.sender, kind="text",
+            text=text_message.text, wamid=text_message.message_id,
+        )
+    for message in documents:
+        background_tasks.add_task(
+            chat_log.log_incoming, message.sender,
+            kind="image" if getattr(message, "is_photo", False) else "document",
+            text=message.caption, filename=message.filename,
+            media_id=message.media_id, wamid=message.message_id,
+        )
 
     logger.info(
         "WhatsApp webhook received %d text message(s) and %d document attachment(s).",

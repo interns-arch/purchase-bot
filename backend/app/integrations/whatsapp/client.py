@@ -38,6 +38,20 @@ def _message_id(response) -> str | None:
         return None
 
 
+def _logged(to: str, kind: str, text: str | None, filename: str | None, send: Callable[[], _T]) -> _T:
+    """Send, and record the message for the Chats page -- also when it fails
+    (the error is re-raised unchanged)."""
+    from backend.app.integrations.whatsapp import chat_log
+
+    try:
+        result = send()
+    except Exception as exc:
+        chat_log.log_outgoing(to, kind=kind, text=text, filename=filename, error=str(exc)[:300])
+        raise
+    chat_log.log_outgoing(to, kind=kind, text=text, filename=filename, wamid=result if isinstance(result, str) else None)
+    return result
+
+
 def _with_retries(description: str, call: Callable[[], _T]) -> _T:
     last_exc: Exception | None = None
     for attempt, backoff in enumerate((0, *_RETRY_BACKOFF_SECONDS), start=1):
@@ -148,7 +162,7 @@ class WhatsAppClient:
 
         # The WhatsApp message id (wamid) -- what a later delivery report
         # names. Callers that do not need it simply ignore it.
-        return _with_retries(f"send_text_message({to})", _call)
+        return _logged(to, "text", body, None, lambda: _with_retries(f"send_text_message({to})", _call))
 
     def send_template_message(
         self,
@@ -201,7 +215,13 @@ class WhatsAppClient:
                 response.raise_for_status()
                 return _message_id(response)
 
-        return _with_retries(f"send_template_message({template_name} -> {to})", _call)
+        from backend.app.integrations.whatsapp import chat_log
+
+        text = chat_log.template_text(template_name, body_parameters or [], self)
+        return _logged(
+            to, "template", text, None,
+            lambda: _with_retries(f"send_template_message({template_name} -> {to})", _call),
+        )
 
     def upload_media(self, content: bytes, filename: str, mime_type: str) -> str:
         """Upload a document to WhatsApp's media store and return its media id
@@ -254,14 +274,15 @@ class WhatsAppClient:
             "document": document,
         }
 
-        def _call() -> None:
+        def _call() -> str | None:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(
                     url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
                 )
                 response.raise_for_status()
+                return _message_id(response)
 
-        _with_retries(f"send_document_message({filename})", _call)
+        _logged(to, "document", caption, filename, lambda: _with_retries(f"send_document_message({filename})", _call))
 
     def get_phone_number_info(self) -> dict[str, Any]:
         """Used only by the interactive "Test Connection" action on the

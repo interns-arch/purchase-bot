@@ -64,6 +64,24 @@ import re as _re
 _VENDOR_NAME_FILLERS = {"stock", "stocks", "inventory", "stocklist"}
 
 
+# Words that say WHAT the file is, never WHO sent it. A caption made only of
+# these ("STOCK", "closing stock", "stock list") names no vendor -- found live
+# 6 Oct 2026: a Honda file captioned "STOCK" was filed under a junk vendor
+# called "Stock" and the Honda tab kept the previous file.
+_GENERIC_CAPTION_WORDS = _VENDOR_NAME_FILLERS | {
+    "closing", "list", "file", "files", "excel", "sheet", "report", "update", "updated",
+    "new", "latest", "today", "todays", "aaj", "ka", "ki", "ke", "hai", "please", "pls", "plz",
+    "the", "of", "my", "our", "data", "qty", "quantity", "details",
+}
+
+
+def is_generic_vendor_name(name: str | None) -> bool:
+    """True when `name` is only generic file words ("STOCK", "Closing Stock")
+    -- or a date -- and so cannot identify a vendor."""
+    words = [w for w in _re.split(r"[^a-z0-9]+", (name or "").lower()) if w]
+    return all(word in _GENERIC_CAPTION_WORDS or word.isdigit() for word in words)
+
+
 def normalise_vendor_name(name: str) -> str:
     """Identity form of a vendor name: lowercase, alphanumeric words only,
     with generic filler words ('stock' etc.) removed. 'BIJWASHAN STOCK' ->

@@ -117,6 +117,10 @@ def _classify_inventory(file_path: Path, session: Session) -> Classification:
         return Classification(IncomingDocumentType.VENDOR_INVENTORY)
 
     vendor = vendor_code_service.get_vendor_by_code(code, session)
+    if vendor is None and not vendor_code_service.is_legacy_style(file_path.name):
+        # "CT_Stock.xlsx" merely LOOKS like a new-style code; with no such
+        # vendor, fall back to the vendor name instead of rejecting the file.
+        return Classification(IncomingDocumentType.VENDOR_INVENTORY)
     return Classification(
         IncomingDocumentType.VENDOR_INVENTORY,
         vendor.id if vendor is not None else None,

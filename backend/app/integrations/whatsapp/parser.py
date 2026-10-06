@@ -17,6 +17,37 @@ _TEXT_MESSAGE_TYPE = "text"
 _IMAGE_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 
 
+def is_for_this_number(value: dict) -> bool:
+    """True when a webhook change was sent TO this bot's own WhatsApp number.
+
+    The Meta business account holds FOUR numbers (+91 92170 30414 is this
+    purchase bot; 30421, 30384 and 080 4447 5952 belong to the other bots)
+    and Meta delivers every one of them to this webhook. Found live 6 Oct
+    2026: a vendor answering the sales bot ("Available" + a photo) was read
+    by the purchase bot, whose reply from 30414 then failed with 131047
+    because that person had never written to 30414. Messages and delivery
+    reports for the other numbers are ignored here."""
+    from backend.app.integrations.whatsapp.config import whatsapp_settings
+
+    mine = (whatsapp_settings.phone_number_id or "").strip()
+    target = str(((value or {}).get("metadata") or {}).get("phone_number_id") or "").strip()
+    if not mine or not target:
+        return True  # cannot tell -- keep the old behaviour
+    if target != mine:
+        senders = [m.get("from") for m in (value.get("messages") or [])]
+        if senders:
+            from core.logging_setup import get_logger
+
+            get_logger(__name__).info(
+                "WhatsApp webhook: ignoring %d message(s) from %s sent to another number on the "
+                "account (%s, phone_number_id=%s).",
+                len(senders), ", ".join(str(s) for s in senders),
+                ((value.get("metadata") or {}).get("display_phone_number") or "?"), target,
+            )
+        return False
+    return True
+
+
 @dataclass
 class IncomingWhatsAppMessage:
     sender: str
@@ -48,6 +79,8 @@ def parse_webhook_payload(payload: dict) -> list[IncomingWhatsAppMessage]:
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+            if not is_for_this_number(value):
+                continue
             for raw_message in value.get("messages", []):
                 if raw_message.get("type") == _IMAGE_MESSAGE_TYPE:
                     image = raw_message.get("image", {})
@@ -102,6 +135,8 @@ def parse_text_messages(payload: dict) -> list[IncomingWhatsAppText]:
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+            if not is_for_this_number(value):
+                continue
             for raw_message in value.get("messages", []):
                 if raw_message.get("type") != _TEXT_MESSAGE_TYPE:
                     continue
@@ -141,6 +176,8 @@ def parse_delivery_statuses(payload: dict) -> list[DeliveryStatus]:
     out: list[DeliveryStatus] = []
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
+            if not is_for_this_number(change.get("value") or {}):
+                continue
             for raw in (change.get("value") or {}).get("statuses", []) or []:
                 errors = raw.get("errors") or [{}]
                 code = errors[0].get("code")

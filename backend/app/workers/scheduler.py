@@ -178,7 +178,30 @@ def _schedule_advance_orders() -> None:
     logger.info("Advance orders enabled -- vendor questions checked every %d minute(s).", advance_order_settings.tick_minutes)
 
 
+def _schedule_ai_learning() -> None:
+    """Nightly review of the WhatsApp assistant's chats: Gemini turns the
+    day's misunderstandings into short lessons used in every later chat (see
+    `vendor_onboarding.learning`). Runs only while vendor onboarding is on."""
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    if not vendor_onboarding_settings.enabled:
+        return
+    from backend.app.vendor_onboarding import learning
+
+    _scheduler.add_job(
+        lambda: _run_safely("ai_daily_review", learning.daily_review),
+        "cron",
+        hour=21,
+        minute=0,
+        timezone=_IST_TZ,
+        id="ai_daily_review",
+        replace_existing=True,
+    )
+    logger.info("AI learning enabled -- the assistant reviews its chats daily at 21:00 IST.")
+
+
 def start_scheduler() -> None:
+    _schedule_ai_learning()
     _schedule_whatsapp_daily_jobs()
     _schedule_advance_orders()
     _schedule_google_sheet_daily_reset()

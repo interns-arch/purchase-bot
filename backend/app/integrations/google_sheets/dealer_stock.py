@@ -73,18 +73,41 @@ def _description(raw_data) -> str:
     return ""
 
 
+# The vendor's own Brand / Make column, copied as written (ABRO, MOTUL ...).
+_BRAND_HEADERS = {"brand", "brandname", "make", "manufacturer", "mfr", "mfg", "oem", "oembrand"}
+
+
+def _brand(raw_data) -> str:
+    from core.ingestion.column_detector import normalise_header
+
+    if isinstance(raw_data, dict):
+        for key, value in raw_data.items():
+            if normalise_header(str(key)) in _BRAND_HEADERS and str(value or "").strip():
+                return " ".join(str(value).split())
+    return ""
+
+
 def team_format_table(vendor_id: int, session: Session) -> tuple[list[str], list[list]]:
-    """A vendor's active stock as PartNo / Part Description / Stock, with MRP
-    and Rate only when any of his rows carries them."""
+    """A vendor's active stock as PartNo / Part Description / Stock, with
+    Brand, MRP and Rate only when any of his rows carries them."""
     from core.services.inventory_import_service import get_active_inventory
 
     rows = get_active_inventory(vendor_id, session)
+    brands = [_brand(r.raw_data) for r in rows]
+    has_brand = any(brands)
     has_mrp = any(r.mrp is not None for r in rows)
     has_rate = any(r.price is not None for r in rows)
-    headers = TEAM_HEADERS + (["MRP"] if has_mrp else []) + (["Rate"] if has_rate else [])
+    headers = (
+        TEAM_HEADERS
+        + (["Brand"] if has_brand else [])
+        + (["MRP"] if has_mrp else [])
+        + (["Rate"] if has_rate else [])
+    )
     table = []
-    for r in rows:
+    for r, brand in zip(rows, brands):
         line = [str(r.vendor_part_number), _description(r.raw_data), _number(r.quantity_available)]
+        if has_brand:
+            line.append(brand)
         if has_mrp:
             line.append(_number(r.mrp))
         if has_rate:

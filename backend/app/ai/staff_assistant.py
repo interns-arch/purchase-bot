@@ -276,7 +276,13 @@ def handle(sender: str, text: str) -> bool:
     try:
         if _GREETING.match(text):
             _forget(sender)
-            reply = "Namaste! " + HELP
+            try:
+                from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+                name = vendor_onboarding_settings.honorific(sender)
+            except Exception:  # noqa: BLE001 -- a greeting must never fail
+                name = None
+            reply = (f"Namaste {name}! " if name else "Namaste! ") + HELP
             _remember(sender, "out", reply)
             send_reply_safe(sender, reply)
             return True

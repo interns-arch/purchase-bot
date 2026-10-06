@@ -116,6 +116,144 @@ def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
         return False
 
 
+LEDGER_COMMAND_KEY = "ledger"
+
+
+def _vendor_onboarding_text(message: IncomingWhatsAppText) -> bool:
+    """True when the vendor-onboarding module handled this text. Never raises."""
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    if not vendor_onboarding_settings.enabled or not (message.text or "").strip():
+        return False
+    try:
+        from backend.app.vendor_onboarding import approvals, conversation, learning, ledger
+
+        # Admin: "lessons" / "lesson off 3" -- what the assistant taught itself.
+        lesson_reply = learning.handle_lesson_command(message.sender, message.text)
+        if lesson_reply:
+            send_reply_safe(message.sender, lesson_reply)
+            return True
+
+        with get_session() as session:
+            replies = approvals.handle_reply(message.sender, message.text, session)
+            if replies is None:
+                replies = ledger.provide_vendor_name(message.sender, message.text, session)
+            if replies is None:
+                replies = conversation.answer(message.sender, message.text, session)
+            if replies is None and conversation.is_start_command(message.text):
+                replies = conversation.start(message.sender, session, message.text)
+            if replies is None and ledger.is_ledger_word(message.text):
+                command_store.set_command(message.sender, LEDGER_COMMAND_KEY, session)
+                replies = [
+                    "Send the ledger now — a PDF, Excel, or a clear photo of each page."
+                ]
+    except Exception:  # noqa: BLE001 -- never block the normal text handling
+        logger.exception("Vendor onboarding text handling failed for %s.", message.sender)
+        return False
+    finally:
+        from backend.app.vendor_onboarding import ai_chat
+
+        ai_chat.flush_memory()  # after the turn's transaction has committed
+    if replies is None:
+        return False
+    for reply in replies:
+        send_reply_safe(message.sender, reply)
+    return True
+
+
+_ROUTE_COMMANDS = {
+    "vendor_stock": "vendor",
+    "customer_order": "customer",
+    "invoice": "invoice",
+    "ledger": LEDGER_COMMAND_KEY,
+}
+
+
+def _ai_route_text(message: IncomingWhatsAppText) -> bool:
+    """A free-text message from someone who has not sent a command: work out
+    what they want and answer like a person. True when a reply was sent;
+    False (-> the fixed menu) when the AI is unavailable. Never raises."""
+    from backend.app.vendor_onboarding import ai_chat
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    try:
+        if not ai_chat.available():
+            return False
+        routed = ai_chat.route(
+            message.text,
+            chat_history=ai_chat.history(message.sender),
+            onboarding_enabled=vendor_onboarding_settings.enabled,
+            person=ai_chat.who_is(message.sender),
+        )
+        if routed is None:
+            return False
+        action, reply = routed["action"], routed["reply"]
+        logger.info("WhatsApp text from %s routed by AI: %r -> %s", message.sender, (message.text or "")[:80], action)
+        replies: list[str] = []
+        with get_session() as session:
+            if action == "register_vendor" and vendor_onboarding_settings.enabled:
+                from backend.app.vendor_onboarding import conversation
+
+                ai_chat.remember(message.sender, "in", message.text)
+                replies = conversation.start(message.sender, session, message.text)
+            else:
+                if action in _ROUTE_COMMANDS:
+                    command_store.set_command(message.sender, _ROUTE_COMMANDS[action], session)
+                if not reply:
+                    return False
+                ai_chat.remember(message.sender, "in", message.text)
+                ai_chat.remember(message.sender, "out", reply)
+                replies = [reply]
+        from backend.app.vendor_onboarding import learning
+
+        learning.log_turn(message.sender, "route", message.text, intent=action, reply=reply or None)
+        ai_chat.flush_memory()  # after the turn's transaction has committed
+        for text in replies:
+            send_reply_safe(message.sender, text)
+        return bool(replies)
+    except Exception:  # noqa: BLE001 -- fall back to the fixed menu
+        logger.exception("AI routing failed for %s.", message.sender)
+        return False
+
+
+def _vendor_ledger_file(message: IncomingWhatsAppMessage) -> bool:
+    """True when this file is a vendor LEDGER (caption "ledger", or sent after
+    the "ledger" text) and was handled. Checked before every other file route
+    so a registered vendor's ledger is never imported as stock."""
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    if not vendor_onboarding_settings.enabled:
+        return False
+    from backend.app.vendor_onboarding import ledger
+
+    try:
+        is_ledger = ledger.is_ledger_word(message.caption)
+        if not is_ledger:
+            with get_session() as session:
+                is_ledger = (
+                    command_store.get_fresh_command(
+                        message.sender, whatsapp_settings.grouping_window_minutes, session
+                    )
+                    == LEDGER_COMMAND_KEY
+                )
+        if not is_ledger:
+            return False
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        with get_session() as session:
+            # "ledger" applies to the NEXT file only, so a stock sheet sent a
+            # few minutes later is not mistaken for another ledger.
+            if command_store.get_command(message.sender, session) == LEDGER_COMMAND_KEY:
+                command_store.clear_command(message.sender, session)
+            replies = ledger.receive(message.sender, file_path, message.filename, session)
+    except Exception:  # noqa: BLE001 -- the sender must hear something
+        logger.exception("Vendor ledger handling failed for %s (%s).", message.sender, message.filename)
+        replies = ["Sorry — I couldn't process that ledger. Please send it again with the caption LEDGER."]
+    for reply in replies:
+        send_reply_safe(message.sender, reply)
+    return True
+
+
 def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     """A plain text message. Priority:
     1. A known routing command -> remember it for this number.
@@ -134,6 +272,12 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # from the sales bot. Only numbers with an OPEN question are claimed, and
     # only while ADVANCE_ORDERS_ENABLED=true; everything else continues below.
     if _advance_order_reply(message):
+        return
+
+    # Vendor onboarding / ledgers (VENDOR_ONBOARDING_ENABLED): approval and
+    # ledger PASS/FAIL replies, a vendor filling the registration form, and
+    # the "new vendor" / "ledger" commands. Off -> nothing is claimed.
+    if _vendor_onboarding_text(message):
         return
 
     # Founder command "send reminder" (daily participation follow-up): only
@@ -382,6 +526,10 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         from backend.app.ai import staff_assistant
 
         if staff_assistant.is_staff(message.sender) and staff_assistant.handle(message.sender, message.text):
+            return
+        # Anyone else: understand what they want in plain words (Gemini)
+        # instead of answering every message with the fixed menu.
+        if _ai_route_text(message):
             return
         logger.info(
             "WhatsApp text from %s is not a routing command (%r) -- replying with instructions.",
@@ -646,7 +794,24 @@ def _confirm_vendor_name(sender: str, vendor_name: str, filename_hint: str) -> s
 
     if vendor_name.lower().startswith(_NEW_VENDOR_PREFIX):
         confirmed = vendor_name[len(_NEW_VENDOR_PREFIX):].strip()
-        return confirmed or None
+        if confirmed and not vendor_service.is_generic_vendor_name(confirmed):
+            return confirmed
+        return None
+
+    if vendor_service.is_generic_vendor_name(vendor_name):
+        # "STOCK" says what the file is, not who sent it. Ask -- suggesting a
+        # vendor from the filename ("honda_06-10-2026.xlsx" -> honda stock).
+        with get_session() as session:
+            stem = Path(filename_hint.strip("'")).stem
+            suggestions = [] if vendor_service.is_generic_vendor_name(stem) else vendor_service.suggest_vendor_names(stem, session)
+        lines = [f"Which vendor is {filename_hint} from? '{vendor_name}' doesn't tell me the vendor."]
+        if suggestions:
+            lines.append("Is it one of these? Reply with the exact name:")
+            lines.extend(f"• {suggestion}" for suggestion in suggestions)
+        else:
+            lines.append("Reply with the vendor name.")
+        send_reply_safe(sender, "\n".join(lines))
+        return None
 
     with get_session() as session:
         if vendor_service.get_vendor_by_name(vendor_name, session) is not None:
@@ -726,6 +891,9 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
         message.media_id,
         message.message_id,
     )
+
+    if _vendor_ledger_file(message):
+        return
 
     # A PHOTO. Only a registered vendor's is read (as a stock list, confirmed
     # with him before import). Everyone else's photos are ignored, exactly as

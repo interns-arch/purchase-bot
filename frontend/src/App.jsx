@@ -31,6 +31,7 @@ const AdvanceOrdersPage = lazy(() =>
 const VendorInvoicesPage = lazy(() =>
   import("./pages/VendorInvoicesPage").then((m) => ({ default: m.VendorInvoicesPage }))
 );
+const ChatsPage = lazy(() => import("./pages/ChatsPage").then((m) => ({ default: m.ChatsPage })));
 const PurchaseOrdersPage = lazy(() =>
   import("./pages/PurchaseOrdersPage").then((m) => ({ default: m.PurchaseOrdersPage }))
 );
@@ -97,6 +98,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <DeliveryTrackingPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/chats"
+              element={
+                <ProtectedRoute>
+                  <ChatsPage />
                 </ProtectedRoute>
               }
             />

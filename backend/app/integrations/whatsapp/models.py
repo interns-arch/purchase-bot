@@ -212,6 +212,28 @@ class WhatsAppPendingPhotoStock(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class WhatsAppChatMessage(Base):
+    """EVERY WhatsApp message on the line, in and out -- what the Chats page
+    shows. `direction` "in" (someone wrote) / "out" (the bot sent);
+    `kind` text / document / image / template; `status` received / sent /
+    delivered / read / failed, kept current from WhatsApp's delivery reports
+    (matched by `wamid`)."""
+
+    __tablename__ = "whatsapp_chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    whatsapp_number: Mapped[str] = mapped_column(index=True)
+    direction: Mapped[str] = mapped_column()
+    kind: Mapped[str] = mapped_column(default="text")
+    text: Mapped[str | None] = mapped_column(default=None)
+    filename: Mapped[str | None] = mapped_column(default=None)
+    media_id: Mapped[str | None] = mapped_column(default=None)
+    wamid: Mapped[str | None] = mapped_column(default=None, index=True)
+    status: Mapped[str] = mapped_column(default="received")
+    error: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), index=True)
+
+
 class AiConversationMessage(Base):
     """What a staff member and the purchase bot's AI assistant said to each
     other -- the assistant's memory, like the sales bot's (AutoFlow keeps the

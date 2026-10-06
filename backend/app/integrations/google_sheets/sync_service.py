@@ -16,9 +16,11 @@ outage never fails the inventory import itself."""
 from __future__ import annotations
 
 import os
+import re
 
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.integrations.google_sheets import status_service
@@ -70,6 +72,110 @@ def _build_client():
     # remaining wall-clock cost as well.
     client.set_timeout((SHEETS_CONNECT_TIMEOUT_SECONDS, SHEETS_READ_TIMEOUT_SECONDS))
     return client
+
+
+def legacy_title(code: str) -> str | None:
+    """The tab name a vendor had before codes moved to the CT_ prefix on
+    5 Oct 2026: CT_BS -> BS_CT, CT_MA_2 -> MA_CT_2. None for a non-code."""
+    import re
+
+    match = re.match(r"^CT_([A-Z0-9]+)((?:_\d+)?)$", (code or "").strip().upper())
+    return f"{match.group(1)}_CT{match.group(2)}" if match else None
+
+
+def adopt_legacy_tab(spreadsheet, title: str) -> None:
+    """If this vendor's tab still has its OLD-style name (BS_CT), rename it to
+    the current code (CT_BS) so the sheet never shows the same vendor twice."""
+    import gspread
+
+    old = legacy_title(title)
+    if not old:
+        return
+    try:
+        spreadsheet.worksheet(title)
+        return  # the new-style tab already exists
+    except gspread.WorksheetNotFound:
+        pass
+    try:
+        spreadsheet.worksheet(old).update_title(title)
+        logger.info("Google Sheet: renamed tab %r to %r (new vendor code format).", old, title)
+    except gspread.WorksheetNotFound:
+        pass
+
+
+_PLAIN_NUMBER = re.compile(r"^-?(?:0|[1-9]\d{0,8})(?:\.\d+)?$")
+
+
+def _sheet_cell(value: str, *, from_xls: bool):
+    """A cell as the person typed it. Short plain numbers (stock, rates) go in
+    as numbers so the sheet can add them up; anything else -- part numbers
+    with leading zeros, long codes, text -- stays exactly as written. Old
+    .xls files store every number as a float, so 7930.0 is shown as 7930."""
+    text = "" if value is None else str(value)
+    if from_xls and re.fullmatch(r"-?\d+\.0", text):
+        text = text[:-2]
+    if _PLAIN_NUMBER.match(text):
+        return float(text) if "." in text else int(text)
+    return text
+
+
+def original_file_grid(vendor_id: int, session: Session) -> list[list] | None:
+    """The vendor's ACTIVE stock file exactly as sent (first non-blank sheet
+    of an Excel, or the CSV), trailing blank rows/columns trimmed. None when
+    the original file is not on disk any more."""
+    from pathlib import Path
+
+    from backend.app.documents.models import IncomingDocument
+    from core.models import InventoryImport
+
+    active = session.execute(
+        select(InventoryImport).where(InventoryImport.vendor_id == vendor_id, InventoryImport.is_active.is_(True))
+    ).scalar_one_or_none()
+    if active is None:
+        return None
+    stored = session.execute(
+        select(IncomingDocument.stored_path)
+        .where(IncomingDocument.inventory_import_id == active.id, IncomingDocument.stored_path.is_not(None))
+        .order_by(IncomingDocument.id.desc())
+    ).scalars().first()
+    path = Path(stored) if stored else None
+    if path is not None and not path.exists():
+        # After import the file is moved from uploads/incoming/ to
+        # uploads/processed/ (staging.mark_processed_location); the stored
+        # path still names the incoming one.
+        for folder in ("processed", "failed", "archive"):
+            moved = Path(str(path).replace("/incoming/", f"/{folder}/", 1))
+            if moved.exists():
+                path = moved
+                break
+    if path is None or not path.exists():
+        return None
+    try:
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            from core.ingestion.csv_reader import read_csv_grid
+
+            raw = read_csv_grid(path)
+        elif suffix in (".xlsx", ".xlsm", ".xls"):
+            from core.ingestion.excel_reader import read_excel_grid
+
+            raw = read_excel_grid(path)
+        else:
+            return None
+    except Exception:  # noqa: BLE001 -- fall back to the row-by-row rebuild
+        logger.exception("Could not re-read the original stock file %s.", path)
+        return None
+    rows = [list(row) for row in raw]
+    while rows and not any(str(c or "").strip() for c in rows[-1]):
+        rows.pop()
+    if not rows:
+        return None
+    width = max(
+        (i + 1 for row in rows for i, c in enumerate(row) if str(c or "").strip()),
+        default=1,
+    )
+    from_xls = path.suffix.lower() == ".xls"
+    return [[_sheet_cell(row[i] if i < len(row) else "", from_xls=from_xls) for i in range(width)] for row in rows]
 
 
 def _get_or_create_worksheet(spreadsheet, title: str, num_cols: int):
@@ -134,7 +240,19 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
         worksheet_title = (vendor.vendor_code or vendor.name or f"V{vendor.id}").strip()
         client = _build_client()
         spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)
+        adopt_legacy_tab(spreadsheet, worksheet_title)
         dealer_stock.write_tab(spreadsheet, worksheet_title, headers, table)
+        return
+
+    # AS SENT: the file the person sent, cell for cell -- every column and
+    # every row, including rows the import skipped. Read straight from the
+    # stored original; only when that is gone does the row-by-row rebuild
+    # below run.
+    grid = original_file_grid(vendor_id, session)
+    if grid:
+        worksheet_title = (vendor.vendor_code or vendor.name or f"V{vendor.id}").strip()
+        adopt_legacy_tab(spreadsheet, worksheet_title)
+        dealer_stock.write_tab(spreadsheet, worksheet_title, grid[0], grid[1:])
         return
 
     raw_headers, raw_rows = inventory_import_service.get_active_raw_table(vendor_id, session)
@@ -161,6 +279,7 @@ def sync_vendor_inventory_to_sheet(vendor_id: int, session: Session) -> None:
     # display name. Created wide enough for however many columns the vendor's
     # file actually has.
     worksheet_title = (vendor.vendor_code or vendor.name or f"V{vendor.id}").strip()
+    adopt_legacy_tab(spreadsheet, worksheet_title)
     worksheet = _get_or_create_worksheet(
         spreadsheet, worksheet_title, max(len(values[0]), len(_HEADERS))
     )
@@ -201,6 +320,9 @@ def reset_sheet_for_new_day() -> None:
             )
             if vendor_id_ not in submitted and code and code.strip()
         }
+        # Tabs still carrying the OLD code format (BS_CT) belong to the same
+        # vendors and follow the same same-day rule.
+        stale_codes |= {legacy_title(code) for code in stale_codes if legacy_title(code)}
 
     client = _build_client()
     spreadsheet = client.open_by_key(google_sheets_settings.sheet_id)

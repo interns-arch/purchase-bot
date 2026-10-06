@@ -38,7 +38,17 @@ _DEFAULT_COUNTRY_CODE = "91"
 def normalize_number(raw: str | int | None) -> str:
     """Digits-only, with country code: '92569 97173' -> '919256997173'.
     Returns '' for blank input (callers treat that as unregistrable)."""
-    digits = _NON_DIGITS.sub("", str(raw or ""))
+    # Excel hands a phone number over as a float -- 9990898746.0 -- and
+    # stripping the "." alone would leave 99908987460: an extra 0 and no
+    # country code, a number WhatsApp cannot deliver to (131026). Found live
+    # 6 Oct 2026 on 16 vendor numbers registered from an Excel on 14 Aug.
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    text_value = str(raw or "").strip()
+    float_like = re.fullmatch(r"(\+?[\d\s-]+)\.0+", text_value)
+    if float_like:
+        text_value = float_like.group(1)
+    digits = _NON_DIGITS.sub("", text_value)
     if not digits:
         return ""
     digits = digits.lstrip("0")

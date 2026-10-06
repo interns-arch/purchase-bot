@@ -11,7 +11,10 @@ import { useToast } from "../context/ToastContext";
 const NAV_GROUPS = [
   {
     label: "Overview",
-    items: [{ to: "/command-centre", label: "Command Centre" }],
+    items: [
+      { to: "/command-centre", label: "Command Centre" },
+      { to: "/chats", label: "Chats" },
+    ],
   },
   {
     label: "Daily work",

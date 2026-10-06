@@ -78,4 +78,12 @@ def instruction_text() -> str:
     unrecognised text is received. Generated from the registry so new
     commands appear automatically."""
     options = "\n".join(command.label for command in _COMMANDS.values())
-    return "Please send one of the following before uploading a file:\n\n" + options
+    text = "Please send one of the following before uploading a file:\n\n" + options
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    if vendor_onboarding_settings.enabled:
+        text += (
+            "\n\nNew vendor? Send NEW VENDOR to register."
+            "\nSending your ledger? Send it with the caption LEDGER."
+        )
+    return text
