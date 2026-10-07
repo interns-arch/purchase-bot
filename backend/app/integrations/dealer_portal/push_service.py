@@ -158,6 +158,8 @@ def push_account(
     *,
     triggering_vendor_id: int | None = None,
     force_full_snapshot: bool = False,
+    prior_attempts: int = 0,
+    is_retry: bool = False,
 ) -> DealerPortalPushStatus:
     """Compute and push one account's delta. Writes exactly one
     `DealerPortalPush` audit row. Returns the status recorded.
@@ -187,6 +189,10 @@ def push_account(
             rows_sent=result.rows_sent,
             zeroed_count=result.zeroed_count,
             status=DealerPortalPushStatus.PENDING,
+            # A retry continues the failed push's count, so the sweep really
+            # stops after DEALER_PORTAL_RETRY_MAX_ATTEMPTS (it used to restart
+            # at 1 on every retry and loop -- and alert -- forever).
+            attempts=prior_attempts,
         )
         session.add(push)
         session.flush()
@@ -212,6 +218,7 @@ def push_account(
             DealerPortalPushStatus.SUCCESS,
             error=None,
             note="nothing to send",
+            is_retry=is_retry,
         )
 
     # ---- SHADOW MODE: everything above, nothing over the wire. ----------
@@ -224,7 +231,7 @@ def push_account(
             dealer_portal_settings.base_url,
             csv_builder.preview(result.rows, tat_days=account.tat_days),
         )
-        return _finish(push_id, DealerPortalPushStatus.SHADOW, error=None)
+        return _finish(push_id, DealerPortalPushStatus.SHADOW, error=None, is_retry=is_retry)
 
     # ---- LIVE ----------------------------------------------------------
     try:
@@ -233,7 +240,7 @@ def push_account(
         )
     except client.DealerPortalError as exc:
         logger.error("Dealer Portal %s: push failed -- %s", account.key, exc)
-        return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc))
+        return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc), is_retry=is_retry)
 
     status, error = _outcome(upload, rows_sent=result.rows_sent)
 
@@ -261,7 +268,7 @@ def push_account(
         upload.updated_count,
         upload.failed_count,
     )
-    return _finish(push_id, status, error=error, upload=upload)
+    return _finish(push_id, status, error=error, upload=upload, is_retry=is_retry)
 
 
 def _outcome(upload, *, rows_sent: int) -> tuple[DealerPortalPushStatus, str | None]:
@@ -299,6 +306,7 @@ def _finish(
     error: str | None,
     upload=None,
     note: str | None = None,
+    is_retry: bool = False,
 ) -> DealerPortalPushStatus:
     """Close out the audit row. Never raises -- a bookkeeping failure must
     not turn into an import failure."""
@@ -320,7 +328,8 @@ def _finish(
         logger.exception("Could not record Dealer Portal push %s.", push_id)
     if note:
         logger.info("Dealer Portal push %s: %s.", push_id, note)
-    _tell_team(push_id, status, error, upload)
+    if not is_retry:
+        _tell_team(push_id, status, error, upload)
     return status
 
 
@@ -337,6 +346,25 @@ def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, 
             if push is None or (status == DealerPortalPushStatus.FAILED and (push.attempts or 0) > 1):
                 return
             account = push.account_key
+            if status == DealerPortalPushStatus.FAILED and error:
+                # The same failure for the same account within a day is not
+                # news (e.g. 409 SESSION_ALREADY_ACTIVE on every new stock
+                # file until the session is freed) -- alert once, not 60 times.
+                from datetime import timedelta
+
+                earlier = (
+                    session.query(DealerPortalPush)
+                    .filter(
+                        DealerPortalPush.account_key == account,
+                        DealerPortalPush.id != push_id,
+                        DealerPortalPush.error.like(error[:80] + "%"),
+                        DealerPortalPush.created_at >= now_ist_naive() - timedelta(hours=24),
+                    )
+                    .first()
+                )
+                if earlier is not None:
+                    logger.info("Dealer Portal %s: same failure as push %s -- not alerting again.", account, earlier.id)
+                    return
         landed = (getattr(upload, "inserted_count", 0) or 0) + (getattr(upload, "updated_count", 0) or 0)
         refused = getattr(upload, "failed_count", 0) or 0
         if status == DealerPortalPushStatus.FAILED:
@@ -373,7 +401,7 @@ def retry_failed_pushes() -> int:
             .order_by(DealerPortalPush.created_at.asc())
             .all()
         )
-        pending = [(row.id, row.account_key, row.vendor_id) for row in failed]
+        pending = [(row.id, row.account_key, row.vendor_id, row.attempts or 0) for row in failed]
 
     if not pending:
         return 0
@@ -381,7 +409,7 @@ def retry_failed_pushes() -> int:
     # One retry per ACCOUNT: a fresh delta covers every failed push for it.
     seen: set[str] = set()
     retried = 0
-    for push_id, account_key, vendor_id in pending:
+    for push_id, account_key, vendor_id, attempts in pending:
         if account_key in seen:
             _mark_superseded(push_id)
             continue
@@ -398,14 +426,18 @@ def retry_failed_pushes() -> int:
                 )
                 continue
             with _lock_for(account.key):
-                status = push_account(account, triggering_vendor_id=vendor_id)
+                status = push_account(
+                    account, triggering_vendor_id=vendor_id, prior_attempts=attempts, is_retry=True
+                )
             if status in (
                 DealerPortalPushStatus.SUCCESS,
                 DealerPortalPushStatus.SHADOW,
             ):
                 _mark_superseded(push_id)
             else:
-                _bump_attempts(push_id)
+                # The retry's own new row now carries the count forward; this
+                # row is finished so the chain cannot fork.
+                _retire(push_id, max_attempts)
             retried += 1
         except Exception:  # noqa: BLE001 -- a background sweep never raises
             logger.exception("Dealer Portal retry failed for account %s.", account_key)
@@ -424,6 +456,16 @@ def _mark_superseded(push_id: int) -> None:
                 push.completed_at = now_ist_naive()
     except Exception:  # noqa: BLE001
         logger.exception("Could not close Dealer Portal push %s.", push_id)
+
+
+def _retire(push_id: int, max_attempts: int) -> None:
+    try:
+        with get_session() as session:
+            push = session.get(DealerPortalPush, push_id)
+            if push is not None:
+                push.attempts = max(push.attempts or 0, max_attempts)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not retire Dealer Portal push %s.", push_id)
 
 
 def _bump_attempts(push_id: int) -> None:
