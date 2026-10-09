@@ -83,6 +83,13 @@ class AdvanceOrderSettings:
     # Case 2: how long a dealer-stock order may take, end to end, before what
     # is still open is reported to a person (Founder: 12 hours).
     dealer_stock_window_hours: int = max(1, _int("ADVANCE_ORDER_DEALER_STOCK_WINDOW_HOURS", 12))
+    # ADVANCE orders (case 3): if no vendor has answered a part within this
+    # many hours of the FIRST vendor question going out, the part is "not
+    # found" and the sales bot tells the customer so (it polls the order).
+    # Counted from the first question, not the order, so an order that comes
+    # in after vendor hours is not timed out before anyone was asked.
+    # 0 = no limit (the old behaviour). Founder, 9 Oct 2026: 9 hours.
+    advance_deadline_hours: int = max(0, _int("ADVANCE_ORDER_DEADLINE_HOURS", 9))
 
     # --- handing the answer back to the sales bot --------------------------
     # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},

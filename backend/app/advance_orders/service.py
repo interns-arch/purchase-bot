@@ -507,6 +507,9 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
             q.status = m.Q_SENT
             q.sent_at = now
             q.deadline_at = now + timedelta(minutes=cfg.vendor_wait_minutes)
+            if order.kind == m.KIND_ADVANCE and order.deadline_at is None and cfg.advance_deadline_hours:
+                # The overall "not found" clock starts with the first question.
+                order.deadline_at = now + timedelta(hours=cfg.advance_deadline_hours)
             logger.info(
                 "Advance order %s: asked vendor %s about %s (%s).",
                 order.id,
@@ -580,7 +583,7 @@ def tick(session: Session, now: datetime | None = None) -> None:
     session.flush()
     for order in session.execute(select(m.AdvanceOrder).where(m.AdvanceOrder.status == m.ASKING)).scalars():
         before = _snapshot(order)
-        if order.kind == m.KIND_DEALER_STOCK and order.deadline_at is not None and now >= order.deadline_at:
+        if order.deadline_at is not None and now >= order.deadline_at:
             _expire(order, session)
         else:
             _advance(order, session, now)
@@ -593,7 +596,8 @@ def _expire(order: m.AdvanceOrder, session: Session) -> None:
     open_lines = [line for line in order.lines if line.status == m.LINE_ASKING]
     for line in open_lines:
         line.status = m.LINE_UNAVAILABLE
-        line.note = f"not found within {cfg.dealer_stock_window_hours} h"
+        hours = cfg.dealer_stock_window_hours if order.kind == m.KIND_DEALER_STOCK else cfg.advance_deadline_hours
+        line.note = f"not found within {hours} h"
     for q in session.execute(
         select(m.AdvanceVendorQuery).where(
             m.AdvanceVendorQuery.advance_order_id == order.id,
