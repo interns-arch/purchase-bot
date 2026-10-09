@@ -107,8 +107,10 @@ def _tell_internal(session: Session, body: str) -> None:
 
 # ------------------------------------------------------------------ helpers
 def _brand(value: str | None) -> str:
-    b = str(value or "").strip().upper()
-    return b or cfg.default_brand
+    """The VENDOR BRAND MAPPING's spelling ('MARUTI' -> 'MARUTI SUZUKI')."""
+    from backend.app.advance_orders.brands import canonical_brand
+
+    return canonical_brand(value) or cfg.default_brand
 
 
 def _fmt_day(d: date | None) -> str:
@@ -209,7 +211,11 @@ def _brand_for_line(part_number: str, given: str | None, session: Session) -> st
     if part is not None and part.brand:
         return _brand(part.brand)
     hint = session.execute(select(m.PartBrandHint).where(m.PartBrandHint.part_number == key)).scalar_one_or_none()
-    return _brand(hint.brand if hint is not None else None)
+    if hint is not None:
+        return _brand(hint.brand)
+    from backend.app.advance_orders.brands import brand_from_pattern
+
+    return _brand(brand_from_pattern(key))
 
 
 # ------------------------------------------------------------------ create

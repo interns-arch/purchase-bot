@@ -200,7 +200,34 @@ def _schedule_ai_learning() -> None:
     logger.info("AI learning enabled -- the assistant reviews its chats daily at 21:00 IST.")
 
 
+def _schedule_part_brand_refresh() -> None:
+    """Advance orders route a part to its brand's vendors; the part -> brand
+    list is rebuilt nightly from the Brand column of that day's stock files."""
+    from backend.app.advance_orders.config import advance_order_settings
+
+    if not advance_order_settings.enabled:
+        return
+
+    def _refresh() -> None:
+        from backend.app.advance_orders.brands import refresh_hints_from_stock
+        from core.db import get_session
+
+        with get_session() as session:
+            refresh_hints_from_stock(session)
+
+    _scheduler.add_job(
+        lambda: _run_safely("part_brand_refresh", _refresh),
+        "cron",
+        hour=22,
+        minute=0,
+        timezone=_IST_TZ,
+        id="part_brand_refresh",
+        replace_existing=True,
+    )
+
+
 def start_scheduler() -> None:
+    _schedule_part_brand_refresh()
     _schedule_ai_learning()
     _schedule_whatsapp_daily_jobs()
     _schedule_advance_orders()
