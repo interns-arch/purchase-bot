@@ -501,6 +501,22 @@ def _question_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], want_
     return f"Namaste, Cartrends purchase desk se.\n{ask}\n{rows}{by}\n\n{example}"
 
 
+def _vendor_template_ready() -> bool:
+    """Use the vendor-question template only once Meta has APPROVED it --
+    it reaches vendors who have never written to the bot (the 24-hour rule).
+    Until then the plain question is sent, as before."""
+    if not cfg.vendor_template:
+        return False
+    try:
+        from backend.app.integrations.whatsapp.daily_stock import _meta_templates
+
+        status, _params = _meta_templates().get(cfg.vendor_template, ("", 0))
+        return status == "APPROVED"
+    except Exception:  # noqa: BLE001 -- fall back to the plain question
+        logger.exception("Could not check the advance-order template status.")
+        return False
+
+
 def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
     queued = session.execute(
         select(m.AdvanceVendorQuery).where(
@@ -521,9 +537,10 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         numbers = _vendor_numbers(q.vendor_id, session)
         delivered: list[str] = []
         sent_ids: dict[str, str] = {}
+        use_template = _vendor_template_ready()
         for number in numbers:
             try:
-                if cfg.vendor_template:
+                if use_template:
                     message_id = _send_template(
                         number,
                         cfg.vendor_template,
