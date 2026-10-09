@@ -115,6 +115,45 @@ def _fmt_day(d: date | None) -> str:
     return d.strftime("%d %b").lstrip("0") if d else ""
 
 
+def _vendor_window() -> tuple[int, int] | None:
+    """(start, end) of vendor hours in minutes after midnight, or None."""
+    try:
+        start_text, end_text = cfg.vendor_hours.split("-")
+        sh, sm = (int(x) for x in start_text.strip().split(":"))
+        eh, em = (int(x) for x in end_text.strip().split(":"))
+    except ValueError:
+        return None
+    start, end = sh * 60 + sm, eh * 60 + em
+    return (start, end) if end > start else None
+
+
+def _add_vendor_hours(start: datetime, minutes: int) -> datetime:
+    """`start` + `minutes` counted ONLY inside vendor hours (e.g. 09:00-21:00):
+    a vendor asked at 17:00 with 9 hours gets 4 that evening and 5 the next
+    morning -> 14:00 next day, never 02:00 at night (Founder, 9 Oct 2026)."""
+    window = _vendor_window()
+    if window is None:
+        return start + timedelta(minutes=minutes)
+    open_at, close_at = window
+    current = start
+    left = minutes
+    while left > 0:
+        day = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        opens = day + timedelta(minutes=open_at)
+        closes = day + timedelta(minutes=close_at)
+        if current < opens:
+            current = opens
+        if current >= closes:
+            current = opens + timedelta(days=1)
+            continue
+        usable = (closes - current).total_seconds() / 60
+        if left <= usable:
+            return current + timedelta(minutes=left)
+        left -= usable
+        current = opens + timedelta(days=1)
+    return current
+
+
 def _in_vendor_hours(now: datetime) -> bool:
     try:
         start_text, end_text = cfg.vendor_hours.split("-")
@@ -506,10 +545,12 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         if delivered:
             q.status = m.Q_SENT
             q.sent_at = now
-            q.deadline_at = now + timedelta(minutes=cfg.vendor_wait_minutes)
+            # Both clocks run in VENDOR HOURS only -- no vendor is timed out
+            # overnight while he is asleep.
+            q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
             if order.kind == m.KIND_ADVANCE and order.deadline_at is None and cfg.advance_deadline_hours:
                 # The overall "not found" clock starts with the first question.
-                order.deadline_at = now + timedelta(hours=cfg.advance_deadline_hours)
+                order.deadline_at = _add_vendor_hours(now, cfg.advance_deadline_hours * 60)
             logger.info(
                 "Advance order %s: asked vendor %s about %s (%s).",
                 order.id,
