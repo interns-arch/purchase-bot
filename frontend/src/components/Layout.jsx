@@ -1,6 +1,4 @@
-import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { useAuth } from "../context/AuthContext";
-import { useToast } from "../context/ToastContext";
+import { NavLink, useLocation } from "react-router-dom";
 
 // Grouped by WHAT THE PERSON IS DOING, not by data type -- a flat list of
 // thirteen names made it impossible to guess which page answered which
@@ -12,36 +10,36 @@ const NAV_GROUPS = [
   {
     label: "Overview",
     items: [
-      { to: "/command-centre", label: "Command Centre" },
-      { to: "/chats", label: "Chats" },
-      { to: "/vendor-priority", label: "Vendor Priority" },
+      { to: "/command-centre", label: "Command Centre", icon: "🏠" },
+      { to: "/vendor-priority", label: "Vendor Priority", icon: "⭐" },
+      { to: "/advance-orders", label: "Advance Orders", icon: "📦" },
+      { to: "/chats", label: "Chats", icon: "💬" },
     ],
   },
   {
     label: "Daily work",
     items: [
-      { to: "/vendor-inventory", label: "Vendor Inventory" },
-      { to: "/customer-orders", label: "Customer Orders" },
-      { to: "/advance-orders", label: "Advance Orders" },
-      { to: "/vendor-comparison", label: "Vendor Comparison" },
-      { to: "/purchase-orders", label: "Purchase Orders" },
-      { to: "/vendor-invoices", label: "Vendor Invoices" },
-      { to: "/delivery-tracking", label: "Delivery Tracking" },
+      { to: "/vendor-inventory", label: "Vendor Inventory", icon: "🗂️" },
+      { to: "/customer-orders", label: "Customer Orders", icon: "🧾" },
+      { to: "/vendor-comparison", label: "Vendor Comparison", icon: "⚖️" },
+      { to: "/purchase-orders", label: "Purchase Orders", icon: "📝" },
+      { to: "/vendor-invoices", label: "Vendor Invoices", icon: "💰" },
+      { to: "/delivery-tracking", label: "Delivery Tracking", icon: "🚚" },
     ],
   },
   {
     label: "Look up",
     items: [
-      { to: "/part-intelligence", label: "Part Intelligence" },
-      { to: "/vendor-performance", label: "Vendor Performance" },
+      { to: "/part-intelligence", label: "Part Intelligence", icon: "🔎" },
+      { to: "/vendor-performance", label: "Vendor Performance", icon: "📈" },
     ],
   },
   {
     label: "System",
     items: [
-      { to: "/file-inbox", label: "File Inbox" },
-      { to: "/audit-log", label: "Audit Log" },
-      { to: "/settings", label: "Settings" },
+      { to: "/file-inbox", label: "File Inbox", icon: "📥" },
+      { to: "/audit-log", label: "Audit Log", icon: "🕘" },
+      { to: "/settings", label: "Settings", icon: "⚙️" },
     ],
   },
 ];
@@ -64,30 +62,33 @@ const PAGE_PURPOSE = {
   "/file-inbox": "Every file received — imported, failed or needing review.",
   "/audit-log": "Who changed what, and when.",
   "/settings": "Account, integrations and system status.",
+  "/vendor-priority":
+    "Brand-wise vendor order the bot follows — #1 is asked first. Add vendors, reorder, see who replies best.",
+  "/chats": "Every WhatsApp message the bot sent and received, live.",
 };
 
+const TODAY = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+});
+
 export function Layout({ children, title, subtitle }) {
-  const { user, logout } = useAuth();
-  const navigate = useNavigate();
-  const toast = useToast();
   const location = useLocation();
   const purpose = subtitle ?? PAGE_PURPOSE[location.pathname];
 
-  async function handleLogout() {
-    try {
-      await logout();
-      toast.success("You have been logged out.");
-    } catch {
-      toast.error("Logout failed, but your session was cleared locally.");
-    } finally {
-      navigate("/login", { replace: true });
-    }
-  }
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar__brand">Cartrends</div>
+        <div className="sidebar__brand">
+          <span className="sidebar__logo">🛒</span>
+          <span>
+            Cartrends
+            <span className="sidebar__brand-sub">Purchase Bot</span>
+          </span>
+        </div>
         <nav className="sidebar__nav">
           {NAV_GROUPS.map((group) => (
             <div className="sidebar__group" key={group.label}>
@@ -100,6 +101,7 @@ export function Layout({ children, title, subtitle }) {
                     "sidebar__link" + (isActive ? " sidebar__link--active" : "")
                   }
                 >
+                  <span className="sidebar__icon" aria-hidden="true">{item.icon}</span>
                   <span>{item.label}</span>
                 </NavLink>
               ))}
@@ -114,10 +116,11 @@ export function Layout({ children, title, subtitle }) {
             {purpose ? <p className="topbar__purpose">{purpose}</p> : null}
           </div>
           <div className="topbar__user">
-            <span className="topbar__username">{user?.username}</span>
-            <button type="button" className="btn btn--ghost" onClick={handleLogout}>
-              Log out
-            </button>
+            <span className="topbar__date">{TODAY.format(new Date())}</span>
+            <span className="bot-status" title="WhatsApp bot +91 92170 30414">
+              <span className="bot-status__dot" />
+              Bot live
+            </span>
           </div>
         </header>
         <main className="app-content">{children}</main>
