@@ -33,7 +33,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.advance_orders import callback, models as m, quotes, ranking
+from backend.app.advance_orders import callback, escalation, models as m, quotes, ranking
 from backend.app.advance_orders.config import advance_order_settings as cfg
 from backend.app.advance_orders.parser import LineAnswer, parse_vendor_reply
 from core.logging_setup import get_logger
@@ -369,6 +369,17 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                 ).scalars()
             ]
             unreachable = bool(brand_queries) and all(q.status == m.Q_FAILED for q in brand_queries)
+            # Founder, 10 Oct 2026: a brand nobody supplies, or vendors who
+            # never answered, go to Prateek sir. Only a clear "no" from every
+            # vendor asked is final.
+            silent = any(q.status in (m.Q_TIMEOUT, m.Q_FAILED) for q in brand_queries)
+            if order.kind == m.KIND_ADVANCE and escalation.enabled() and (not asked or silent):
+                reason = (
+                    f"brand {brand} is not in the vendor list" if not asked
+                    else f"brand {brand} vendors did not answer"
+                )
+                escalation.escalate(order, lines, reason, session, now)
+                continue
             for line in lines:
                 line.status = m.LINE_UNAVAILABLE
                 if unreachable:
@@ -597,7 +608,7 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
 def _settle(order: m.AdvanceOrder) -> None:
     if order.status != m.ASKING:
         return
-    if any(line.status == m.LINE_ASKING for line in order.lines):
+    if any(line.status in (m.LINE_ASKING, m.LINE_ESCALATED) for line in order.lines):
         return
     if order.kind == m.KIND_DEALER_STOCK:
         # The vendors have already been ordered from; nothing waits for a
@@ -656,7 +667,32 @@ def tick(session: Session, now: datetime | None = None) -> None:
 
 def _expire(order: m.AdvanceOrder, session: Session) -> None:
     """Case 2's window is over: what is still open is not found -- told to a
-    person -- and what was ordered stands."""
+    person -- and what was ordered stands.
+
+    Advance orders: parts still waiting on vendors go to Prateek sir first
+    (escalation.py); parts already with him and unanswered are not found."""
+    if order.kind == m.KIND_ADVANCE and escalation.enabled():
+        asking = [line for line in order.lines if line.status == m.LINE_ASKING]
+        if asking:
+            for q in session.execute(
+                select(m.AdvanceVendorQuery).where(
+                    m.AdvanceVendorQuery.advance_order_id == order.id,
+                    m.AdvanceVendorQuery.status.in_([m.Q_QUEUED, m.Q_SENT]),
+                )
+            ).scalars():
+                q.status = m.Q_TIMEOUT
+            escalation.escalate(
+                order, asking, f"no vendor answered within {cfg.advance_deadline_hours} working hours",
+                session, now_ist_naive(),
+            )
+            return
+        for line in order.lines:
+            if line.status == m.LINE_ESCALATED:
+                line.status = m.LINE_UNAVAILABLE
+                line.note = f"no answer from Prateek sir within {cfg.escalation_hours} h"
+        session.flush()
+        _settle(order)
+        return
     open_lines = [line for line in order.lines if line.status == m.LINE_ASKING]
     for line in open_lines:
         line.status = m.LINE_UNAVAILABLE

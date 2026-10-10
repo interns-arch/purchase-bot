@@ -90,6 +90,14 @@ class AdvanceOrderSettings:
     # in after vendor hours is not timed out before anyone was asked.
     # 0 = no limit (the old behaviour). Founder, 9 Oct 2026: 9 hours.
     advance_deadline_hours: int = max(0, _int("ADVANCE_ORDER_DEADLINE_HOURS", 9))
+    # Parts no vendor could answer (brand not in the mapping, or its vendors
+    # silent) go to these people -- Prateek sir. Blank = the old behaviour
+    # (not found straight away). See escalation.py.
+    escalation_numbers: list[str] = [
+        part.strip() for part in (os.environ.get("ADVANCE_ORDER_ESCALATION_NUMBERS") or "").split(",") if part.strip()
+    ]
+    # How long (vendor hours) he has to answer before the part is not found.
+    escalation_hours: int = max(1, _int("ADVANCE_ORDER_ESCALATION_HOURS", 9))
 
     # --- handing the answer back to the sales bot --------------------------
     # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},

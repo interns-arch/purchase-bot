@@ -36,6 +36,8 @@ LINE_AVAILABLE = "available"
 LINE_UNAVAILABLE = "unavailable"
 LINE_ORDERED = "ordered"
 LINE_CANCELLED = "cancelled"
+# Handed to a person (Prateek sir): no vendor for the brand, or none answered.
+LINE_ESCALATED = "escalated"
 
 # AdvanceVendorQuery.status
 Q_QUEUED = "queued"  # waiting for vendor hours

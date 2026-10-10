@@ -107,9 +107,13 @@ def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
     if not advance_order_settings.enabled or not (message.text or "").strip():
         return False
     try:
+        from backend.app.advance_orders import escalation
         from backend.app.advance_orders import service as advance_orders
 
         with get_session() as session:
+            # Prateek sir answering an escalated part comes first.
+            if escalation.handle_reply(message.sender, message.text, session):
+                return True
             return advance_orders.handle_vendor_text(message.sender, message.text, session)
     except Exception:  # noqa: BLE001 -- never let this block the normal text handling
         logger.exception("Advance-order reply check failed for %s -- continuing.", message.sender)
