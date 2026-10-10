@@ -27,6 +27,7 @@ Sending goes through `_send_text` / `_send_template`, which tests replace."""
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -920,6 +921,96 @@ def handle_delivery_failure(message_id: str, recipient: str, error_code: int | N
 
 
 # ------------------------------------------------------------------ replies
+_REDIRECT_MOBILE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?([6-9]\d{4}[\s-]?\d{5})(?!\d)")
+_REDIRECT_WORDS = re.compile(
+    r"(this|that|other|another|below|given|following|my|is|iss|us|dusre|doosre|dusra|naye|new)\s+"
+    r"(no\.?|number|num|contact|mobile|whatsapp)\b"
+    r"|\b(send|bhej\w*|forward|share|contact|call|whatsapp)\b.{0,40}\b(on|pe|par|to)\b.{0,25}\b(no\.?|number|num|contact|mobile|whatsapp)\b"
+    r"|^\[contact\]",
+    re.IGNORECASE,
+)
+
+
+def _vendor_redirect(
+    order: m.AdvanceOrder,
+    q: m.AdvanceVendorQuery,
+    lines: list[m.AdvanceOrderLine],
+    sender: str,
+    text: str,
+    session: Session,
+    now: datetime,
+) -> bool:
+    """Founder, 10 Oct 2026 (A-One Trading: "Please send these inquiries on
+    this number"). True when the reply was about WHERE to ask, not an answer."""
+    body = text or ""
+    found = [
+        "91" + re.sub(r"\D", "", mt.group(1)) for mt in _REDIRECT_MOBILE.finditer(body)
+    ]
+    # A 10-digit part number is not a phone number.
+    part_digits = {re.sub(r"\D", "", line.part_number)[-10:] for line in lines}
+    found = [n for n in dict.fromkeys(found) if n != sender and n[-10:] not in part_digits]
+    if not found and not _REDIRECT_WORDS.search(body):
+        return False
+    vendor = session.get(Vendor, q.vendor_id)
+    label = vendor.name if vendor else "vendor"
+    parts = ", ".join(f"{line.part_number} x{line.qty}" for line in lines)
+    if not found:
+        _send_text(
+            sender,
+            "Ji zaroor 🙏 Kripya wo WhatsApp number yahan bhej dijiye (10 digit) jis par "
+            "inquiries bhejni hain — main wahin bhej dunga.",
+        )
+        logger.info("Advance order %s: %s asked to use another number -- asked which.", order.id, label)
+        return True
+
+    new = found[0]
+    if session.execute(
+        select(m.AdvanceVendorContact).where(
+            m.AdvanceVendorContact.vendor_id == q.vendor_id, m.AdvanceVendorContact.whatsapp_number == new
+        )
+    ).scalar_one_or_none() is None:
+        session.add(m.AdvanceVendorContact(vendor_id=q.vendor_id, whatsapp_number=new, source=f"vendor ({sender})"))
+    try:
+        if _vendor_template_ready():
+            message_id = _send_template(
+                new, cfg.vendor_template, cfg.template_language,
+                [
+                    q.brand if q.brand != cfg.default_brand else "parts",
+                    "; ".join(f"{line.part_number} x{line.qty}" for line in lines),
+                    _fmt_day(order.needed_by) or "jaldi",
+                ],
+            )
+        else:
+            message_id = _send_text(new, _question_text(order, lines, quotes.wants_rate(quotes.brand_terms(q.vendor_id, q.brand, session))))
+    except Exception:  # noqa: BLE001
+        logger.exception("Advance order %s: enquiry to the new number %s failed.", order.id, new)
+        message_id = None
+    # The new number first; the old one still counts if he answers from it.
+    # A fresh 2-hour buffer and follow-ups for the new number.
+    q.numbers = [new, *[n for n in (q.numbers or []) if n != new]]
+    ids = dict(q.message_ids or {})
+    if isinstance(message_id, str) and message_id:
+        ids[message_id] = new
+    q.message_ids = ids or None
+    q.sent_at = now
+    q.followups_sent = 0
+    q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
+    session.flush()
+    _send_text(sender, f"Dhanyavaad 🙏 Inquiry +{new} par bhej di hai, aage se isi number par bhejenge.")
+    note = (
+        f"📞 Advance order AO-{order.id}: {label} ne kaha inquiries is number par bhejo: +{new}.\n"
+        f"Wahan bhej diya ({parts}) aur {label} ke contact mein save kar liya — aage se wahin jayegi."
+    )
+    for person in dict.fromkeys(_normalize(n) for n in cfg.escalation_numbers or []):
+        if person:
+            try:
+                _send_text(person, note)
+            except Exception:  # noqa: BLE001
+                logger.exception("Advance order %s: could not tell %s about the new number.", order.id, person)
+    logger.info("Advance order %s: %s redirected enquiries to %s.", order.id, label, new)
+    return True
+
+
 def handle_vendor_text(sender: str, text: str, session: Session, now: datetime | None = None) -> bool:
     """True when this text was a reply to an open advance-order question (and
     so must not be handled as anything else)."""
@@ -992,6 +1083,11 @@ def handle_vendor_text(sender: str, text: str, session: Session, now: datetime |
         return False
     by_id = {line.id: line for line in order.lines}
     lines = [by_id[i] for i in q.line_ids if i in by_id and by_id[i].status == m.LINE_ASKING]
+    # "Please send these inquiries on this number": the vendor wants another
+    # number used. With the number (typed or a contact card) -> ask there,
+    # save it, tell Prateek sir. Without it -> ask him for it.
+    if _vendor_redirect(order, q, lines, number, text, session, now):
+        return True
     terms = quotes.brand_terms(q.vendor_id, q.brand, session)
     want_rate = quotes.wants_rate(terms)
     answers = parse_vendor_reply(

@@ -138,6 +138,24 @@ def parse_text_messages(payload: dict) -> list[IncomingWhatsAppText]:
             if not is_for_this_number(value):
                 continue
             for raw_message in value.get("messages", []):
+                if raw_message.get("type") == "contacts":
+                    # A shared contact card ("send inquiries to this person"):
+                    # handed on as text so the vendor-reply code can read the
+                    # number in it.
+                    cards = []
+                    for card in raw_message.get("contacts") or []:
+                        name = (card.get("name") or {}).get("formatted_name") or ""
+                        phones = [p.get("wa_id") or p.get("phone") or "" for p in card.get("phones") or []]
+                        cards.append(" ".join(x for x in [name, *phones] if x))
+                    if raw_message.get("from") and cards:
+                        texts.append(
+                            IncomingWhatsAppText(
+                                sender=raw_message["from"],
+                                message_id=raw_message.get("id", ""),
+                                text="[contact] " + " ; ".join(cards),
+                            )
+                        )
+                    continue
                 if raw_message.get("type") != _TEXT_MESSAGE_TYPE:
                     continue
 

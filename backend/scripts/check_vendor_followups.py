@@ -164,6 +164,46 @@ def main() -> int:
     with get_session() as s:
         check("not escalated", s.get(m.AdvanceOrder, oid2).lines[0].status == m.LINE_ASKING)
 
+    print("\n[6] vendor: 'Please send these inquiries on this number' -> ask, then use it")
+    sent.clear()
+    with get_session() as s:
+        order = m.AdvanceOrder(kind=m.KIND_ADVANCE, customer_name="Cust 3")
+        order.lines = [m.AdvanceOrderLine(part_number="2521203000", brand="HYUNDAI", qty=5)]
+        s.add(order)
+        s.flush()
+        service._advance(order, s, t0)
+        oid3 = order.id
+    sent.clear()
+    with get_session() as s:
+        handled = service.handle_vendor_text("919100000001", "Please send these inquiries on this number", s, t0 + timedelta(minutes=5))
+    check("handled as a redirect", handled)
+    check("vendor asked for the number", any(to == "919100000001" and "number" in b for to, b in sent))
+    check("no 'samajh nahi aaya' to the team", not any("samajh nahi" in b for _, b in sent))
+    sent.clear()
+    with get_session() as s:
+        service.handle_vendor_text("919100000001", "98290 11122", s, t0 + timedelta(minutes=8))
+        q = s.execute(select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.advance_order_id == oid3)).scalar_one()
+        check("new number first on the question", q.numbers[0] == "919829011122")
+        check("fresh buffer for the new number", q.followups_sent == 0 and q.sent_at == t0 + timedelta(minutes=8))
+        c = s.execute(select(m.AdvanceVendorContact).where(m.AdvanceVendorContact.whatsapp_number == "919829011122")).scalar_one_or_none()
+        check("new number saved as the vendor's contact", c is not None and c.vendor_id == alpha_id)
+    check("enquiry sent to the new number", any(to == "919829011122" for to, _ in sent))
+    check("Prateek sir told", any(to == PRATEEK and "919829011122" in b for to, b in sent))
+    check("vendor thanked", any(to == "919100000001" and "Dhanyavaad" in b for to, b in sent))
+    sent.clear()
+    with get_session() as s:
+        service.handle_vendor_text("919829011122", "haan 2 din", s, t0 + timedelta(minutes=20))
+        check("answer from the new number is read", s.get(m.AdvanceOrder, oid3).lines[0].status == m.LINE_AVAILABLE)
+
+    print("\n[7] a shared contact card is read as text")
+    from backend.app.integrations.whatsapp import parser as wa_parser
+    wa_parser.is_for_this_number = lambda value: True
+    payload = {"entry": [{"changes": [{"value": {
+        "messages": [{"from": "919100000001", "id": "x", "type": "contacts",
+                      "contacts": [{"name": {"formatted_name": "Ramesh"}, "phones": [{"wa_id": "919829033344"}]}]}]}}]}]}
+    texts = wa_parser.parse_text_messages(payload)
+    check("contact card -> '[contact] Ramesh 919829033344'", bool(texts) and texts[0].text == "[contact] Ramesh 919829033344")
+
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0
 
