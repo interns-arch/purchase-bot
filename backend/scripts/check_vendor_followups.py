@@ -204,6 +204,27 @@ def main() -> int:
     texts = wa_parser.parse_text_messages(payload)
     check("contact card -> '[contact] Ramesh 919829033344'", bool(texts) and texts[0].text == "[contact] Ramesh 919829033344")
 
+    print("\n[8] dashboard: add a NEW vendor with a phone at #1 -> the bot asks him first")
+    sent.clear()
+    with get_session() as s:
+        v = service.add_vendor_to_brand("HYUNDAI", "Delta Hyundai Parts", "98111 44455", s, source="dashboard", position=1)
+        did = v.id
+        order = [r.vendor_id for r in s.execute(select(m.VendorBrand).where(m.VendorBrand.brand == "HYUNDAI").order_by(m.VendorBrand.priority)).scalars()]
+        check("Delta is #1 on HYUNDAI, the rest moved down", order[0] == did and len(order) == len(set(order)))
+        reg = s.execute(select(_wa_models.WhatsAppRegisteredNumber).where(_wa_models.WhatsAppRegisteredNumber.whatsapp_number == "919811144455")).first()
+        check("not put in the stock registry", reg is None)
+    with get_session() as s:
+        o = m.AdvanceOrder(kind=m.KIND_ADVANCE, customer_name="Cust 4")
+        o.lines = [m.AdvanceOrderLine(part_number="86513C9000", brand="HYUNDAI", qty=1)]
+        s.add(o)
+        s.flush()
+        service._advance(o, s, t0)
+    check("next HYUNDAI order asks Delta first", bool(sent) and sent[0][0] == "919811144455")
+    with get_session() as s:
+        again = service.add_vendor_to_brand("HYUNDAI", "Delta Hyundai Parts", "9811144455", s, source="dashboard", position=3)
+        check("adding him again reuses the vendor (no duplicate)", again.id == did)
+        check("...and just moves him to #3", s.execute(select(m.VendorBrand.priority).where(m.VendorBrand.vendor_id == did, m.VendorBrand.brand == "HYUNDAI")).scalar() == 3)
+
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0
 

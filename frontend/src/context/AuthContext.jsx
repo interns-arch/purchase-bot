@@ -17,17 +17,20 @@ export function AuthProvider({ children }) {
     setUnauthorizedHandler(clearSession);
   }, [clearSession]);
 
+  // Always ask the server who we are: with AUTH_DISABLED=true it answers
+  // even without a token, so the site opens with no login screen.
+  const loadUser = useCallback(
+    () =>
+      fetchCurrentUser()
+        .then(setUser)
+        .catch(() => clearSession())
+        .finally(() => setIsLoading(false)),
+    [clearSession]
+  );
+
   useEffect(() => {
-    const token = localStorage.getItem("access_token");
-    if (!token) {
-      setIsLoading(false);
-      return;
-    }
-    fetchCurrentUser()
-      .then(setUser)
-      .catch(() => clearSession())
-      .finally(() => setIsLoading(false));
-  }, [clearSession]);
+    loadUser();
+  }, [loadUser]);
 
   const login = useCallback(async (username, password) => {
     const { access_token: accessToken } = await loginRequest(username, password);
@@ -42,8 +45,9 @@ export function AuthProvider({ children }) {
       await logoutRequest();
     } finally {
       clearSession();
+      loadUser();
     }
-  }, [clearSession]);
+  }, [clearSession, loadUser]);
 
   const value = useMemo(
     () => ({ user, isLoading, isAuthenticated: Boolean(user), login, logout }),

@@ -115,6 +115,13 @@ class VendorBrandIn(BaseModel):
     vendor_ids: list[int]
 
 
+class NewBrandVendorIn(BaseModel):
+    name: str = Field(min_length=1)
+    phone: str | None = None
+    discount_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    position: int | None = Field(default=None, ge=1)  # 1 = asked first; empty = last
+
+
 api_router = APIRouter(prefix="/api/advance-orders", tags=["advance-orders"])
 
 
@@ -230,11 +237,16 @@ def list_vendor_brands(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
         .join(Vendor, Vendor.id == m.VendorBrand.vendor_id)
         .order_by(m.VendorBrand.brand, m.VendorBrand.priority)
     ).all()
+    numbers: dict[int, list[str]] = {}
     for vb, name in rows:
+        if vb.vendor_id not in numbers:
+            numbers[vb.vendor_id] = service._vendor_numbers(vb.vendor_id, db)
         out.setdefault(vb.brand, []).append(
             {
                 "vendor_id": vb.vendor_id,
                 "vendor_name": name,
+                # The numbers the bot asks him on; empty = he cannot be asked.
+                "numbers": numbers[vb.vendor_id],
                 "priority": vb.priority,
                 "active": vb.active,
                 "discount_type": vb.discount_type,
@@ -246,6 +258,26 @@ def list_vendor_brands(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
             }
         )
     return out
+
+
+@desk_router.post("/api/vendor-brands/{brand}/vendors")
+def add_brand_vendor(brand: str, body: NewBrandVendorIn, db: Session = Depends(get_db)) -> dict[str, list[dict]]:
+    """Add a vendor -- new or existing -- with his WhatsApp number to one
+    brand's list (Vendor Priority dashboard). The bot asks him from the next
+    advance order on, in his turn."""
+    phone = (body.phone or "").strip()
+    if phone and len("".join(ch for ch in phone if ch.isdigit())) < 10:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="phone number needs 10 digits")
+    try:
+        service.add_vendor_to_brand(
+            brand, body.name, phone or None, db,
+            source="dashboard", discount_pct=body.discount_pct, position=body.position,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    return list_vendor_brands(db)
 
 
 @desk_router.get("/api/vendor-brands/performance")

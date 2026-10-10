@@ -4,6 +4,7 @@ import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
 import {
+  addBrandVendor,
   getVendorPerformance,
   listVendorBrands,
   listVendorOptions,
@@ -48,6 +49,7 @@ export function VendorPriorityPage() {
   const [brandFilter, setBrandFilter] = useState("");
   const [adding, setAdding] = useState("");
   const [saving, setSaving] = useState(false);
+  const [newVendor, setNewVendor] = useState({ name: "", phone: "", discount: "", position: "" });
 
   async function load() {
     try {
@@ -126,6 +128,34 @@ export function VendorPriorityPage() {
     save([...ids, Number(adding)], `${brand}: ${vendor ? vendor.vendor_name : "vendor"} added at the bottom.`);
     setAdding("");
   }
+  async function addNew(event) {
+    event.preventDefault();
+    const name = newVendor.name.trim();
+    const digits = newVendor.phone.replace(/\D/g, "");
+    if (!name) return toast.error("Vendor name is required.");
+    if (digits.length < 10) return toast.error("Enter the vendor's 10-digit WhatsApp number.");
+    setSaving(true);
+    try {
+      setBrands(
+        await addBrandVendor(brand, {
+          name,
+          phone: newVendor.phone,
+          discount_pct: newVendor.discount === "" ? null : Number(newVendor.discount),
+          position: newVendor.position === "" ? null : Number(newVendor.position),
+        })
+      );
+      const [p, o] = await Promise.all([getVendorPerformance(), listVendorOptions()]);
+      setPerf(p);
+      setOptions(o);
+      setNewVendor({ name: "", phone: "", discount: "", position: "" });
+      toast.success(`${name} added to ${brand}. The bot will ask them in their turn.`);
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not add the vendor."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function sortByPerformance() {
     const order = (perf.brands[brand] || []).map((x) => x.vendor_id).filter((id) => ids.includes(id));
     const rest = ids.filter((id) => !order.includes(id));
@@ -241,6 +271,9 @@ export function VendorPriorityPage() {
                         {index === 0 && "👑 "}
                         {isBest && "⭐ "}
                         {row.vendor_name}
+                        <div style={{ fontSize: "0.78rem", color: row.numbers?.length ? "var(--color-text-muted)" : "var(--color-danger)" }}>
+                          {row.numbers?.length ? row.numbers.map((n) => "+" + n).join(", ") : "⚠ no WhatsApp number - bot cannot ask"}
+                        </div>
                       </td>
                       <td>
                         <ScoreBadge score={scores[row.vendor_id]} littleData={v.little_data} />
@@ -294,6 +327,56 @@ export function VendorPriorityPage() {
             Order by performance
           </button>
         </div>
+      </section>
+
+      <section className="panel">
+        <h3 style={{ fontSize: "0.95rem", margin: "0 0 8px" }}>➕ Add a new vendor to {brand === "*" ? "any brand (*)" : brand}</h3>
+        <form className="toolbar" style={{ gap: 8, flexWrap: "wrap" }} onSubmit={addNew}>
+          <input
+            className="field__input"
+            style={{ maxWidth: 240 }}
+            placeholder="Vendor name"
+            value={newVendor.name}
+            onChange={(e) => setNewVendor({ ...newVendor, name: e.target.value })}
+          />
+          <input
+            className="field__input"
+            style={{ maxWidth: 180 }}
+            placeholder="WhatsApp number"
+            inputMode="tel"
+            value={newVendor.phone}
+            onChange={(e) => setNewVendor({ ...newVendor, phone: e.target.value })}
+          />
+          <input
+            className="field__input"
+            style={{ maxWidth: 130 }}
+            placeholder="Discount % (opt.)"
+            inputMode="decimal"
+            value={newVendor.discount}
+            onChange={(e) => setNewVendor({ ...newVendor, discount: e.target.value })}
+          />
+          <select
+            className="field__input"
+            style={{ maxWidth: 150 }}
+            value={newVendor.position}
+            onChange={(e) => setNewVendor({ ...newVendor, position: e.target.value })}
+          >
+            <option value="">Priority: last</option>
+            {[...rows, null].map((_, i) => (
+              <option key={i} value={i + 1}>
+                Priority #{i + 1}
+              </option>
+            ))}
+          </select>
+          <button type="submit" className="btn btn--primary" disabled={saving || !brand}>
+            Add vendor
+          </button>
+        </form>
+        <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "8px 0 0" }}>
+          An existing vendor with the same name or number is reused, not duplicated. No discount = the bot asks them for
+          a rate. They are asked from the next advance order on, in their priority turn; they do not get the daily
+          stock request.
+        </p>
       </section>
     </Layout>
   );

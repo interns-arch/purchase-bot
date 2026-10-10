@@ -763,6 +763,73 @@ def _send_followups(session: Session, now: datetime) -> None:
     session.flush()
 
 
+def add_vendor_to_brand(
+    brand: str,
+    name: str,
+    phone: str | None,
+    session: Session,
+    *,
+    source: str,
+    discount_pct: Decimal | None = None,
+    position: int | None = None,
+) -> Vendor:
+    """Put a vendor (found by number or name, else created) on a brand's
+    list, with his WhatsApp number as an ENQUIRY contact -- never the stock
+    registry (see AdvanceVendorContact). `position` 1 = asked first; None =
+    last. The very next advance order for the brand asks him in that turn."""
+    from sqlalchemy import func
+
+    from core.services import vendor_code_service, vendor_service
+
+    key = _brand(brand) if brand.strip() != cfg.default_brand else cfg.default_brand
+    number = _normalize(phone) if phone else ""
+    vendor = None
+    if number:
+        contact = session.execute(
+            select(m.AdvanceVendorContact).where(m.AdvanceVendorContact.whatsapp_number == number)
+        ).scalars().first()
+        if contact is not None:
+            vendor = session.get(Vendor, contact.vendor_id)
+    if vendor is None and name.strip():
+        vendor = vendor_service.get_vendor_by_name(name.strip(), session)
+    if vendor is None:
+        if not name.strip():
+            raise ValueError("vendor name is required")
+        vendor = vendor_service.create_vendor(name.strip(), session, whatsapp_number=number or None)
+        vendor.vendor_code = vendor_code_service.generate_vendor_code(vendor.name, session)
+    vendor.active = True
+    if number and session.execute(
+        select(m.AdvanceVendorContact).where(
+            m.AdvanceVendorContact.vendor_id == vendor.id, m.AdvanceVendorContact.whatsapp_number == number
+        )
+    ).scalar_one_or_none() is None:
+        session.add(m.AdvanceVendorContact(vendor_id=vendor.id, whatsapp_number=number, source=source))
+
+    rows = list(
+        session.execute(
+            select(m.VendorBrand).where(m.VendorBrand.brand == key).order_by(m.VendorBrand.priority)
+        ).scalars()
+    )
+    mine = next((r for r in rows if r.vendor_id == vendor.id), None)
+    if mine is None:
+        mine = m.VendorBrand(brand=key, vendor_id=vendor.id, discount_note=f"added from {source}")
+        session.add(mine)
+    else:
+        rows.remove(mine)
+    mine.active = True
+    if discount_pct is not None:
+        mine.discount_type = m.DISC_PERCENT
+        mine.discount_pct = discount_pct
+    elif mine.discount_pct is None:
+        mine.discount_type = m.DISC_RATE  # no standing % -> he is asked for a rate
+    index = len(rows) if position is None else max(0, min(len(rows), position - 1))
+    rows.insert(index, mine)
+    for i, row in enumerate(rows, start=1):
+        row.priority = i
+    session.flush()
+    return vendor
+
+
 def assign_vendor(
     order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], name: str, number: str, session: Session, now: datetime
 ) -> Vendor:

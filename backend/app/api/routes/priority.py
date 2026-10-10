@@ -21,7 +21,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.advance_orders import models as m
-from backend.app.api.routes.advance_orders import list_vendor_brands, put_vendor_brand, VendorBrandIn
+from backend.app.api.routes.advance_orders import (
+    NewBrandVendorIn,
+    VendorBrandIn,
+    add_brand_vendor,
+    list_vendor_brands,
+    put_vendor_brand,
+)
 from backend.app.database.session import get_db
 from core.models import Vendor
 
@@ -62,6 +68,13 @@ def vendors(db: Session = Depends(get_db)) -> list[dict]:
         .order_by(Vendor.name)
     ).all()
     return [{"vendor_id": i, "vendor_name": n, "vendor_code": c} for i, n, c in rows]
+
+
+@router.post("/brands/{brand}/vendors")
+def add_vendor(brand: str, body: NewBrandVendorIn, db: Session = Depends(get_db)) -> dict[str, list[dict]]:
+    """Add a vendor with his WhatsApp number to a brand: {name, phone,
+    discount_pct?, position?}. The bot asks him from the next order on."""
+    return add_brand_vendor(brand, body, db)
 
 
 @router.get("/performance")

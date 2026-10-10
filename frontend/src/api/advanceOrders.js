@@ -33,6 +33,11 @@ export async function setBrandVendors(brand, vendorIds) {
   return response.data;
 }
 
+export async function addBrandVendor(brand, vendor) {
+  const response = await apiClient.post(`/api/vendor-brands/${encodeURIComponent(brand)}/vendors`, vendor);
+  return response.data;
+}
+
 export async function getVendorPerformance() {
   const response = await apiClient.get("/api/vendor-brands/performance");
   return response.data;
