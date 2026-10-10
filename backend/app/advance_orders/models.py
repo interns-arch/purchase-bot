@@ -116,6 +116,9 @@ class AdvanceOrder(Base):
     # Case 2's overall window (Founder: 12 hours). Lines still open at this
     # moment are reported as not found, to a person.
     deadline_at: Mapped[datetime | None] = mapped_column(default=None)
+    # Dealer Portal purchase order + transit per vendor, created when the
+    # customer confirms: {vendor_id: {"po": ref, "transit": ref, "error": ...}}.
+    dealer_portal: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     lines: Mapped[list[AdvanceOrderLine]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="AdvanceOrderLine.id"

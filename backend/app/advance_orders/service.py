@@ -928,7 +928,19 @@ def confirm_order(order: m.AdvanceOrder, line_ids: list[int] | None, session: Se
                 _send_text(number, body)
             except Exception:  # noqa: BLE001
                 logger.exception("Advance order %s: order to vendor %s at %s failed.", order.id, vendor_id, number)
-        summary.append(f"{vendor.name if vendor else vendor_id}:\n{rows}")
+        # Dealer Portal: the purchase order and its transit entry.
+        from backend.app.advance_orders import dealer_portal_po
+
+        portal = dealer_portal_po.create_po_and_transit(order, vendor, lines)
+        refs = dict(order.dealer_portal or {})
+        refs[str(vendor_id)] = portal
+        order.dealer_portal = refs
+        portal_line = (
+            f"Dealer Portal: PO {portal['po']} · transit {portal['transit']}"
+            if not portal.get("error")
+            else f"Dealer Portal: FAILED ({portal['error']})"
+        )
+        summary.append(f"{vendor.name if vendor else vendor_id}:\n{rows}\n{portal_line}")
     _tell_internal(
         session,
         f"Advance order #{order.id} CONFIRMED - {order.customer_name or order.customer_phone or 'customer'}"
@@ -1126,6 +1138,7 @@ def order_out(order: m.AdvanceOrder, session: Session) -> dict:
         "id": order.id,
         "external_ref": order.external_ref,
         "status": order.status,
+        "dealer_portal": order.dealer_portal or {},
         "customer": {"portal_id": order.customer_portal_id, "name": order.customer_name, "phone": order.customer_phone},
         "needed_by": order.needed_by.isoformat() if order.needed_by else None,
         "confirmed_at": order.confirmed_at.isoformat() if order.confirmed_at else None,
