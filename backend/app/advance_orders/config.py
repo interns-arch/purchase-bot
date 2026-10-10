@@ -98,6 +98,15 @@ class AdvanceOrderSettings:
     ]
     # How long (vendor hours) he has to answer before the part is not found.
     escalation_hours: int = max(1, _int("ADVANCE_ORDER_ESCALATION_HOURS", 9))
+    # Founder, 10 Oct 2026: a vendor gets a 2-hour buffer
+    # (ADVANCE_ORDER_VENDOR_WAIT_MINUTES=120) with 2 follow-ups, 15 minutes
+    # apart, and a vendor still silent at the end goes STRAIGHT to Prateek sir
+    # (who names another vendor or says cancel) instead of the next vendor.
+    followup_minutes: int = max(5, _int("ADVANCE_ORDER_FOLLOWUP_MINUTES", 15))
+    followup_count: int = max(0, _int("ADVANCE_ORDER_FOLLOWUP_COUNT", 2))
+    escalate_on_silence: bool = (
+        os.environ.get("ADVANCE_ORDER_ESCALATE_ON_SILENCE", "true").strip().lower() == "true"
+    )
 
     # --- handing the answer back to the sales bot --------------------------
     # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},

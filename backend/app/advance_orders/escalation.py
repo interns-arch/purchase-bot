@@ -13,6 +13,8 @@ WhatsApp. His reply decides them:
                             tells the customer
   "AO-12 not available" / "AO-12 cancel"     -> those parts are cancelled,
                             the sales bot tells the customer
+  "AO-12 vendor Sharma Auto 9876543210"     -> that vendor is asked now and
+                            saved on the brand's vendor list for next time
 No reply within ADVANCE_ORDER_ESCALATION_HOURS vendor-hours -> not found.
 
 The sales bot polls the order, so settling it here is all it takes for the
@@ -34,6 +36,13 @@ from core.time_utils import now_ist_naive
 logger = get_logger(__name__)
 
 _ORDER_REF = re.compile(r"\b(?:AO|ADV|ORDER|#)\s*[-#:]?\s*(\d{1,7})\b", re.IGNORECASE)
+# An Indian mobile in Prateek sir's reply = "ask this vendor instead".
+_MOBILE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?([6-9]\d{4}[\s-]?\d{5})(?!\d)")
+_NAME_NOISE = re.compile(
+    r"\b(vendor|vender|naam|name|contact|mobile|mob|phone|ph|number|num|no|ka|ki|ke|ko|se|hai|h|"
+    r"pucho|poocho|puchho|poochho|poochh|lo|ask|try|karo|kar|do|isse|iss|is|this|par|pe|whatsapp|wa)\b\.?",
+    re.IGNORECASE,
+)
 _CANCEL = re.compile(
     r"\b(cancel+(ed)?|not\s*available|n/?a|nahi+|nahin|nhi|no|unavailable|nai|mat\s*karo|band\s*karo)\b",
     re.IGNORECASE,
@@ -64,9 +73,10 @@ def escalate(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], reason: str
     body = (
         f"🔎 Advance order {ref(order)} ({who}) — {reason}:\n{rows}\n"
         f"Needed by {needed}.\n\n"
-        f"Reply here:\n"
-        f"• {ref(order)} available 3 din  (or per part: 45201M76T01 haan 2 din)\n"
-        f"• {ref(order)} not available  /  {ref(order)} cancel\n"
+        f"Ab kya karna hai? Reply here:\n"
+        f"• {ref(order)} vendor Sharma Auto 98XXXXXXXX  (main us vendor se poochh lunga, aur next time ke liye save)\n"
+        f"• {ref(order)} cancel  (sales bot customer ko bata dega)\n"
+        f"• {ref(order)} available 3 din  (agar aapko pata hai)\n"
         f"No reply in {cfg.escalation_hours} working hours = not found."
     )
     brands = sorted({line.brand for line in lines if line.brand and line.brand != cfg.default_brand})
@@ -119,18 +129,45 @@ def handle_reply(sender: str, text: str, session: Session) -> bool:
         order = waiting[0]
     else:
         # Only claim the message if it looks like an answer.
-        if not (_CANCEL.search(body) or re.search(r"\b(haan|ha|yes|available|din|days?)\b", body, re.I)):
+        if not (
+            _CANCEL.search(body) or _MOBILE.search(body)
+            or re.search(r"\b(haan|ha|yes|available|din|days?|vendor)\b", body, re.I)
+        ):
             return False
         service._send_text(
             number,
             "Kaunse order ke liye? Order number ke saath likhiye, jaise:\n"
-            + "\n".join(f"• {ref(o)} available 3 din   /   {ref(o)} cancel" for o in waiting[:5]),
+            + "\n".join(f"• {ref(o)} vendor <naam> <number>   /   {ref(o)} cancel" for o in waiting[:5]),
         )
         return True
 
     lines = [line for line in order.lines if line.status == m.LINE_ESCALATED]
     before = service._snapshot(order)
     stripped = _ORDER_REF.sub(" ", body)
+
+    # "AO-12 vendor Sharma Auto 9876543210": ask that vendor, and keep him on
+    # the brand's list for next time. Checked before cancel -- "contact no"
+    # must not read as "no".
+    mobile = _MOBILE.search(stripped)
+    if mobile:
+        digits = re.sub(r"\D", "", mobile.group(1))
+        name = _NAME_NOISE.sub(" ", _MOBILE.sub(" ", stripped))
+        name = re.sub(r"[^\w&./ -]", " ", name)
+        name = re.sub(r"\s{2,}", " ", name).strip(" -.,/")
+        vendor = service.assign_vendor(order, lines, name, "91" + digits, session, now_ist_naive())
+        service._notify_if_changed(order, before, session)
+        brands = ", ".join(sorted({line.brand for line in lines if line.brand != cfg.default_brand})) or "-"
+        later = not service._in_vendor_hours(now_ist_naive())
+        service._send_text(
+            number,
+            f"✅ {ref(order)}: {vendor.name} (+91 {digits}) se "
+            + ("kal subah vendor hours mein poochhunga" if later else "poochh raha hoon")
+            + f" — {', '.join(line.part_number for line in lines)}.\n"
+            f"Brand {brands} ki vendor list mein save kar diya, next time inse bhi poochhunga.\n"
+            f"{cfg.vendor_wait_minutes // 60} ghante mein reply nahi aaya to aapko phir bataunga.",
+        )
+        logger.info("Advance order %s: Prateek sir named vendor %s (%s).", order.id, vendor.id, digits)
+        return True
     answers = parse_vendor_reply(stripped, [(l.id, l.part_number, l.qty) for l in lines], now_ist_naive().date())
     positive = {lid: a for lid, a in (answers or {}).items() if a.available}
     # "not available" contains "available": a cancel word wins unless the
@@ -159,7 +196,8 @@ def handle_reply(sender: str, text: str, session: Session) -> bool:
         service._send_text(
             number,
             f"{ref(order)}: samajh nahi aaya. Aise likhiye:\n"
-            f"• {ref(order)} available 3 din\n• {ref(order)} not available  /  {ref(order)} cancel",
+            f"• {ref(order)} vendor <naam> <mobile number>\n• {ref(order)} cancel\n"
+            f"• {ref(order)} available 3 din",
         )
         return True
 

@@ -361,6 +361,33 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
         if slots <= 0:
             continue
         asked = _asked_vendor_ids(order, brand, session)
+        # Founder, 10 Oct 2026: the vendor asked last stayed silent through
+        # the buffer and both follow-ups -> Prateek sir decides (another
+        # vendor, or cancel). A vendor who said "nahi" still passes the part
+        # on to the next vendor in the list.
+        if (
+            order.kind == m.KIND_ADVANCE
+            and escalation.enabled()
+            and cfg.escalate_on_silence
+            and not open_queries
+        ):
+            last = session.execute(
+                select(m.AdvanceVendorQuery)
+                .where(m.AdvanceVendorQuery.advance_order_id == order.id, m.AdvanceVendorQuery.brand == brand)
+                .order_by(m.AdvanceVendorQuery.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if last is not None and last.status == m.Q_TIMEOUT:
+                silent_vendor = session.get(Vendor, last.vendor_id)
+                who = silent_vendor.name if silent_vendor else f"vendor {last.vendor_id}"
+                numbers = ", ".join(last.numbers or []) or "no number"
+                escalation.escalate(
+                    order, lines,
+                    f"{who} ({numbers}) ne {cfg.vendor_wait_minutes // 60} ghante aur "
+                    f"{cfg.followup_count} reminder ke baad bhi reply nahi kiya",
+                    session, now,
+                )
+                continue
         candidates = [v for v in _candidates(order, brand, lines, session) if v.id not in asked][:slots]
         if not candidates:
             if open_queries:
@@ -665,6 +692,7 @@ def tick(session: Session, now: datetime | None = None) -> None:
         q.status = m.Q_TIMEOUT
         logger.info("Advance order %s: vendor %s did not answer in time.", q.advance_order_id, q.vendor_id)
     session.flush()
+    _send_followups(session, now)
     for order in session.execute(select(m.AdvanceOrder).where(m.AdvanceOrder.status == m.ASKING)).scalars():
         before = _snapshot(order)
         if order.deadline_at is not None and now >= order.deadline_at:
@@ -672,6 +700,144 @@ def tick(session: Session, now: datetime | None = None) -> None:
         else:
             _advance(order, session, now)
         _notify_if_changed(order, before, session)
+
+
+def _followup_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], n: int) -> str:
+    rows = "\n".join(f"{i}. {line.part_number} x{line.qty}" for i, line in enumerate(lines, start=1))
+    by = f"\n{_fmt_day(order.needed_by)} tak chahiye." if order.needed_by else ""
+    return (
+        f"🔔 Reminder {n}/{cfg.followup_count} — Cartrends purchase desk.\n"
+        f"In parts ka reply abhi tak nahi aaya:\n{rows}{by}\n\n"
+        'Kripya bataiye: "haan 3 din" ya "nahi".'
+    )
+
+
+def _send_followups(session: Session, now: datetime) -> None:
+    """Remind a silent vendor `followup_count` times, `followup_minutes`
+    apart (vendor hours only), before his 2-hour buffer runs out."""
+    if not cfg.followup_count or not _in_vendor_hours(now):
+        return
+    sent = session.execute(
+        select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.status == m.Q_SENT)
+    ).scalars().all()
+    for q in sent:
+        done = q.followups_sent or 0
+        if done >= cfg.followup_count or q.sent_at is None:
+            continue
+        due = _add_vendor_hours(q.sent_at, cfg.followup_minutes * (done + 1))
+        if now < due or (q.deadline_at is not None and now >= q.deadline_at):
+            continue
+        order = session.get(m.AdvanceOrder, q.advance_order_id)
+        if order is None or order.status != m.ASKING:
+            continue
+        lines = [line for line in order.lines if line.id in (q.line_ids or []) and line.status == m.LINE_ASKING]
+        if not lines:
+            continue
+        from backend.app.integrations.whatsapp import outbound
+
+        ids = dict(q.message_ids or {})
+        for number in q.numbers or []:
+            try:
+                # Outside the 24 h window: re-send the approved enquiry template.
+                if not outbound.in_service_window(number) and _vendor_template_ready():
+                    message_id = _send_template(
+                        number, cfg.vendor_template, cfg.template_language,
+                        [
+                            q.brand if q.brand != cfg.default_brand else "parts",
+                            "; ".join(f"{line.part_number} x{line.qty}" for line in lines),
+                            _fmt_day(order.needed_by) or "jaldi",
+                        ],
+                    )
+                else:
+                    message_id = _send_text(number, _followup_text(order, lines, done + 1))
+                if isinstance(message_id, str) and message_id:
+                    ids[message_id] = number
+            except Exception:  # noqa: BLE001 -- the next number is tried
+                logger.exception("Advance order %s: follow-up to %s failed.", order.id, number)
+        q.message_ids = ids or None
+        q.followups_sent = done + 1
+        logger.info(
+            "Advance order %s: follow-up %d/%d to vendor %s.", order.id, done + 1, cfg.followup_count, q.vendor_id
+        )
+    session.flush()
+
+
+def assign_vendor(
+    order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], name: str, number: str, session: Session, now: datetime
+) -> Vendor:
+    """Prateek sir named a vendor (name + mobile) for escalated parts: find or
+    create him, keep his number as an ENQUIRY contact (never the stock
+    registry -- see AdvanceVendorContact), add him to each brand's vendor list
+    so he is asked next time too, and ask him now."""
+    from sqlalchemy import func
+
+    from core.services import vendor_code_service, vendor_service
+
+    number = _normalize(number)
+    vendor = None
+    contact = session.execute(
+        select(m.AdvanceVendorContact).where(m.AdvanceVendorContact.whatsapp_number == number)
+    ).scalars().first()
+    if contact is not None:
+        vendor = session.get(Vendor, contact.vendor_id)
+    if vendor is None:
+        from backend.app.integrations.whatsapp.models import WhatsAppRegisteredNumber
+
+        reg = session.execute(
+            select(WhatsAppRegisteredNumber).where(WhatsAppRegisteredNumber.whatsapp_number == number)
+        ).scalars().first()
+        if reg is not None and reg.vendor_id:
+            vendor = session.get(Vendor, reg.vendor_id)
+    if vendor is None and name:
+        vendor = vendor_service.get_vendor_by_name(name, session)
+    if vendor is None:
+        vendor = vendor_service.create_vendor(name or f"Vendor {number[-10:]}", session, whatsapp_number=number)
+        vendor.vendor_code = vendor_code_service.generate_vendor_code(vendor.name, session)
+    vendor.active = True
+    if session.execute(
+        select(m.AdvanceVendorContact).where(
+            m.AdvanceVendorContact.vendor_id == vendor.id, m.AdvanceVendorContact.whatsapp_number == number
+        )
+    ).scalar_one_or_none() is None:
+        session.add(m.AdvanceVendorContact(vendor_id=vendor.id, whatsapp_number=number, source="Prateek sir"))
+
+    by_brand: dict[str, list[m.AdvanceOrderLine]] = {}
+    for line in lines:
+        by_brand.setdefault(line.brand, []).append(line)
+    for brand, group in by_brand.items():
+        if brand != cfg.default_brand:
+            terms = session.execute(
+                select(m.VendorBrand).where(m.VendorBrand.brand == brand, m.VendorBrand.vendor_id == vendor.id)
+            ).scalar_one_or_none()
+            if terms is None:
+                last = session.execute(
+                    select(func.max(m.VendorBrand.priority)).where(m.VendorBrand.brand == brand)
+                ).scalar()
+                session.add(
+                    m.VendorBrand(
+                        brand=brand, vendor_id=vendor.id, priority=(last or 0) + 1,
+                        discount_type=m.DISC_RATE,
+                        discount_note=f"added by Prateek sir (AO-{order.id}, {now:%d %b %Y})",
+                    )
+                )
+            else:
+                terms.active = True
+        for line in group:
+            line.status = m.LINE_ASKING
+            line.note = f"asking {vendor.name} (named by Prateek sir)"
+        session.add(
+            m.AdvanceVendorQuery(
+                advance_order_id=order.id, brand=brand, vendor_id=vendor.id,
+                line_ids=[line.id for line in group], status=m.Q_QUEUED,
+            )
+        )
+    # A fresh clock for the new vendor's buffer and Prateek sir's next answer.
+    order.deadline_at = (
+        _add_vendor_hours(now, cfg.advance_deadline_hours * 60) if cfg.advance_deadline_hours else None
+    )
+    session.flush()
+    _send_queued(order, session, now)
+    return vendor
 
 
 def _expire(order: m.AdvanceOrder, session: Session) -> None:

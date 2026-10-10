@@ -182,6 +182,8 @@ class AdvanceVendorQuery(Base):
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
     deadline_at: Mapped[datetime | None] = mapped_column(default=None)
     replied_at: Mapped[datetime | None] = mapped_column(default=None)
+    # Reminders already sent to this silent vendor (cfg.followup_count max).
+    followups_sent: Mapped[int | None] = mapped_column(default=0)
     reply_text: Mapped[str | None] = mapped_column(default=None)
 
 

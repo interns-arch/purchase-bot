@@ -86,6 +86,8 @@ _SCHEMA_UPGRADES = (
     ("advance_vendor_queries", "message_ids", "JSON"),
     # Dealer Portal PO + transit references, set when the customer confirms.
     ("advance_orders", "dealer_portal", "JSON"),
+    # Vendor follow-ups (2 reminders, 15 min apart) before Prateek sir is asked.
+    ("advance_vendor_queries", "followups_sent", "INTEGER DEFAULT 0"),
 )
 # Values added to a Postgres ENUM type after it already existed. Like
 # columns, `create_all` never alters an existing type, and inserting a value
