@@ -27,6 +27,42 @@ def _number(raw: str | None) -> str:
     return normalize_number(raw) or (raw or "")
 
 
+_SEEN: dict[str, float] = {}
+_SEEN_TTL_SECONDS = 6 * 3600
+
+
+def first_delivery(wamid: str | None) -> bool:
+    """False when this incoming message id was already received: Meta
+    re-delivers a webhook it thinks was slow, and handling the copy again
+    made the bot answer twice (found 10 Oct 2026: a vendor "Nhi" closed the
+    order, then its copy reached the AI chat). In memory (one worker) for
+    near-simultaneous copies, plus the chat log for copies after a restart."""
+    if not wamid:
+        return True
+    import time
+
+    now = time.monotonic()
+    for key in [k for k, t in _SEEN.items() if now - t > _SEEN_TTL_SECONDS]:
+        _SEEN.pop(key, None)
+    if wamid in _SEEN:
+        return False
+    _SEEN[wamid] = now
+    try:
+        from backend.app.integrations.whatsapp.models import WhatsAppChatMessage
+        from core.db import get_session
+
+        with get_session() as session:
+            if session.execute(
+                select(WhatsAppChatMessage.id).where(
+                    WhatsAppChatMessage.wamid == wamid, WhatsAppChatMessage.direction == "in"
+                )
+            ).first():
+                return False
+    except Exception:  # noqa: BLE001 -- unsure: handle it (the old behaviour)
+        logger.exception("Could not check whether %s was already received.", wamid)
+    return True
+
+
 def log_incoming(
     number: str, *, kind: str, text: str | None = None, filename: str | None = None,
     media_id: str | None = None, wamid: str | None = None,

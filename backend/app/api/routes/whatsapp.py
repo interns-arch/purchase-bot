@@ -69,11 +69,13 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
 
     # Text commands are scheduled before documents so that if a command and a
     # file somehow arrive in the same webhook, the command is stored first.
-    texts = parse_text_messages(payload)
+    # A re-delivered copy of a message already received is dropped here, so
+    # it is never answered twice.
+    texts = [t for t in parse_text_messages(payload) if chat_log.first_delivery(t.message_id)]
     for text_message in texts:
         background_tasks.add_task(handle_incoming_whatsapp_text, text_message)
 
-    documents = parse_webhook_payload(payload)
+    documents = [d for d in parse_webhook_payload(payload) if chat_log.first_delivery(d.message_id)]
     for message in documents:
         background_tasks.add_task(handle_incoming_whatsapp_message, message)
 
