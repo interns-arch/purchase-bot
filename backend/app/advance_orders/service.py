@@ -48,8 +48,17 @@ def _send_text(to: str, body: str) -> str | None:
     """Send, and return the WhatsApp message id when there is one."""
     from backend.app.integrations.whatsapp.client import WhatsAppClient
     from backend.app.integrations.whatsapp.config import whatsapp_settings
+    from backend.app.integrations.whatsapp import outbound
 
-    return WhatsAppClient(whatsapp_settings).send_text_message(to, body)
+    client = WhatsAppClient(whatsapp_settings)
+    # Outside WhatsApp's 24 h window a plain message is refused (131047):
+    # send the same text inside the approved update template instead.
+    if not outbound.in_service_window(to) and outbound.template_approved(outbound.UPDATE_TEMPLATE):
+        return client.send_template_message(
+            to, outbound.UPDATE_TEMPLATE, whatsapp_settings.template_language,
+            [outbound.flatten_for_template(body)],
+        )
+    return client.send_text_message(to, body)
 
 
 def _send_template(to: str, name: str, language: str, params: list[str]) -> str | None:

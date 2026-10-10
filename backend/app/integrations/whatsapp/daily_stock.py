@@ -207,6 +207,39 @@ def _summary_text(received: list[str], pending: list[str]) -> str:
     return "\n".join(lines)
 
 
+SUMMARY_TEMPLATE = "daily_vendor_stock_status"
+
+
+def _send_summary(to: str, text: str, received: list[str], pending: list[str]) -> bool:
+    """The full text when the admin is inside WhatsApp's 24 h window; the
+    approved summary template (same facts) when he is not."""
+    from backend.app.integrations.whatsapp.outbound import (
+        flatten_for_template,
+        in_service_window,
+        template_approved,
+    )
+
+    if in_service_window(to) or not template_approved(SUMMARY_TEMPLATE):
+        return send_reply_safe(to, text)
+    try:
+        WhatsAppClient(whatsapp_settings).send_template_message(
+            to,
+            SUMMARY_TEMPLATE,
+            whatsapp_settings.template_language,
+            [
+                datetime.now(_IST).strftime("%d %b"),
+                str(len(received)),
+                str(len(received) + len(pending)),
+                flatten_for_template(", ".join(received) or "none yet", 600),
+                flatten_for_template(", ".join(pending) or "none", 600),
+            ],
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("Daily summary template to %s failed.", to)
+        return False
+
+
 def send_daily_summary() -> None:
     """Scheduled: the received/pending participation summary, straight to the
     admin number (plain text -- the admin talks to the bot daily, so the 24h
@@ -222,7 +255,7 @@ def send_daily_summary() -> None:
             logger.info("Daily summary: no registered vendors yet -- nothing to report.")
             return
         text = _summary_text(received, pending)
-        delivered = [send_reply_safe(to, text) for to in recipients]
+        delivered = [_send_summary(to, text, received, pending) for to in recipients]
         if not any(delivered):
             broker.publish(
                 "warning",
