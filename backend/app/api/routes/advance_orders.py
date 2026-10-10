@@ -248,6 +248,26 @@ def list_vendor_brands(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
     return out
 
 
+@desk_router.get("/api/vendor-brands/performance")
+def vendor_brand_performance(db: Session = Depends(get_db)) -> dict:
+    """Per-vendor reply rate / reply time / yes rate, and each brand's
+    vendors ranked best-first by that score (advance_orders/performance.py)."""
+    from backend.app.advance_orders.performance import vendor_performance
+
+    return vendor_performance(db)
+
+
+@desk_router.get("/api/vendor-brands/vendors")
+def vendor_options(db: Session = Depends(get_db)) -> list[dict]:
+    """Every active outside vendor, for the "add vendor" dropdown."""
+    rows = db.execute(
+        select(Vendor.id, Vendor.name, Vendor.vendor_code)
+        .where(Vendor.active.is_(True), Vendor.is_own_stock.is_(False))
+        .order_by(Vendor.name)
+    ).all()
+    return [{"vendor_id": i, "vendor_name": n, "vendor_code": c} for i, n, c in rows]
+
+
 @desk_router.put("/api/vendor-brands/{brand}")
 def put_vendor_brand(brand: str, body: VendorBrandIn, db: Session = Depends(get_db)) -> dict[str, list[dict]]:
     """Replace the vendor list of one brand; the first id is asked first.

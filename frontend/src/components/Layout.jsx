@@ -14,6 +14,7 @@ const NAV_GROUPS = [
     items: [
       { to: "/command-centre", label: "Command Centre" },
       { to: "/chats", label: "Chats" },
+      { to: "/vendor-priority", label: "Vendor Priority" },
     ],
   },
   {

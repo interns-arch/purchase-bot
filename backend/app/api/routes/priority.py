@@ -64,6 +64,14 @@ def vendors(db: Session = Depends(get_db)) -> list[dict]:
     return [{"vendor_id": i, "vendor_name": n, "vendor_code": c} for i, n, c in rows]
 
 
+@router.get("/performance")
+def performance(db: Session = Depends(get_db)) -> dict:
+    """Vendor performance + each brand's vendors ranked best-first."""
+    from backend.app.advance_orders.performance import vendor_performance
+
+    return vendor_performance(db)
+
+
 @router.get("/brands/{brand}")
 def brand(brand: str, db: Session = Depends(get_db)) -> list[dict]:
     key = brand.strip().upper()

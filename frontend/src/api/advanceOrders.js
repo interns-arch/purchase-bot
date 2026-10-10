@@ -32,3 +32,13 @@ export async function setBrandVendors(brand, vendorIds) {
   });
   return response.data;
 }
+
+export async function getVendorPerformance() {
+  const response = await apiClient.get("/api/vendor-brands/performance");
+  return response.data;
+}
+
+export async function listVendorOptions() {
+  const response = await apiClient.get("/api/vendor-brands/vendors");
+  return response.data;
+}
