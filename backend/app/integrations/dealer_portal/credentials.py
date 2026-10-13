@@ -106,6 +106,13 @@ class DealerPortalAccount:
     # this group, which is what the delta union runs over.
     vendor_ids: list[int] = field(default_factory=list)
     vendor_names: list[str] = field(default_factory=list)
+    # POST /stock/reset-own-stock before each (full-snapshot) upload, so the
+    # portal is an exact copy of the vendor's latest list (Google Sheet rule).
+    reset_before_upload: bool = False
+    # Where it came from: "env" (backend/.env) or "file" (accounts file,
+    # managed from the website's Dealer Portal page).
+    source: str = "env"
+    dealer_id: int | None = None
 
     @property
     def has_credentials(self) -> bool:
@@ -231,6 +238,9 @@ def _accounts_from_file() -> list[DealerPortalAccount]:
             full_snapshot=bool(entry.get("full_snapshot", False)),
             tat_days=int(entry.get("tat_days") or dealer_portal_settings.tat_days),
             enabled=bool(entry.get("enabled", True)),
+            reset_before_upload=bool(entry.get("reset_before_upload", False)),
+            source="file",
+            dealer_id=int(entry["dealer_id"]) if str(entry.get("dealer_id") or "").isdigit() else None,
         )
         if not account.has_credentials:
             logger.warning(
@@ -284,6 +294,8 @@ def load_accounts() -> list[DealerPortalAccount]:
             full_snapshot=(_env(key, "FULL_SNAPSHOT", "false") or "false").lower() == "true",
             tat_days=_int_env(key, "TAT_DAYS", dealer_portal_settings.tat_days),
             enabled=(_env(key, "ENABLED", "true") or "true").lower() == "true",
+            reset_before_upload=(_env(key, "RESET_BEFORE_UPLOAD", "false") or "false").lower() == "true",
+            source="env",
         )
         if not account.has_credentials:
             logger.warning(
@@ -310,6 +322,77 @@ def load_accounts() -> list[DealerPortalAccount]:
             continue
         accounts.append(account)
     return accounts
+
+
+# ---------------------------------------------------------------- file writes
+# The website's Dealer Portal page adds/changes accounts in the accounts file
+# (DEALER_PORTAL_ACCOUNTS_FILE) -- never the database: credentials stay out of
+# the DB by design (spec 7.4). Written atomically, mode 0600.
+
+
+def _read_file_entries() -> list[dict]:
+    path_text = dealer_portal_settings.accounts_file
+    if not path_text or not Path(path_text).exists():
+        return []
+    try:
+        raw = json.loads(Path(path_text).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not read the Dealer Portal accounts file.")
+        raise ValueError("The Dealer Portal accounts file is unreadable -- not changed.") from None
+    if isinstance(raw, dict):
+        raw = [{**value, "key": key} for key, value in raw.items()]
+    return [e for e in raw if isinstance(e, dict)]
+
+
+def _write_file_entries(entries: list[dict]) -> None:
+    import os
+    import tempfile
+
+    path_text = dealer_portal_settings.accounts_file
+    if not path_text:
+        raise ValueError("DEALER_PORTAL_ACCOUNTS_FILE is not set on the server.")
+    path = Path(path_text)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".dp_accounts_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(entries, handle, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def save_file_account(entry: dict) -> None:
+    """Add or replace one account (matched by `key`)."""
+    key = str(entry["key"]).strip().upper()
+    entries = [e for e in _read_file_entries() if str(e.get("key") or "").strip().upper() != key]
+    entries.append({**entry, "key": key})
+    _write_file_entries(entries)
+
+
+def update_file_account(key: str, **changes) -> bool:
+    key = key.strip().upper()
+    entries = _read_file_entries()
+    found = False
+    for e in entries:
+        if str(e.get("key") or "").strip().upper() == key:
+            e.update(changes)
+            found = True
+    if found:
+        _write_file_entries(entries)
+    return found
+
+
+def remove_file_account(key: str) -> bool:
+    key = key.strip().upper()
+    entries = _read_file_entries()
+    kept = [e for e in entries if str(e.get("key") or "").strip().upper() != key]
+    if len(kept) == len(entries):
+        return False
+    _write_file_entries(kept)
+    return True
 
 
 def matches_name(pattern: str, vendor_name: str | None) -> bool:

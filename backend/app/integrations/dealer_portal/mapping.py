@@ -53,6 +53,23 @@ def get_map(vendor_id: int, session) -> DealerPortalVendorMap | None:
     ).scalar_one_or_none()
 
 
+def confirm_from_login(vendor_id: int, vendor_name: str, dealer_id: int, dealer_name: str | None, session) -> None:
+    """The dealer's own login was checked and DP said it IS dealer
+    `dealer_id` -- as good as the admin's answer, so the push never stops to
+    ask (Vendor -> dealer decided on the Dealer Portal page)."""
+    row = get_map(vendor_id, session)
+    if row is None:
+        row = DealerPortalVendorMap(vendor_id=vendor_id, vendor_name=vendor_name)
+        session.add(row)
+    row.vendor_name = vendor_name
+    row.dp_dealer_id = int(dealer_id)
+    row.dp_dealer_name = dealer_name
+    row.status = DealerPortalVendorMapStatus.CONFIRMED
+    row.confirmed_at = now_ist_naive()
+    row.confirmed_by = "dealer login (website)"
+    session.flush()
+
+
 def is_resolved(row: DealerPortalVendorMap | None) -> bool:
     """Whether the push may proceed without asking anyone."""
     return (

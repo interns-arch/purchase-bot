@@ -14,6 +14,7 @@ const NAV_GROUPS = [
       { to: "/vendor-priority", label: "Vendor Priority", icon: "⭐" },
       { to: "/advance-orders", label: "Advance Orders", icon: "📦" },
       { to: "/chats", label: "Chats", icon: "💬" },
+      { to: "/dealer-portal", label: "Dealer Portal", icon: "🔗" },
     ],
   },
   {
@@ -65,6 +66,7 @@ const PAGE_PURPOSE = {
   "/vendor-priority":
     "Brand-wise vendor order the bot follows — #1 is asked first. Add vendors, reorder, see who replies best.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
+  "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",
 };
 
 const TODAY = new Intl.DateTimeFormat("en-IN", {

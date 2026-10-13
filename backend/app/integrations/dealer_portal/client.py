@@ -267,8 +267,9 @@ def upload_csv(
 def reset_own_stock(account: DealerPortalAccount) -> bool:
     """POST /stock/reset-own-stock: clear this dealer's stock before a full
     upload, so the portal ends up exactly like the vendor's latest list (the
-    Google Sheet rule). Announced by the portal team 13 Oct 2026; on the live
-    server it answered 405 that day, i.e. not deployed yet. Returns True when
+    Google Sheet rule). Live since 13 Oct 2026: body {"confirmation":
+    "RESET-OWN-STOCK", "reason": ...}, sets every quantity of the logged-in
+    dealer to zero. Returns True when
     the reset happened, False when the route is not there (404/405) -- the
     caller then relies on the full-snapshot upload (sold-out parts sent as 0).
     Any other failure raises: never upload over a half-known state."""
@@ -278,6 +279,8 @@ def reset_own_stock(account: DealerPortalAccount) -> bool:
         response = requests.post(
             url,
             headers={"Authorization": f"Bearer {_cached_token(account)}"},
+            # The portal insists on this exact phrase (400 otherwise).
+            json={"confirmation": "RESET-OWN-STOCK", "reason": "ProcureHub: full stock upload follows"},
             timeout=dealer_portal_settings.timeout_seconds,
         )
     except Exception as exc:  # noqa: BLE001 -- network layer

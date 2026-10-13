@@ -23,6 +23,7 @@ from backend.app.api.routes.advance_orders import desk_router as advance_orders_
 from backend.app.api.routes.advance_orders import dealer_stock_router as dealer_stock_orders_router
 from backend.app.api.routes.chats import router as chats_router
 from backend.app.api.routes.priority import router as priority_router
+from backend.app.api.routes.dealer_portal_accounts import router as dealer_portal_accounts_router
 from backend.app.api.routes.command_centre import router as command_centre_router
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
@@ -147,6 +148,7 @@ async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSON
 app.include_router(auth_router)
 app.include_router(chats_router)
 app.include_router(priority_router)
+app.include_router(dealer_portal_accounts_router)
 app.include_router(command_centre_router)
 app.include_router(dashboard_router)
 app.include_router(data_management_router)

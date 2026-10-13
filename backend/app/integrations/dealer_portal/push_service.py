@@ -240,9 +240,9 @@ def push_account(
     # list after a reset would wipe stock the vendor still has.
     import os
 
-    if (
-        account.full_snapshot
-        and (os.environ.get(f"DEALER_PORTAL_{account.key}_RESET_BEFORE_UPLOAD") or "").strip().lower() == "true"
+    if account.full_snapshot and (
+        account.reset_before_upload
+        or (os.environ.get(f"DEALER_PORTAL_{account.key}_RESET_BEFORE_UPLOAD") or "").strip().lower() == "true"
     ):
         try:
             client.reset_own_stock(account)
