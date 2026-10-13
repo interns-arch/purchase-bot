@@ -161,8 +161,11 @@ def _collapse(
 
         # Price: the highest non-null price seen for the part, matching DP's
         # own "max price wins" tie-break for duplicates.
-        if row.price is not None:
-            prices[part] = max(prices.get(part, row.price), row.price)
+        # A file with MRP but no price column (Spares 4U): MRP is the price
+        # (Founder, 12 Oct 2026) -- never a 0 that would wipe the portal price.
+        price = row.price if row.price is not None else getattr(row, "mrp", None)
+        if price is not None:
+            prices[part] = max(prices.get(part, price), price)
 
     return quantities, prices, duplicates
 

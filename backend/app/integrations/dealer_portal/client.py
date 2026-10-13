@@ -264,6 +264,33 @@ def upload_csv(
     return _parse_upload_response(response)
 
 
+def reset_own_stock(account: DealerPortalAccount) -> bool:
+    """POST /stock/reset-own-stock: clear this dealer's stock before a full
+    upload, so the portal ends up exactly like the vendor's latest list (the
+    Google Sheet rule). Announced by the portal team 13 Oct 2026; on the live
+    server it answered 405 that day, i.e. not deployed yet. Returns True when
+    the reset happened, False when the route is not there (404/405) -- the
+    caller then relies on the full-snapshot upload (sold-out parts sent as 0).
+    Any other failure raises: never upload over a half-known state."""
+    requests = _requests()
+    url = f"{dealer_portal_settings.base_url}/stock/reset-own-stock"
+    try:
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {_cached_token(account)}"},
+            timeout=dealer_portal_settings.timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 -- network layer
+        raise DealerPortalError(f"Dealer Portal reset request failed: {exc}") from exc
+    if response.status_code in (404, 405):
+        logger.warning("Dealer Portal %s: reset-own-stock not available (HTTP %s).", account.key, response.status_code)
+        return False
+    if response.status_code >= 400:
+        raise DealerPortalError(f"Dealer Portal reset for {account.key} failed: HTTP {response.status_code}.")
+    logger.info("Dealer Portal %s: stock reset before upload.", account.key)
+    return True
+
+
 def logout(account: DealerPortalAccount) -> None:
     """Best-effort logout of a login-issued token. Never raises, and does
     nothing for a permanent token (logging that out would break the next

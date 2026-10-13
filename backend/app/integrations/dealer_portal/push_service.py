@@ -234,6 +234,21 @@ def push_account(
         return _finish(push_id, DealerPortalPushStatus.SHADOW, error=None, is_retry=is_retry)
 
     # ---- LIVE ----------------------------------------------------------
+    # DEALER_PORTAL_<KEY>_RESET_BEFORE_UPLOAD=true: clear the dealer's stock
+    # first, then upload the full list -- same as the Google Sheet tab being
+    # rewritten from the latest file. Only with a full snapshot: a partial
+    # list after a reset would wipe stock the vendor still has.
+    import os
+
+    if (
+        account.full_snapshot
+        and (os.environ.get(f"DEALER_PORTAL_{account.key}_RESET_BEFORE_UPLOAD") or "").strip().lower() == "true"
+    ):
+        try:
+            client.reset_own_stock(account)
+        except client.DealerPortalError as exc:
+            logger.error("Dealer Portal %s: reset failed, upload skipped -- %s", account.key, exc)
+            return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc), is_retry=is_retry)
     try:
         upload = client.upload_csv(
             account, csv_bytes, file_name=f"{account.key.lower()}_stock.csv"

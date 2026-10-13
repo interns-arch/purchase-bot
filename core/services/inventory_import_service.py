@@ -41,6 +41,7 @@ from core.ingestion.column_detector import (
 from core.ingestion.csv_reader import read_csv_grid, read_csv_rows
 from core.ingestion.excel_reader import read_excel_grid, read_excel_rows
 from core.ingestion.types import ParsedFile
+from core.logging_setup import get_logger
 from core.models import (
     RUNNING_IMPORT_STATUSES,
     ImportErrorRecord,
@@ -135,6 +136,8 @@ class MasterInventoryRow:
     vendors: list[MasterInventoryVendorEntry] = field(default_factory=list)
 
 
+logger = get_logger(__name__)
+
 def _utcnow() -> datetime:
     return now_ist_naive()
 
@@ -185,7 +188,7 @@ def _validate_extension_and_size(
         )
 
 
-def _read_file(file_path: Path) -> ParsedFile:
+def _read_file(file_path: Path, *, merge_sheets: bool = False) -> ParsedFile:
     if file_path.suffix.lower() == ".csv":
         return read_csv_rows(file_path)
     if file_path.suffix.lower() == ".pdf":
@@ -200,7 +203,8 @@ def _read_file(file_path: Path) -> ParsedFile:
         from core.ingestion.docx_txt_reader import read_txt_rows
 
         return read_txt_rows(file_path)
-    return read_excel_rows(file_path)
+    # A multi-file vendor's workbook with one sheet per brand is read whole.
+    return read_excel_rows(file_path, merge_matching_sheets=merge_sheets)
 
 
 def read_table_with_mapping(
@@ -364,6 +368,88 @@ def _fail_import(
     return _to_result(import_row, is_duplicate=False, message=error.detail)
 
 
+def _multi_file_vendor(vendor_id: int, session: Session) -> bool:
+    """Vendors who send their stock as SEVERAL files (Spares 4U: one for
+    Hyundai/Toyota/VW/Honda, one for Renault/Nissan). For them a file only
+    replaces the earlier file OF THE SAME NAME; the other files' stock stays.
+    STOCK_MULTI_FILE_VENDORS=comma-separated vendor names. Off for everyone
+    else -- a vendor who dates his file names would otherwise pile up stock."""
+    import os
+
+    names = {
+        n.strip().lower().rstrip(".")
+        for n in (os.environ.get("STOCK_MULTI_FILE_VENDORS") or "").split(",")
+        if n.strip()
+    }
+    if not names:
+        return False
+    vendor = session.get(Vendor, vendor_id)
+    return vendor is not None and vendor.name.strip().lower().rstrip(".") in names
+
+
+_SOURCE_FILE_KEY = "__file__"
+
+
+def _row_source_file(row: VendorInventory, import_file_name: str | None) -> str:
+    raw = row.raw_data if isinstance(row.raw_data, dict) else {}
+    return str(raw.get(_SOURCE_FILE_KEY) or import_file_name or "")
+
+
+def _carry_forward_other_files(
+    import_row: InventoryImport, active_import: InventoryImport | None, next_row_number: int, session: Session
+) -> int:
+    """Copy into `import_row` the active import's rows that came from the
+    vendor's OTHER files, so the new active batch is this file + the rest.
+
+    Which earlier file does this one replace? Not by name -- Spares 4U's names
+    change ("STOCK_RENAULT_AND_NISSAN.xlsx", "..._4_.xlsx", "spares_4u_stock.xlsx",
+    seen 13 Oct 2026). An earlier file is REPLACED when at least half of its
+    parts are in the new file (a fresh copy of the same list) or it has the
+    same name; otherwise its rows are kept. Returns how many rows were carried."""
+    if active_import is None:
+        return 0
+    new_parts = set(
+        session.execute(
+            select(VendorInventory.normalized_part_number).where(VendorInventory.import_id == import_row.id)
+        ).scalars()
+    )
+    groups: dict[str, list[VendorInventory]] = {}
+    for old in session.execute(
+        select(VendorInventory).where(VendorInventory.import_id == active_import.id)
+    ).scalars():
+        groups.setdefault(_row_source_file(old, active_import.file_name), []).append(old)
+
+    carried = 0
+    for source, rows in groups.items():
+        parts = {r.normalized_part_number for r in rows}
+        overlap = len(parts & new_parts) / len(parts) if parts else 1.0
+        if source == import_row.file_name or overlap >= 0.5:
+            logger.info(
+                "Import %s: '%s' replaces earlier file '%s' (%d%% of its parts are in it).",
+                import_row.id, import_row.file_name, source, round(overlap * 100),
+            )
+            continue
+        for old in rows:
+            raw = dict(old.raw_data) if isinstance(old.raw_data, dict) else {}
+            raw[_SOURCE_FILE_KEY] = source
+            session.add(
+                VendorInventory(
+                    vendor_id=old.vendor_id,
+                    import_id=import_row.id,
+                    part_id=old.part_id,
+                    row_number=next_row_number + carried,
+                    vendor_part_number=old.vendor_part_number,
+                    normalized_part_number=old.normalized_part_number,
+                    quantity_available=old.quantity_available,
+                    price=old.price,
+                    mrp=old.mrp,
+                    raw_data=raw,
+                )
+            )
+            carried += 1
+    return carried
+
+
 def _activate(
     import_row: InventoryImport,
     previous_active: InventoryImport | None,
@@ -440,7 +526,7 @@ def run_import(
 
     try:
         _validate_extension_and_size(file_path, file_size, max_file_size_bytes)
-        parsed_file = _read_file(file_path)
+        parsed_file = _read_file(file_path, merge_sheets=_multi_file_vendor(vendor_id, session))
     except _ImportValidationError as exc:
         return _fail_import(import_row, exc, session)
     except ValueError as exc:
@@ -536,6 +622,39 @@ def run_import(
     # AWAITING_CONFIRMATION result, same `duplicate_of_import_id` -- only the
     # point at which it is detected moved earlier.
     active_import = _find_active_import(vendor_id, session)
+    multi_file = _multi_file_vendor(vendor_id, session)
+    if multi_file and active_import is not None and active_import.content_hash != content_hash:
+        # Has THIS file come in unchanged since its last import? Then the
+        # active batch already holds exactly its rows: nothing to do.
+        last_same = session.execute(
+            select(InventoryImport)
+            .where(
+                InventoryImport.vendor_id == vendor_id,
+                InventoryImport.file_name == file_path.name,
+                InventoryImport.id != import_row.id,
+                InventoryImport.status.in_(
+                    [ImportStatus.COMPLETED, ImportStatus.COMPLETED_WITH_ERRORS, ImportStatus.SUPERSEDED]
+                ),
+            )
+            .order_by(InventoryImport.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        holds_it = last_same is not None and any(
+            _row_source_file(r, active_import.file_name) == file_path.name
+            for r in session.execute(
+                select(VendorInventory).where(VendorInventory.import_id == active_import.id).limit(5000)
+            ).scalars()
+        )
+        if last_same is not None and last_same.content_hash == content_hash and holds_it:
+            import_row.status = ImportStatus.CANCELLED
+            import_row.duplicate_of_import_id = active_import.id
+            import_row.completed_at = _utcnow()
+            session.flush()
+            return _to_result(
+                import_row,
+                is_duplicate=True,
+                message=f"'{file_path.name}' is unchanged since it was last imported; stock kept as is.",
+            )
     if active_import is not None and active_import.content_hash == content_hash:
         import_row.status = ImportStatus.AWAITING_CONFIRMATION
         import_row.duplicate_of_import_id = active_import.id
@@ -670,7 +789,7 @@ def run_import(
                 quantity_available=quantity,
                 price=price,
                 mrp=mrp,
-                raw_data=row,
+                raw_data={**row, _SOURCE_FILE_KEY: import_row.file_name} if multi_file else row,
             )
         )
         row_count += 1
@@ -698,6 +817,17 @@ def run_import(
             ),
             session,
         )
+
+    if multi_file:
+        session.flush()
+        carried = _carry_forward_other_files(import_row, active_import, row_count + 2, session)
+        if carried:
+            import_row.row_count = row_count + carried
+            session.flush()
+            logger.info(
+                "Import %s (%s): kept %d row(s) from the vendor's other stock file(s).",
+                import_row.id, import_row.file_name, carried,
+            )
 
     # `active_import` was already fetched (and the duplicate case already
     # returned) before the row loop above, so this is a genuinely new batch.
