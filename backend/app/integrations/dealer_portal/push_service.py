@@ -49,7 +49,7 @@ from backend.app.integrations.dealer_portal.config import dealer_portal_settings
 from backend.app.integrations.dealer_portal.credentials import DealerPortalAccount
 from core.db import get_session
 from core.logging_setup import get_logger
-from core.models import DealerPortalPush, DealerPortalPushStatus
+from core.models import DealerPortalPush, DealerPortalPushStatus, Vendor
 from core.time_utils import now_ist_naive
 
 logger = get_logger(__name__)
@@ -188,6 +188,8 @@ def push_account(
             import_ids=list(result.import_ids),
             rows_sent=result.rows_sent,
             zeroed_count=result.zeroed_count,
+            skipped_no_price=result.priceless_count,
+            skipped_parts=result.priceless_parts[:12] or None,
             status=DealerPortalPushStatus.PENDING,
             # A retry continues the failed push's count, so the sweep really
             # stops after DEALER_PORTAL_RETRY_MAX_ATTEMPTS (it used to restart
@@ -202,7 +204,7 @@ def push_account(
 
     logger.info(
         "Dealer Portal %s: %d row(s) to send (%d zeroed, %d sold-out but withheld, "
-        "%d duplicate(s) collapsed, %d without a known price) across vendor(s) %s.",
+        "%d duplicate(s) collapsed, %d skipped for having no price) across vendor(s) %s.",
         account.key,
         result.rows_sent,
         result.zeroed_count,
@@ -348,23 +350,48 @@ def _finish(
     return status
 
 
+def _plain_failure(error: str | None) -> str:
+    """The upload error in words the purchase team can act on."""
+    text = error or ""
+    if "HTTP 401" in text:
+        return ("the portal refused the dealer's password (it has probably been changed). "
+                "Update it on the bot's Dealer Portal page -> Change login.")
+    if "409" in text or "SESSION_ALREADY_ACTIVE" in text:
+        return "the dealer account is logged in somewhere else. Log out of the portal there and it will retry."
+    if "403" in text:
+        return "this dealer account has no permission to upload stock on the portal (ask the portal team)."
+    if "reset" in text.lower():
+        return f"the stock reset on the portal failed ({text}). Nothing was uploaded, so the old stock is still there."
+    if "unreachable" in text.lower() or "request failed" in text.lower():
+        return "the portal could not be reached (network / portal down)."
+    return text or "no reason given"
+
+
 def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, upload) -> None:
-    """A push the Portal refused, in part or whole, is news the team must
-    hear -- until now it only reached the server log. Shown on the web and
-    mirrored to the admin WhatsApp. Retries of a FAILED push do not repeat
-    the alert. Never raises."""
+    """After an upload, tell the team what did NOT go up and why (Founder,
+    14 Oct 2026): skipped for no price, refused by the portal, or the whole
+    upload failed. Shown on the web and mirrored to the admin WhatsApp. A
+    clean upload says nothing. Retries of a FAILED push do not repeat the
+    alert, nor does the same failure within 24 h. Never raises."""
     try:
-        if status not in (DealerPortalPushStatus.REJECTED, DealerPortalPushStatus.PARTIAL, DealerPortalPushStatus.FAILED):
-            return
         with get_session() as session:
             push = session.get(DealerPortalPush, push_id)
-            if push is None or (status == DealerPortalPushStatus.FAILED and (push.attempts or 0) > 1):
+            if push is None:
+                return
+            skipped = push.skipped_no_price or 0
+            skipped_parts = list(push.skipped_parts or [])
+            noteworthy = status in (
+                DealerPortalPushStatus.REJECTED, DealerPortalPushStatus.PARTIAL, DealerPortalPushStatus.FAILED
+            ) or skipped
+            if not noteworthy:
+                return
+            if status == DealerPortalPushStatus.FAILED and (push.attempts or 0) > 1:
                 return
             account = push.account_key
+            names = [
+                v.name for v in (session.get(Vendor, vid) for vid in (push.vendor_ids or [])) if v is not None
+            ]
             if status == DealerPortalPushStatus.FAILED and error:
-                # The same failure for the same account within a day is not
-                # news (e.g. 409 SESSION_ALREADY_ACTIVE on every new stock
-                # file until the session is freed) -- alert once, not 60 times.
                 from datetime import timedelta
 
                 earlier = (
@@ -382,18 +409,30 @@ def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, 
                     return
         landed = (getattr(upload, "inserted_count", 0) or 0) + (getattr(upload, "updated_count", 0) or 0)
         refused = getattr(upload, "failed_count", 0) or 0
+        who = ", ".join(names) or account
+
         if status == DealerPortalPushStatus.FAILED:
-            title = f"Dealer Portal upload failed ({account})"
-            detail = f"{error or 'no reason given'}. It will be retried automatically."
+            title = f"Dealer Portal: {who} stock NOT uploaded"
+            detail = f"Reason: {_plain_failure(error)} It will be retried automatically."
         else:
-            title = f"Dealer Portal refused {refused} row(s) ({account})"
-            detail = (
-                f"{landed} row(s) landed, {refused} refused -- usually parts that are not in the "
-                f"Portal's own parts list. {error or ''}".strip()
-            )
+            title = f"Dealer Portal: {who} — some parts not uploaded"
+            lines = [f"✅ {landed} part(s) uploaded."]
+            if refused:
+                lines.append(
+                    f"❌ {refused} refused by the Portal — those part numbers are not in the Portal's own "
+                    "parts list (the Portal team has to add them; it does not say which ones)."
+                )
+            if skipped:
+                example = ", ".join(skipped_parts[:6])
+                lines.append(
+                    f"⏭ {skipped} not uploaded — the vendor's file has no price for them (not even MRP), so "
+                    f"they would show at ₹0. e.g. {example}{' …' if skipped > len(skipped_parts[:6]) else ''}. "
+                    "Ask the vendor to send the file with price/MRP."
+                )
+            detail = "\n".join(lines)
         from backend.app.notifications import broker
 
-        broker.publish("warning" if status == DealerPortalPushStatus.PARTIAL else "error", title, detail)
+        broker.publish("error" if status == DealerPortalPushStatus.FAILED else "warning", title, detail)
     except Exception:  # noqa: BLE001
         logger.exception("Could not announce Dealer Portal push %s.", push_id)
 

@@ -28,6 +28,7 @@ function LastPush({ push }) {
       <span style={{ fontSize: "0.82rem", color: "var(--color-text-muted)" }}>{formatDateTime(push.at)}</span>
       <div style={{ fontSize: "0.82rem", marginTop: 2 }}>
         {push.rows_sent} sent · {push.inserted + push.updated} accepted · {push.failed} refused
+        {push.skipped_no_price ? ` · ${push.skipped_no_price} skipped (no price)` : ""}
       </div>
       {push.error && <div style={{ fontSize: "0.78rem", color: "var(--color-danger)" }}>{push.error}</div>}
     </div>
@@ -230,7 +231,7 @@ export function DealerPortalPage() {
         {preview && (
           <div className="panel" style={{ marginTop: 12, background: "var(--color-neutral-bg)" }}>
             <strong>Preview {preview.key}</strong> — {preview.reset_first ? "reset, then " : ""}upload {preview.rows_to_send} part(s)
-            {preview.no_price ? ` · ⚠ ${preview.no_price} without price (sent as 0)` : ""}
+            {preview.no_price ? ` · ⚠ ${preview.no_price} skipped (no price anywhere)` : ""}
             {preview.duplicates_collapsed ? ` · ${preview.duplicates_collapsed} duplicate(s) merged` : ""}. Nothing was sent.
             <pre style={{ fontSize: "0.8rem", margin: "8px 0 0", whiteSpace: "pre-wrap" }}>{preview.sample}</pre>
             <button type="button" className="btn btn--ghost" onClick={() => setPreview(null)}>

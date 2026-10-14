@@ -131,6 +131,7 @@ def _out(account: DealerPortalAccount, db: Session) -> dict:
             "inserted": last.inserted_count,
             "updated": last.updated_count,
             "failed": last.failed_count,
+            "skipped_no_price": getattr(last, "skipped_no_price", 0) or 0,
             "error": getattr(last, "error", None),
         },
     }

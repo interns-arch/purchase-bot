@@ -95,6 +95,8 @@ class DeltaResult:
     withheld_zero_count: int = 0
     duplicate_count: int = 0
     priceless_count: int = 0
+    # The part numbers skipped for having no price (for the team's message).
+    priceless_parts: list[str] = field(default_factory=list)
 
     @property
     def rows_sent(self) -> int:
@@ -238,8 +240,12 @@ def build_delta(account: DealerPortalAccount, session) -> DeltaResult:
             if price is None:
                 price = history.get(part)
             if price is None:
-                price = Decimal(0)
+                # No price anywhere -- in this file, the last one, or the
+                # vendor's history. NOT uploaded: the portal would show it at
+                # Rs 0 (Founder, 14 Oct 2026: skip it, and say how many).
                 result.priceless_count += 1
+                result.priceless_parts.append(part)
+                continue
         result.rows.append(
             DeltaRow(part_no=part, quantity=int(quantity), price=price)
         )

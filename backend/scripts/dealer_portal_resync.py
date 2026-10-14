@@ -63,7 +63,7 @@ def _describe(account, session) -> None:
     print(f"  of which zeroed        : {result.zeroed_count}")
     print(f"  sold out, NOT zeroed   : {result.withheld_zero_count}")
     print(f"  duplicates collapsed   : {result.duplicate_count}")
-    print(f"  no known price (sent 0): {result.priceless_count}")
+    print(f"  no price anywhere (skipped): {result.priceless_count}")
     print("  CSV preview:")
     for line in csv_builder.preview(result.rows, tat_days=account.tat_days).splitlines():
         print(f"    {line}")
