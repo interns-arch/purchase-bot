@@ -64,9 +64,17 @@ export function DealerPortalPage() {
     return ids;
   }, [data]);
 
-  const vendorChoices = vendors
-    .filter((v) => !connected.has(v.vendor_id))
-    .filter((v) => v.vendor_name.toLowerCase().includes(vendorFilter.toLowerCase()));
+  const vendorChoices = vendors.filter(
+    (v) => v.vendor_name.toLowerCase().includes(vendorFilter.toLowerCase()) || String(v.vendor_id) === String(form.vendor_id)
+  );
+
+  function changeLogin(account) {
+    const first = account.vendors[0];
+    if (!first) return;
+    setForm({ vendor_id: String(first.id), username: account.username || "", password: "", dealer_id: account.dealer_id ? String(account.dealer_id) : "" });
+    setVendorFilter("");
+    document.getElementById("dp-connect")?.scrollIntoView({ behavior: "smooth" });
+  }
 
   async function save(event) {
     event.preventDefault();
@@ -199,6 +207,9 @@ export function DealerPortalPage() {
                       <button type="button" className="btn btn--primary" disabled={!!busy || !a.stock.length} onClick={() => doPush(a)}>
                         {busy === `push-${a.key}` ? "Uploading…" : "Upload now"}
                       </button>{" "}
+                      <button type="button" className="btn btn--ghost" onClick={() => changeLogin(a)}>
+                        Change login
+                      </button>{" "}
                       {a.source === "file" && (
                         <>
                           <button type="button" className="btn btn--ghost" onClick={() => toggle(a)}>
@@ -229,8 +240,8 @@ export function DealerPortalPage() {
         )}
       </section>
 
-      <section className="panel">
-        <h3 style={{ fontSize: "0.95rem", margin: "0 0 8px" }}>➕ Connect a vendor to its Dealer Portal account</h3>
+      <section className="panel" id="dp-connect">
+        <h3 style={{ fontSize: "0.95rem", margin: "0 0 8px" }}>➕ Connect a vendor (or change its login)</h3>
         {!data.file_configured && (
           <p style={{ color: "var(--color-danger)" }}>DEALER_PORTAL_ACCOUNTS_FILE is not set on the server — logins cannot be saved yet.</p>
         )}
@@ -252,6 +263,7 @@ export function DealerPortalPage() {
             {vendorChoices.map((v) => (
               <option key={v.vendor_id} value={v.vendor_id}>
                 {v.vendor_name}
+                {connected.has(v.vendor_id) ? " (connected — new login replaces it)" : ""}
               </option>
             ))}
           </select>

@@ -211,11 +211,32 @@ def build_delta(account: DealerPortalAccount, session) -> DeltaResult:
     prev_qty, prev_price, _ = _collapse(prev_rows, strategy)
     result.duplicate_count = new_dupes
 
+    # Last known price from the vendor's WHOLE history, for parts the latest
+    # two files carry no price for (14 Oct 2026: forwarded copies of Spares
+    # 4U's files had the MRP column removed two days running -> 63 parts went
+    # to the portal at price 0).
+    missing = [p for p in new_qty if new_price.get(p) is None and prev_price.get(p) is None]
+    history: dict[str, Decimal] = {}
+    if missing and account.vendor_ids:
+        for part, price, mrp in (
+            session.query(VendorInventory.normalized_part_number, VendorInventory.price, VendorInventory.mrp)
+            .filter(
+                VendorInventory.vendor_id.in_(account.vendor_ids),
+                VendorInventory.normalized_part_number.in_(missing),
+            )
+            .filter((VendorInventory.price.isnot(None)) | (VendorInventory.mrp.isnot(None)))
+            .order_by(VendorInventory.id.desc())
+            .all()
+        ):
+            history.setdefault(part, price if price is not None else mrp)
+
     # 1. Everything in the new snapshot, at its stated quantity.
     for part, quantity in new_qty.items():
         price = new_price.get(part)
         if price is None:
             price = prev_price.get(part)  # carry forward, never invent a 0
+            if price is None:
+                price = history.get(part)
             if price is None:
                 price = Decimal(0)
                 result.priceless_count += 1

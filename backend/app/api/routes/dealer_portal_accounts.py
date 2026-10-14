@@ -153,17 +153,19 @@ def save_account(body: AccountIn, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Vendor not found.")
     if not dealer_portal_settings.accounts_file:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="DEALER_PORTAL_ACCOUNTS_FILE is not set on the server.")
+    # Already connected (server settings or an earlier save)? Keep its key, so
+    # the new login REPLACES the old one -- e.g. after a password change.
+    key = _key_for(vendor)
+    vendor_patterns = [vendor.name]
     for existing in credentials.load_accounts():
         credentials.resolve_account_vendors(existing, db)
-        if existing.source == "env" and vendor.id in existing.vendor_ids:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail=f"{vendor.name} is already set up in the server settings as {existing.key}.",
-            )
-    key = _key_for(vendor)
+        if vendor.id in existing.vendor_ids:
+            key = existing.key
+            vendor_patterns = existing.vendor_patterns or [vendor.name]
+            break
     account = DealerPortalAccount(
         key=key, username=body.username.strip(), password=body.password, token=None,
-        device_id=f"procurehub-{key.lower()}", vendor_patterns=[vendor.name],
+        device_id=f"procurehub-{key.lower()}", vendor_patterns=vendor_patterns,
         full_snapshot=True, tat_days=dealer_portal_settings.tat_days, enabled=True,
         reset_before_upload=True, source="file",
     )
@@ -181,7 +183,7 @@ def save_account(body: AccountIn, db: Session = Depends(get_db)) -> dict:
         "key": key,
         "username": account.username,
         "password": body.password,
-        "vendors": [vendor.name],
+        "vendors": vendor_patterns,
         "dealer_id": int(who["dealer_id"]),
         "dealer_name": who["display_name"],
         "full_snapshot": True,

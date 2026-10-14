@@ -308,20 +308,19 @@ def load_accounts() -> list[DealerPortalAccount]:
             continue
         accounts.append(account)
 
-    # File-defined accounts come in behind the env ones: an account key
-    # present in BOTH is taken from the env, so a single vendor can always be
-    # overridden without editing the credentials file.
-    by_key = {a.key for a in accounts}
-    for account in _accounts_from_file():
-        if account.key in by_key:
-            logger.info(
-                "Dealer Portal account %s is defined in BOTH the env and the "
-                "accounts file -- using the env one.",
-                account.key,
-            )
-            continue
-        accounts.append(account)
-    return accounts
+    # A key in BOTH: the accounts FILE wins (14 Oct 2026). The file is what
+    # the website's Dealer Portal page writes, so a changed password typed
+    # there replaces the one in backend/.env without anyone editing the server.
+    file_accounts = {a.key: a for a in _accounts_from_file()}
+    merged: list[DealerPortalAccount] = []
+    for account in accounts:
+        if account.key in file_accounts:
+            logger.info("Dealer Portal account %s: using the website-saved login over the env one.", account.key)
+            merged.append(file_accounts.pop(account.key))
+        else:
+            merged.append(account)
+    merged.extend(file_accounts.values())
+    return merged
 
 
 # ---------------------------------------------------------------- file writes
