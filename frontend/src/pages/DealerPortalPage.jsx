@@ -190,6 +190,9 @@ export function DealerPortalPage() {
                       <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)" }}>
                         login {a.username || "token"} · {a.reset_before_upload ? "reset + full list" : a.full_snapshot ? "full list" : "changes only"}
                         {a.source === "env" ? " · server settings" : ""}
+                        {a.waiting_for_fresh_stock ? (
+                          <div style={{ color: "var(--color-warning)" }}>waiting for a fresh stock file — old stock is not pushed</div>
+                        ) : null}
                       </div>
                     </td>
                     <td>{a.dealer_id ?? "—"}</td>

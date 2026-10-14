@@ -123,6 +123,11 @@ def _out(account: DealerPortalAccount, db: Session) -> dict:
         "enabled": account.enabled,
         "full_snapshot": account.full_snapshot,
         "reset_before_upload": account.reset_before_upload,
+        "push_stock_after": account.push_stock_after,
+        "waiting_for_fresh_stock": bool(
+            account.push_stock_after
+            and not any(str(s["at"]) >= account.push_stock_after for s in stock)
+        ),
         "stock": stock,
         "last_push": None if last is None else {
             "at": last.created_at,

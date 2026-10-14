@@ -113,6 +113,10 @@ class DealerPortalAccount:
     # managed from the website's Dealer Portal page).
     source: str = "env"
     dealer_id: int | None = None
+    # Push only stock files received AFTER this moment (ISO, IST). Set when a
+    # vendor is switched on whose stock in the bot is old/sample data (Shree
+    # Shyam, 14 Oct 2026): nothing goes to the portal until a fresh file.
+    push_stock_after: str | None = None
 
     @property
     def has_credentials(self) -> bool:
@@ -239,6 +243,7 @@ def _accounts_from_file() -> list[DealerPortalAccount]:
             tat_days=int(entry.get("tat_days") or dealer_portal_settings.tat_days),
             enabled=bool(entry.get("enabled", True)),
             reset_before_upload=bool(entry.get("reset_before_upload", False)),
+            push_stock_after=(str(entry["push_stock_after"]) if entry.get("push_stock_after") else None),
             source="file",
             dealer_id=int(entry["dealer_id"]) if str(entry.get("dealer_id") or "").isdigit() else None,
         )

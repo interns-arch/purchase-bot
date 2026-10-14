@@ -178,6 +178,24 @@ def push_account(
     with get_session() as session:
         if not account.vendor_ids:
             credentials.resolve_account_vendors(account, session)
+        if account.push_stock_after:
+            from datetime import datetime
+
+            from core.models import InventoryImport
+
+            cutoff = datetime.fromisoformat(account.push_stock_after)
+            newest = (
+                session.query(InventoryImport.created_at)
+                .filter(InventoryImport.vendor_id.in_(account.vendor_ids or [-1]), InventoryImport.is_active.is_(True))
+                .order_by(InventoryImport.created_at.desc())
+                .first()
+            )
+            if newest is None or newest[0] < cutoff:
+                logger.info(
+                    "Dealer Portal %s: waiting for stock received after %s -- the stock in the bot is older; nothing sent.",
+                    account.key, account.push_stock_after,
+                )
+                return DealerPortalPushStatus.SUCCESS
         result = delta.build_delta(account, session)
 
         push = DealerPortalPush(
