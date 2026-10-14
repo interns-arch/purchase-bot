@@ -137,11 +137,36 @@ def _out(account: DealerPortalAccount, db: Session) -> dict:
     }
 
 
+def _waiting_vendors(accounts: list[dict], db: Session) -> list[dict]:
+    """Vendors the Founder wants on the portal (DEALER_PORTAL_WANTED_VENDORS,
+    vendor ids) that have no login yet -- shown as "Not connected" rows."""
+    import os
+
+    connected = {v["id"] for a in accounts for v in a["vendors"]}
+    out = []
+    for part in (os.environ.get("DEALER_PORTAL_WANTED_VENDORS") or "").split(","):
+        if not part.strip().isdigit() or int(part) in connected:
+            continue
+        vendor = db.get(Vendor, int(part))
+        if vendor is None:
+            continue
+        imp = db.execute(
+            select(InventoryImport).where(InventoryImport.vendor_id == vendor.id, InventoryImport.is_active.is_(True))
+        ).scalar_one_or_none()
+        out.append({
+            "vendor_id": vendor.id,
+            "name": vendor.name,
+            "stock": None if imp is None else {"rows": imp.row_count, "file": imp.file_name, "at": imp.created_at},
+        })
+    return out
+
+
 @router.get("/accounts")
 def list_accounts(db: Session = Depends(get_db)) -> dict:
     accounts = [_out(a, db) for a in credentials.load_accounts()]
     return {
         "accounts": accounts,
+        "waiting": _waiting_vendors(accounts, db),
         "file_configured": bool(dealer_portal_settings.accounts_file),
         "push_enabled": dealer_portal_settings.enabled,
     }

@@ -69,6 +69,13 @@ export function DealerPortalPage() {
     (v) => v.vendor_name.toLowerCase().includes(vendorFilter.toLowerCase()) || String(v.vendor_id) === String(form.vendor_id)
   );
 
+  function connect(vendorId) {
+    setForm({ vendor_id: String(vendorId), username: "", password: "", dealer_id: "" });
+    setVendorFilter("");
+    document.getElementById("dp-connect")?.scrollIntoView({ behavior: "smooth" });
+    setTimeout(() => document.getElementById("dp-username")?.focus(), 400);
+  }
+
   function changeLogin(account) {
     const first = account.vendors[0];
     if (!first) return;
@@ -224,6 +231,29 @@ export function DealerPortalPage() {
                     </td>
                   </tr>
                 ))}
+                {(data.waiting || []).map((w) => (
+                  <tr key={`w${w.vendor_id}`} style={{ background: "var(--color-warning-bg)" }}>
+                    <td>
+                      <strong>{w.name}</strong>
+                      <div style={{ fontSize: "0.78rem", color: "var(--color-warning)" }}>not connected — login needed</div>
+                    </td>
+                    <td>—</td>
+                    <td style={{ fontSize: "0.85rem" }}>
+                      {w.stock ? `${w.stock.rows} parts · ${formatDateTime(w.stock.at)}` : "no stock file yet"}
+                    </td>
+                    <td>
+                      <span style={{ color: "var(--color-text-muted)" }}>nothing goes to the portal yet</span>
+                    </td>
+                    <td>
+                      <span className="pill pill--warning">Off</span>
+                    </td>
+                    <td>
+                      <button type="button" className="btn btn--primary" onClick={() => connect(w.vendor_id)}>
+                        Connect
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -271,6 +301,7 @@ export function DealerPortalPage() {
           <input
             className="field__input"
             style={{ maxWidth: 170 }}
+            id="dp-username"
             placeholder="Portal username"
             autoComplete="off"
             value={form.username}
