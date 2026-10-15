@@ -461,7 +461,25 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
 def _candidates(order: m.AdvanceOrder, key: str, lines: list[m.AdvanceOrderLine], session: Session) -> list[Vendor]:
     """Who may be asked next for this group of lines, first to last."""
     if order.kind != m.KIND_DEALER_STOCK:
-        return vendors_for_brand(key, session)
+        # Founder, 15 Oct 2026: ask EVERY vendor of the brand at once
+        # (ADVANCE_ORDER_QUOTE_FANOUT high), and first of all any vendor whose
+        # latest stock file shows the part -- even one not on the brand list.
+        from backend.app.advance_orders import stock_routing
+
+        holders: list[Vendor] = []
+        seen: set[int] = set()
+        for line in lines:
+            try:
+                found = stock_routing.stock_holders(line, session)
+            except Exception:  # noqa: BLE001 -- stock lookup must never block the question
+                logger.exception("Advance order %s: stock-holder lookup failed for %s.", order.id, line.part_number)
+                found = []
+            for holder in found:
+                vendor = session.get(Vendor, holder.vendor_id)
+                if vendor is not None and vendor.id not in seen and vendor.active:
+                    holders.append(vendor)
+                    seen.add(vendor.id)
+        return holders + [v for v in vendors_for_brand(key, session) if v.id not in seen]
     from backend.app.advance_orders import stock_routing
 
     line = lines[0]

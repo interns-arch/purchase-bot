@@ -159,7 +159,7 @@ export function VendorPriorityPage() {
   function sortByPerformance() {
     const order = (perf.brands[brand] || []).map((x) => x.vendor_id).filter((id) => ids.includes(id));
     const rest = ids.filter((id) => !order.includes(id));
-    if (!window.confirm(`Reorder ${brand} by performance score? The best performer will be asked first.`)) return;
+    if (!window.confirm(`Reorder ${brand} by performance score? The best performer goes to the top.`)) return;
     save([...order, ...rest], `${brand}: ordered by performance.`);
   }
 
@@ -208,7 +208,7 @@ export function VendorPriorityPage() {
             </p>
           </div>
           <div className="stat-card">
-            <p className="stat-card__label">👑 Preferred (asked first)</p>
+            <p className="stat-card__label">👑 Preferred (#1 on your list)</p>
             <p className="stat-card__value" style={{ fontSize: "1.1rem" }}>{preferred ? preferred.vendor_name : "—"}</p>
             <p className="stat-card__hint">
               {preferred && best && preferred.vendor_id !== best.vendor_id
@@ -220,8 +220,9 @@ export function VendorPriorityPage() {
           </div>
         </div>
         <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "10px 0 0" }}>
-          The bot asks #1 first; the next vendor only after a "no". A vendor silent for 2 hours (with 2 reminders) goes to
-          Prateek sir. Score = reply rate 35 + reply speed 30 + "yes" rate 20 + discount 15, from the last 60 days of
+          For a part request the bot asks EVERY vendor on this brand's list at the same time (plus any vendor whose stock
+          file shows the part); the fastest delivery wins, then the bigger discount. This order is for your view and
+          breaks ties. If nobody says yes within 2 hours (with 2 reminders), Prateek sir is asked. Score = reply rate 35 + reply speed 30 + "yes" rate 20 + discount 15, from the last 60 days of
           WhatsApp. * = little history yet.
         </p>
       </section>

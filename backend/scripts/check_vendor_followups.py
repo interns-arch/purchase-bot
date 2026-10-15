@@ -225,6 +225,41 @@ def main() -> int:
         check("adding him again reuses the vendor (no duplicate)", again.id == did)
         check("...and just moves him to #3", s.execute(select(m.VendorBrand.priority).where(m.VendorBrand.vendor_id == did, m.VendorBrand.brand == "HYUNDAI")).scalar() == 3)
 
+    print("\n[9] ask EVERY brand vendor at once + the vendor whose stock file shows the part")
+    from backend.app.advance_orders import stock_routing
+    from decimal import Decimal as D
+    with get_session() as s:
+        stocky = Vendor(name="Stocky Traders", vendor_code="CT_ST")
+        s.add(stocky)
+        s.flush()
+        s.add(m.AdvanceVendorContact(vendor_id=stocky.id, whatsapp_number="919500000777"))
+        sid = stocky.id
+    real_holders = stock_routing.stock_holders
+    stock_routing.stock_holders = lambda line, session: [stock_routing.StockHolder(vendor_id=sid, vendor_name="Stocky Traders", remaining=D(4))]
+    cfg.quote_fanout = 50
+    sent.clear()
+    with get_session() as s:
+        o = m.AdvanceOrder(kind=m.KIND_ADVANCE, customer_name="Cust 9")
+        o.lines = [m.AdvanceOrderLine(part_number="86514C9000", brand="HYUNDAI", qty=2)]
+        s.add(o)
+        s.flush()
+        service._advance(o, s, t0)
+        oid9 = o.id
+        asked = {q.vendor_id for q in s.execute(select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.advance_order_id == oid9)).scalars()}
+        brand_ids = {r.vendor_id for r in s.execute(select(m.VendorBrand).where(m.VendorBrand.brand == "HYUNDAI")).scalars()}
+    stock_routing.stock_holders = real_holders
+    check("every HYUNDAI vendor asked in the same go", brand_ids <= asked)
+    check("stock holder (not on the brand list) asked too", sid in asked)
+    check("stock holder asked first", bool(sent) and sent[0][0] == "919500000777")
+    with get_session() as s:
+        service.handle_vendor_text("919100000001", "haan 7 din", s, t0 + timedelta(minutes=5))
+        service.handle_vendor_text("919500000777", "haan 2 din", s, t0 + timedelta(minutes=8))
+    with get_session() as s:
+        service.tick(s, t0 + timedelta(minutes=61))  # quote window closed
+        line = s.get(m.AdvanceOrder, oid9).lines[0]
+        check("fastest delivery wins (Stocky, 2 days, over Alpha's 7)", line.status == m.LINE_AVAILABLE and line.vendor_id == sid)
+    cfg.quote_fanout = 1
+
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0
 

@@ -34,7 +34,7 @@ const PAGE_PURPOSE = {
   "/part-intelligence": "Search one part: who stocks it, how much is free, at what price.",
   "/file-inbox": "Every file received — imported, failed or needing review.",
   "/settings": "Account, integrations and system status.",
-  "/vendor-priority": "Brand-wise vendor order the bot follows — #1 is asked first. Add vendors, reorder, see who replies best.",
+  "/vendor-priority": "Brand-wise vendor lists: every vendor of the brand is asked for a part at once. Add vendors, reorder, see who replies best.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
   "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",
 };
