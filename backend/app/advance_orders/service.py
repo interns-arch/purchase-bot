@@ -677,7 +677,7 @@ def _notify_if_changed(
         if before[0] == m.ASKING and order.status != m.ASKING
         else callback.EVENT_QUOTE_UPDATED
     )
-    callback.notify(event, order_out(order, session))
+    callback.notify(event, public_order_out(order, session))  # never vendor details
 
 
 def tick(session: Session, now: datetime | None = None) -> None:
@@ -1423,6 +1423,45 @@ def _quote_out(quote: m.AdvanceVendorQuote, vendors: dict[int, str], brand: str,
         },
         "raw_reply": quote.raw_reply,
         "received_at": quote.created_at.isoformat() if quote.created_at else None,
+    }
+
+
+def public_order_out(order: m.AdvanceOrder, session: Session) -> dict:
+    """What the SALES BOT gets (Founder, 15 Oct 2026: "I do not want to give
+    any information to the sales bot about the vendor"). Only what it needs
+    to tell the customer -- availability, quantity, when -- and nothing about
+    who has it: no vendor name or id, no discount, buying price, terms, the
+    vendor's own reply, notes (they name vendors) or Dealer Portal refs.
+    The website (desk) keeps the full `order_out`.
+
+    The sales bot (cartrends-autoflow core/advanceOrder.js) reads: status,
+    lines[id, part_number, qty, status, available_qty, eta_date, tat_days]."""
+    lines = []
+    for line in order.lines:
+        available = line.status == m.LINE_AVAILABLE
+        lines.append(
+            {
+                "id": line.id,
+                "part_number": line.part_number,
+                "part_name": line.part_name,
+                "brand": line.brand,
+                "qty": line.qty,
+                "status": line.status,
+                "available_qty": line.available_qty,
+                "eta_date": line.eta_date.isoformat() if line.eta_date else None,
+                "tat_days": line.tat_days,
+                "tat_band": ranking.band_label(ranking.tat_band(line.tat_days)) if available else None,
+            }
+        )
+    return {
+        "id": order.id,
+        "external_ref": order.external_ref,
+        "status": order.status,
+        "kind": order.kind or m.KIND_ADVANCE,
+        "needed_by": order.needed_by.isoformat() if order.needed_by else None,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+        "confirmed_at": order.confirmed_at.isoformat() if order.confirmed_at else None,
+        "lines": lines,
     }
 
 

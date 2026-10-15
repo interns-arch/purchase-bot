@@ -142,7 +142,7 @@ def create_advance_order(body: AdvanceOrderIn, db: Session = Depends(get_db)) ->
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
-    return service.order_out(order, db)
+    return service.public_order_out(order, db)
 
 
 dealer_stock_router = APIRouter(prefix="/api/dealer-stock-orders", tags=["advance-orders"])
@@ -162,12 +162,12 @@ def create_dealer_stock_order(body: DealerStockOrderIn, db: Session = Depends(ge
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
-    return service.order_out(order, db)
+    return service.public_order_out(order, db)
 
 
 @api_router.get("/{order_id}", dependencies=[Depends(require_api_key)])
 def get_advance_order(order_id: int, db: Session = Depends(get_db)) -> dict:
-    return service.order_out(_get(order_id, db), db)
+    return service.public_order_out(_get(order_id, db), db)
 
 
 @api_router.post("/{order_id}/confirm", dependencies=[Depends(require_api_key)])
@@ -179,7 +179,7 @@ def confirm_advance_order(order_id: int, body: ConfirmIn | None = None, db: Sess
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from None
-    return service.order_out(order, db)
+    return service.public_order_out(order, db)
 
 
 @api_router.post("/{order_id}/cancel", dependencies=[Depends(require_api_key)])
@@ -191,7 +191,7 @@ def cancel_advance_order(order_id: int, db: Session = Depends(get_db)) -> dict:
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from None
-    return service.order_out(order, db)
+    return service.public_order_out(order, db)
 
 
 desk_router = APIRouter(tags=["advance-orders"], dependencies=[Depends(get_current_user)])
