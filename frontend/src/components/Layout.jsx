@@ -11,6 +11,7 @@ const NAV_GROUPS = [
     label: "Overview",
     items: [
       { to: "/command-centre", label: "Command Centre", icon: "🏠" },
+      { to: "/performance", label: "Performance", icon: "🏆" },
       { to: "/vendor-priority", label: "Vendor Priority", icon: "⭐" },
       { to: "/advance-orders", label: "Advance Orders", icon: "📦" },
       { to: "/chats", label: "Chats", icon: "💬" },

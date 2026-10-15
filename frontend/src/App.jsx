@@ -34,6 +34,7 @@ const VendorInvoicesPage = lazy(() =>
 const ChatsPage = lazy(() => import("./pages/ChatsPage").then((m) => ({ default: m.ChatsPage })));
 const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then((m) => ({ default: m.VendorPriorityPage })));
 const DealerPortalPage = lazy(() => import("./pages/DealerPortalPage").then((m) => ({ default: m.DealerPortalPage })));
+const TeamPerformancePage = lazy(() => import("./pages/TeamPerformancePage").then((m) => ({ default: m.TeamPerformancePage })));
 const PurchaseOrdersPage = lazy(() =>
   import("./pages/PurchaseOrdersPage").then((m) => ({ default: m.PurchaseOrdersPage }))
 );
@@ -100,6 +101,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <DeliveryTrackingPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/performance"
+              element={
+                <ProtectedRoute>
+                  <TeamPerformancePage />
                 </ProtectedRoute>
               }
             />
