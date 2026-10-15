@@ -36,6 +36,8 @@ export function TeamPerformancePage() {
   const [days, setDays] = useState(30);
   const [data, setData] = useState(null);
   const [showAll, setShowAll] = useState(false);
+  const [view, setView] = useState("daily");
+  const [openDay, setOpenDay] = useState(null);
 
   useEffect(() => {
     setData(null);
@@ -47,7 +49,14 @@ export function TeamPerformancePage() {
   }, [days]);
 
   const periodPicker = (
-    <div className="toolbar" style={{ gap: 6 }}>
+    <div className="toolbar" style={{ gap: 6, flexWrap: "wrap" }}>
+      <button type="button" className={"btn " + (view === "daily" ? "btn--primary" : "btn--ghost")} onClick={() => setView("daily")}>
+        📅 Day by day
+      </button>
+      <button type="button" className={"btn " + (view === "summary" ? "btn--primary" : "btn--ghost")} onClick={() => setView("summary")}>
+        📊 Summary
+      </button>
+      <span style={{ width: 16 }} />
       {PERIODS.map((p) => (
         <button key={p} type="button" className={"btn " + (p === days ? "btn--primary" : "btn--ghost")} onClick={() => setDays(p)}>
           Last {p} days
@@ -81,6 +90,10 @@ export function TeamPerformancePage() {
     >
       {periodPicker}
 
+      {view === "daily" ? (
+        <DailyView data={data} openDay={openDay} setOpenDay={setOpenDay} />
+      ) : (
+      <>
       <section className="panel">
         <div className="stat-grid">
           <Stat
@@ -227,6 +240,157 @@ export function TeamPerformancePage() {
           />
         </div>
       </section>
+      </>
+      )}
     </Layout>
+  );
+}
+
+function whoLabel(who) {
+  if (who === "vendor itself") return "🙋 vendor";
+  if (who === "website / e-mail") return "🌐 web";
+  return `👤 ${who}`;
+}
+
+function DailyView({ data, openDay, setOpenDay }) {
+  const registered = data.vendors.filter((v) => v.registered);
+  const days = data.daily;
+  return (
+    <>
+      <section className="panel">
+        <h3 style={{ fontSize: "1rem", margin: "0 0 4px" }}>📅 Day by day</h3>
+        <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "0 0 10px" }}>
+          Click a day to see which vendors sent stock (time, who sent it) and which did not. Vendors = registered outside
+          vendors the bot asks every day; warehouses are counted separately.
+        </p>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Day</th>
+                <th>Vendors sent</th>
+                <th>On time</th>
+                <th>Files</th>
+                <th>Who sent the files</th>
+                <th>Bot asked</th>
+                <th>Enquiries</th>
+                <th>Dealer Portal</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.map((d) => {
+                const pct = d.vendors_asked ? Math.round((100 * d.vendors_sent) / d.vendors_asked) : 0;
+                const open = openDay === d.date;
+                return [
+                  <tr key={d.date} onClick={() => setOpenDay(open ? null : d.date)} style={{ cursor: "pointer", opacity: d.sunday ? 0.6 : 1 }}>
+                    <td>
+                      <strong>{open ? "▾" : "▸"} {d.weekday} {d.date.slice(8, 10)}/{d.date.slice(5, 7)}</strong>
+                      {d.sunday ? <div style={{ fontSize: "0.75rem" }}>Sunday</div> : null}
+                    </td>
+                    <td>
+                      <Bar value={pct} />
+                      <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)" }}>
+                        {d.vendors_sent} of {d.vendors_asked}{d.warehouses_sent ? ` · +${d.warehouses_sent} warehouse` : ""}
+                      </div>
+                    </td>
+                    <td>{d.vendors_sent ? `${d.on_time} / ${d.vendors_sent}` : "—"}</td>
+                    <td>
+                      {d.files}
+                      {d.failed_files ? <span style={{ color: "var(--color-danger)", fontSize: "0.78rem" }}> · {d.failed_files} unreadable</span> : null}
+                    </td>
+                    <td style={{ fontSize: "0.82rem" }}>
+                      {d.senders.length ? d.senders.map((x) => <div key={x.who}>{whoLabel(x.who)} · {x.files}</div>) : "—"}
+                    </td>
+                    <td style={{ fontSize: "0.82rem" }}>{d.bot_requests + d.bot_reminders ? `${d.bot_requests} req · ${d.bot_reminders} rem` : "—"}</td>
+                    <td style={{ fontSize: "0.82rem" }}>{d.enquiries ? `${d.enquiries_answered}/${d.enquiries} answered` : "—"}</td>
+                    <td style={{ fontSize: "0.82rem" }}>
+                      {d.portal_ok + d.portal_failed ? `${d.portal_ok} ok${d.portal_failed ? ` · ${d.portal_failed} failed` : ""}` : "—"}
+                    </td>
+                  </tr>,
+                  open ? (
+                    <tr key={`${d.date}-detail`}>
+                      <td colSpan={8} style={{ background: "var(--color-neutral-bg)" }}>
+                        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                          <div style={{ minWidth: 260 }}>
+                            <strong>✅ Sent stock ({d.vendors.length})</strong>
+                            {d.vendors.length ? (
+                              d.vendors.map((v) => (
+                                <div key={v.vendor} style={{ fontSize: "0.85rem" }}>
+                                  {v.time} · {v.vendor} · {whoLabel(v.who)}
+                                  {!v.registered ? <span style={{ color: "var(--color-text-muted)" }}> (warehouse)</span> : null}
+                                </div>
+                              ))
+                            ) : (
+                              <div style={{ fontSize: "0.85rem" }}>nobody</div>
+                            )}
+                          </div>
+                          <div style={{ minWidth: 260 }}>
+                            <strong>❌ Did not send ({d.missing.length})</strong>
+                            {d.missing.map((name) => (
+                              <div key={name} style={{ fontSize: "0.85rem" }}>{name}</div>
+                            ))}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null,
+                ];
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel">
+        <h3 style={{ fontSize: "1rem", margin: "0 0 4px" }}>🗓️ Vendor × day</h3>
+        <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "0 0 10px" }}>
+          ✓ time = stock arrived (hover for who sent it) · ✗ = nothing that day.
+        </p>
+        <div className="table-scroll">
+          <table className="data-table" style={{ fontSize: "0.8rem" }}>
+            <thead>
+              <tr>
+                <th style={{ position: "sticky", left: 0, background: "#f8fafc" }}>Vendor</th>
+                {days.map((d) => (
+                  <th key={d.date} style={{ textAlign: "center", opacity: d.sunday ? 0.5 : 1 }}>
+                    {d.weekday.slice(0, 2)}
+                    <br />
+                    {d.date.slice(8, 10)}
+                  </th>
+                ))}
+                <th>Days</th>
+              </tr>
+            </thead>
+            <tbody>
+              {registered.map((v) => (
+                <tr key={v.vendor_id}>
+                  <td style={{ position: "sticky", left: 0, background: "#fff", whiteSpace: "nowrap" }}>
+                    <strong>{v.vendor.length > 26 ? `${v.vendor.slice(0, 26)}…` : v.vendor}</strong>
+                  </td>
+                  {days.map((d) => {
+                    const hit = v.by_day[d.date];
+                    let bg = d.sunday ? "transparent" : "var(--color-danger-bg)";
+                    if (hit) bg = hit.time < data.reminder_time ? "var(--color-success-bg)" : "var(--color-warning-bg)";
+                    return (
+                      <td
+                        key={d.date}
+                        title={hit ? `${hit.time} · ${hit.who}` : "nothing"}
+                        style={{ textAlign: "center", background: bg, color: hit ? "inherit" : "var(--color-danger)", whiteSpace: "nowrap" }}
+                      >
+                        {hit ? `✓ ${hit.time}` : d.sunday ? "" : "✗"}
+                      </td>
+                    );
+                  })}
+                  <td><strong>{v.days_sent}</strong></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ color: "var(--color-text-muted)", fontSize: "0.8rem", margin: "6px 0 0" }}>
+          Green = before the {data.reminder_time} reminder · yellow = after it · red = no stock.
+        </p>
+      </section>
+    </>
   );
 }

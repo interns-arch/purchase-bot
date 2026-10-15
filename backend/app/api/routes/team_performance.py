@@ -134,6 +134,10 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
 
     v_stats: dict[int, dict] = {}
     team: dict[str, dict] = {}
+    daily: dict[date, dict] = defaultdict(lambda: {
+        "files": 0, "failed": 0, "senders": Counter(), "requests": 0, "reminders": 0,
+        "portal_ok": 0, "portal_failed": 0, "enquiries": 0, "answered": 0,
+    })
     for imp in imports:
         if imp.vendor_id in own_stock:
             continue
@@ -144,12 +148,13 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
         s = v_stats.setdefault(imp.vendor_id, {
             "vendor_id": imp.vendor_id, "vendor": vendor_names.get(imp.vendor_id, str(imp.vendor_id)),
             "days": set(), "on_time_days": set(), "first_times": {}, "files": 0, "failed": 0,
-            "senders": Counter(), "last": None,
+            "senders": Counter(), "last": None, "by_day": {},
         })
         number = sender_of(imp)
         kind, label = who(number, imp.vendor_id)
         if failed:
             s["failed"] += 1
+            daily[imp.created_at.date()]["failed"] += 1
         else:
             day = imp.created_at.date()
             s["files"] += 1
@@ -157,6 +162,9 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
             first = s["first_times"].get(day)
             if first is None or imp.created_at.time() < first:
                 s["first_times"][day] = imp.created_at.time()
+                s["by_day"][day] = {"time": imp.created_at.strftime("%H:%M"), "who": label}
+            daily[day]["files"] += 1
+            daily[day]["senders"][label] += 1
             s["senders"][label] += 1
             s["last"] = max(s["last"] or imp.created_at, imp.created_at)
         if kind == "team":
@@ -180,12 +188,15 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
         kind = "reminders" if at.time() >= reminder_at else "requests"
         for vid in vendor_of_number.get(number, set()):
             asked[vid][kind] += 1
+        daily[at.date()][kind] += 1
 
     # ---- Dealer Portal, latest per vendor
     portal: dict[int, dict] = {}
     for p in db.execute(
         select(DealerPortalPush).where(DealerPortalPush.created_at >= start).order_by(DealerPortalPush.id)
     ).scalars():
+        status_text = getattr(p.status, "value", str(p.status))
+        daily[p.created_at.date()]["portal_failed" if status_text in ("FAILED", "REJECTED") else "portal_ok"] += 1
         for vid in p.vendor_ids or []:
             row = portal.setdefault(vid, {"uploads": 0, "accepted": 0, "last_status": None})
             row["uploads"] += 1
@@ -196,7 +207,7 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
     for vid in numbers_of_vendor:
         if vid not in v_stats and vid not in own_stock and vid in vendor_names:
             v_stats[vid] = {"vendor_id": vid, "vendor": vendor_names[vid], "days": set(), "on_time_days": set(),
-                            "first_times": {}, "files": 0, "failed": 0, "senders": Counter(), "last": None}
+                            "first_times": {}, "files": 0, "failed": 0, "senders": Counter(), "last": None, "by_day": {}}
 
     vendors_out = []
     for vid, s in v_stats.items():
@@ -221,6 +232,7 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
             "last_received": s["last"],
             "portal": portal.get(vid),
             "registered": vid in numbers_of_vendor,
+            "by_day": {d.isoformat(): v for d, v in s["by_day"].items()},
         })
     vendors_out.sort(key=lambda r: (-r["consistency"], -r["on_time_days"], r["vendor"]))
 
@@ -292,6 +304,13 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
         bot["enquiries_sent"] = sum(n for s, n in q.items() if s != m.Q_QUEUED)
         bot["enquiries_answered"] = q.get(m.Q_REPLIED, 0)
         bot["enquiries_unanswered"] = q.get(m.Q_TIMEOUT, 0)
+        for created, status_value in db.execute(
+            select(m.AdvanceVendorQuery.created_at, m.AdvanceVendorQuery.status).where(m.AdvanceVendorQuery.created_at >= start)
+        ):
+            if status_value != m.Q_QUEUED:
+                daily[created.date()]["enquiries"] += 1
+            if status_value == m.Q_REPLIED:
+                daily[created.date()]["answered"] += 1
         bot["advance_orders"] = db.execute(
             select(func.count()).select_from(m.AdvanceOrder).where(m.AdvanceOrder.created_at >= start)
         ).scalar() or 0
@@ -304,8 +323,43 @@ def team_performance(days: int = Query(30, ge=1, le=365), db: Session = Depends(
     ).all()))
     bot["portal_uploads"] = {getattr(k, "value", str(k)): n for k, n in pushes.items()}
 
+    # ---- one row per day, newest first
+    registered_ids = set(numbers_of_vendor)
+    daily_out = []
+    d = now.date()
+    while d >= start_day:
+        sent_vendors = [v for v in vendors_out if d.isoformat() in v["by_day"]]
+        sent_registered = [v for v in sent_vendors if v["vendor_id"] in registered_ids]
+        on_time = [v for v in sent_registered if v["by_day"][d.isoformat()]["time"] < reminder_at.strftime("%H:%M")]
+        row = daily.get(d) or daily[d]
+        daily_out.append({
+            "date": d.isoformat(),
+            "weekday": d.strftime("%a"),
+            "sunday": d.weekday() == 6,
+            "vendors_sent": len(sent_registered),
+            "vendors_asked": len(registered_ids),
+            "on_time": len(on_time),
+            "warehouses_sent": len(sent_vendors) - len(sent_registered),
+            "files": row["files"],
+            "failed_files": row["failed"],
+            "senders": [{"who": k, "files": n} for k, n in row["senders"].most_common()],
+            "bot_requests": row["requests"],
+            "bot_reminders": row["reminders"],
+            "enquiries": row["enquiries"],
+            "enquiries_answered": row["answered"],
+            "portal_ok": row["portal_ok"],
+            "portal_failed": row["portal_failed"],
+            "vendors": [
+                {"vendor": v["vendor"], **v["by_day"][d.isoformat()], "registered": v["vendor_id"] in registered_ids}
+                for v in sorted(sent_vendors, key=lambda x: x["by_day"][d.isoformat()]["time"])
+            ],
+            "missing": sorted(v["vendor"] for v in vendors_out if v["vendor_id"] in registered_ids and v not in sent_vendors),
+        })
+        d -= timedelta(days=1)
+
     return {
         "days": days,
+        "daily": daily_out,
         "from": start_day,
         "to": now.date(),
         "working_days": working,
