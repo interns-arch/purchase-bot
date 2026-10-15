@@ -96,14 +96,7 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/delivery-tracking"
-              element={
-                <ProtectedRoute>
-                  <DeliveryTrackingPage />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/delivery-tracking" element={<Navigate to="/command-centre" replace />} />
             <Route
               path="/performance"
               element={
@@ -136,14 +129,7 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/vendor-invoices"
-              element={
-                <ProtectedRoute>
-                  <VendorInvoicesPage />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/vendor-invoices" element={<Navigate to="/command-centre" replace />} />
             <Route
               path="/advance-orders"
               element={
@@ -152,30 +138,9 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/purchase-orders"
-              element={
-                <ProtectedRoute>
-                  <PurchaseOrdersPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/vendor-performance"
-              element={
-                <ProtectedRoute>
-                  <VendorPerformancePage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/vendor-performance/:vendorId"
-              element={
-                <ProtectedRoute>
-                  <VendorPerformanceDetailPage />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/purchase-orders" element={<Navigate to="/command-centre" replace />} />
+            <Route path="/vendor-performance" element={<Navigate to="/performance" replace />} />
+            <Route path="/vendor-performance/:vendorId" element={<Navigate to="/performance" replace />} />
             <Route
               path="/command-centre"
               element={
@@ -192,14 +157,7 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/audit-log"
-              element={
-                <ProtectedRoute>
-                  <AuditLogPage />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/audit-log" element={<Navigate to="/command-centre" replace />} />
             <Route
               path="/file-inbox"
               element={

@@ -1,71 +1,40 @@
+import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
-// Grouped by WHAT THE PERSON IS DOING, not by data type -- a flat list of
-// thirteen names made it impossible to guess which page answered which
-// question. "Daily work" follows the real business flow in order: vendor
-// stock arrives -> a customer orders -> compare and reserve -> raise the PO
-// -> the vendor invoices -> goods are delivered. Page names are deliberately
-// unchanged; only the grouping and the one-line descriptions are new.
-const NAV_GROUPS = [
-  {
-    label: "Overview",
-    items: [
-      { to: "/command-centre", label: "Command Centre", icon: "🏠" },
-      { to: "/performance", label: "Performance", icon: "🏆" },
-      { to: "/vendor-priority", label: "Vendor Priority", icon: "⭐" },
-      { to: "/advance-orders", label: "Advance Orders", icon: "📦" },
-      { to: "/chats", label: "Chats", icon: "💬" },
-      { to: "/dealer-portal", label: "Dealer Portal", icon: "🔗" },
-    ],
-  },
-  {
-    label: "Daily work",
-    items: [
-      { to: "/vendor-inventory", label: "Vendor Inventory", icon: "🗂️" },
-      { to: "/customer-orders", label: "Customer Orders", icon: "🧾" },
-      { to: "/vendor-comparison", label: "Vendor Comparison", icon: "⚖️" },
-      { to: "/purchase-orders", label: "Purchase Orders", icon: "📝" },
-      { to: "/vendor-invoices", label: "Vendor Invoices", icon: "💰" },
-      { to: "/delivery-tracking", label: "Delivery Tracking", icon: "🚚" },
-    ],
-  },
-  {
-    label: "Look up",
-    items: [
-      { to: "/part-intelligence", label: "Part Intelligence", icon: "🔎" },
-      { to: "/vendor-performance", label: "Vendor Performance", icon: "📈" },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      { to: "/file-inbox", label: "File Inbox", icon: "📥" },
-      { to: "/audit-log", label: "Audit Log", icon: "🕘" },
-      { to: "/settings", label: "Settings", icon: "⚙️" },
-    ],
-  },
+// One short top menu, like the sales bot's dashboard (Founder, 15 Oct 2026:
+// "make it simple, remove duplicates and unused things"). Eight everyday
+// pages; the rarely used ones sit under "More". Pages with no use in 30 days
+// (Purchase Orders, Vendor Invoices, Delivery Tracking, Audit Log) and the
+// duplicate Vendor Performance (= Performance) are no longer in the menu.
+const NAV = [
+  { to: "/command-centre", label: "Today" },
+  { to: "/advance-orders", label: "Advance orders" },
+  { to: "/customer-orders", label: "Orders" },
+  { to: "/vendor-inventory", label: "Vendor stock" },
+  { to: "/vendor-priority", label: "Vendors" },
+  { to: "/dealer-portal", label: "Dealer Portal" },
+  { to: "/performance", label: "Performance" },
+  { to: "/chats", label: "Chats" },
 ];
 
-// One plain sentence per page, shown under its title, so someone opening a
-// tab for the first time knows what it is for without being told.
+const MORE = [
+  { to: "/vendor-comparison", label: "Vendor comparison" },
+  { to: "/part-intelligence", label: "Part search" },
+  { to: "/file-inbox", label: "File inbox" },
+  { to: "/settings", label: "Settings" },
+];
+
+// One plain sentence per page, shown under its title.
 const PAGE_PURPOSE = {
   "/command-centre": "Today at a glance — what needs your attention first.",
   "/vendor-inventory": "Stock every vendor has sent, and the history of their files.",
   "/customer-orders": "Orders received from customers, and what each one asked for.",
-  "/vendor-comparison":
-    "Which vendors have the parts an order needs — and reserve stock against them.",
-  "/advance-orders":
-    "Parts not in stock: which vendors were asked, what each quoted, and who was chosen.",
-  "/purchase-orders": "Purchase orders raised for vendors, ready to send.",
-  "/vendor-invoices": "Invoices vendors sent, checked against what we ordered.",
-  "/delivery-tracking": "What was ordered versus what actually arrived.",
+  "/vendor-comparison": "Which vendors have the parts an order needs — and reserve stock against them.",
+  "/advance-orders": "Parts not in stock: which vendors were asked, what each quoted, and who was chosen.",
   "/part-intelligence": "Search one part: who stocks it, how much is free, at what price.",
-  "/vendor-performance": "How reliable each vendor has been over time.",
   "/file-inbox": "Every file received — imported, failed or needing review.",
-  "/audit-log": "Who changed what, and when.",
   "/settings": "Account, integrations and system status.",
-  "/vendor-priority":
-    "Brand-wise vendor order the bot follows — #1 is asked first. Add vendors, reorder, see who replies best.",
+  "/vendor-priority": "Brand-wise vendor order the bot follows — #1 is asked first. Add vendors, reorder, see who replies best.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
   "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",
 };
@@ -77,55 +46,84 @@ const TODAY = new Intl.DateTimeFormat("en-IN", {
   month: "short",
 });
 
+function MoreMenu() {
+  const [open, setOpen] = useState(false);
+  const location = useLocation();
+  const box = useRef(null);
+  const active = MORE.some((item) => location.pathname.startsWith(item.to));
+
+  useEffect(() => setOpen(false), [location.pathname]);
+  useEffect(() => {
+    function close(event) {
+      if (box.current && !box.current.contains(event.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+
+  return (
+    <div className="topnav__more" ref={box}>
+      <button
+        type="button"
+        className={"topnav__link" + (active ? " topnav__link--active" : "")}
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+      >
+        More ▾
+      </button>
+      {open ? (
+        <div className="topnav__menu">
+          {MORE.map((item) => (
+            <NavLink key={item.to} to={item.to} className="topnav__menu-item">
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function Layout({ children, title, subtitle }) {
   const location = useLocation();
   const purpose = subtitle ?? PAGE_PURPOSE[location.pathname];
 
-
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar__brand">
-          <span className="sidebar__logo">🛒</span>
-          <span>
-            Cartrends
-            <span className="sidebar__brand-sub">Purchase Bot</span>
+    <div className="app-shell app-shell--top">
+      <header className="topnav">
+        <div className="topnav__inner">
+          <NavLink to="/command-centre" className="topnav__brand">
+            <span className="topnav__logo">C</span>
+            <span>
+              Cartrends <span className="topnav__brand-sub">Purchase Bot</span>
+            </span>
+          </NavLink>
+          <nav className="topnav__links">
+            {NAV.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) => "topnav__link" + (isActive ? " topnav__link--active" : "")}
+              >
+                {item.label}
+              </NavLink>
+            ))}
+            <MoreMenu />
+          </nav>
+          <span className="bot-status" title="WhatsApp bot +91 92170 30414">
+            <span className="bot-status__dot" />
+            Bot live
           </span>
         </div>
-        <nav className="sidebar__nav">
-          {NAV_GROUPS.map((group) => (
-            <div className="sidebar__group" key={group.label}>
-              <p className="sidebar__group-label">{group.label}</p>
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  className={({ isActive }) =>
-                    "sidebar__link" + (isActive ? " sidebar__link--active" : "")
-                  }
-                >
-                  <span className="sidebar__icon" aria-hidden="true">{item.icon}</span>
-                  <span>{item.label}</span>
-                </NavLink>
-              ))}
-            </div>
-          ))}
-        </nav>
-      </aside>
+      </header>
       <div className="app-main">
-        <header className="topbar">
-          <div className="topbar__heading">
-            <h1 className="topbar__title">{title}</h1>
-            {purpose ? <p className="topbar__purpose">{purpose}</p> : null}
+        <div className="page-head">
+          <div>
+            <h1 className="page-head__title">{title}</h1>
+            {purpose ? <p className="page-head__purpose">{purpose}</p> : null}
           </div>
-          <div className="topbar__user">
-            <span className="topbar__date">{TODAY.format(new Date())}</span>
-            <span className="bot-status" title="WhatsApp bot +91 92170 30414">
-              <span className="bot-status__dot" />
-              Bot live
-            </span>
-          </div>
-        </header>
+          <span className="page-head__date">{TODAY.format(new Date())}</span>
+        </div>
         <main className="app-content">{children}</main>
       </div>
     </div>

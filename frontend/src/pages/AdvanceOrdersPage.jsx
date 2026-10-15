@@ -463,12 +463,11 @@ export function AdvanceOrdersPage() {
       )}
 
       <div className="toolbar" style={{ gap: 8 }}>
-        <button type="button" className={"btn " + (tab === "orders" ? "btn--primary" : "btn--ghost")} onClick={() => setTab("orders")}>
-          Orders
-        </button>
-        <button type="button" className={"btn " + (tab === "brands" ? "btn--primary" : "btn--ghost")} onClick={() => setTab("brands")}>
-          Vendor lists by brand
-        </button>
+        {/* The brand-wise vendor lists live on the Vendors page (Vendor
+            Priority) -- one place to change them, not two. */}
+        <a className="btn btn--ghost" href="/vendor-priority">
+          Vendor lists by brand →
+        </a>
         {tab === "orders" && (
           <select id="status-filter" className="field__input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ maxWidth: 220 }}>
             <option value="all">All ({(orders || []).length})</option>
