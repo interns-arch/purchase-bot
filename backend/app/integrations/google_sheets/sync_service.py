@@ -122,20 +122,37 @@ def _sheet_cell(value: str, *, from_xls: bool):
 def original_file_grid(vendor_id: int, session: Session) -> list[list] | None:
     """The vendor's ACTIVE stock file exactly as sent (first non-blank sheet
     of an Excel, or the CSV), trailing blank rows/columns trimmed. None when
-    the original file is not on disk any more."""
+    the original file is not on disk any more.
+
+    A same-day-append vendor (STOCK_APPEND_SAME_DAY_VENDORS, e.g. CT_BS) gets
+    today's files one below the other, in the order they came in; a later
+    file's header row is left out when it repeats the first file's."""
+    from core.services.inventory_import_service import active_import_chain
+
+    grids = []
+    for imp in active_import_chain(vendor_id, session):
+        grid = _import_file_grid(imp.id, session)
+        if grid is None:
+            return None  # one file gone: let the row-by-row rebuild show it all
+        grids.append(grid)
+    if not grids:
+        return None
+    combined = list(grids[0])
+    for grid in grids[1:]:
+        combined.extend(grid[1:] if grid[0] == grids[0][0] else grid)
+    width = max(len(row) for row in combined)
+    return [row + [""] * (width - len(row)) for row in combined]
+
+
+def _import_file_grid(import_id: int, session: Session) -> list[list] | None:
+    """One import's stored file as a grid (see `original_file_grid`)."""
     from pathlib import Path
 
     from backend.app.documents.models import IncomingDocument
-    from core.models import InventoryImport
 
-    active = session.execute(
-        select(InventoryImport).where(InventoryImport.vendor_id == vendor_id, InventoryImport.is_active.is_(True))
-    ).scalar_one_or_none()
-    if active is None:
-        return None
     stored = session.execute(
         select(IncomingDocument.stored_path)
-        .where(IncomingDocument.inventory_import_id == active.id, IncomingDocument.stored_path.is_not(None))
+        .where(IncomingDocument.inventory_import_id == import_id, IncomingDocument.stored_path.is_not(None))
         .order_by(IncomingDocument.id.desc())
     ).scalars().first()
     path = Path(stored) if stored else None

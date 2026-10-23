@@ -450,6 +450,97 @@ def _carry_forward_other_files(
     return carried
 
 
+def _append_same_day_vendor(vendor_id: int, session: Session) -> bool:
+    """Vendors whose stock comes from SEVERAL people (CT_BS: the vendor and
+    Srawan Jain, 9928587053, added 20 Oct 2026). For them a second file on
+    the same IST day is ADDED BELOW the first instead of replacing it; the
+    first file of a new day still replaces yesterday's stock.
+    STOCK_APPEND_SAME_DAY_VENDORS=comma-separated vendor codes or names."""
+    keys = {
+        n.strip().lower().rstrip(".")
+        for n in (os.environ.get("STOCK_APPEND_SAME_DAY_VENDORS") or "").split(",")
+        if n.strip()
+    }
+    if not keys:
+        return False
+    vendor = session.get(Vendor, vendor_id)
+    if vendor is None:
+        return False
+    return bool(
+        {(vendor.vendor_code or "").strip().lower(), vendor.name.strip().lower().rstrip(".")} & keys
+    )
+
+
+def _append_below_todays_stock(
+    import_row: InventoryImport, active_import: InventoryImport | None, session: Session
+) -> int:
+    """Put the active import's rows ABOVE this file's rows in `import_row`,
+    when that import was made today (IST). Returns how many rows were kept."""
+    from core.time_utils import now_ist, to_ist
+
+    if active_import is None:
+        return 0
+    made = to_ist(active_import.completed_at or active_import.created_at)
+    if made is None or made.date() != now_ist().date():
+        return 0
+    old_rows = list(
+        session.execute(
+            select(VendorInventory)
+            .where(VendorInventory.import_id == active_import.id)
+            .order_by(VendorInventory.row_number)
+        ).scalars()
+    )
+    if not old_rows:
+        return 0
+    # Shift this file's rows below the earlier ones (ordering is by row_number).
+    offset = old_rows[-1].row_number
+    for new in session.execute(
+        select(VendorInventory).where(VendorInventory.import_id == import_row.id)
+    ).scalars():
+        new.row_number += offset
+    for old in old_rows:
+        session.add(
+            VendorInventory(
+                vendor_id=old.vendor_id,
+                import_id=import_row.id,
+                part_id=old.part_id,
+                row_number=old.row_number,
+                vendor_part_number=old.vendor_part_number,
+                normalized_part_number=old.normalized_part_number,
+                quantity_available=old.quantity_available,
+                price=old.price,
+                mrp=old.mrp,
+                raw_data=old.raw_data,
+            )
+        )
+    return len(old_rows)
+
+
+def active_import_chain(vendor_id: int, session: Session) -> list[InventoryImport]:
+    """The imports whose files make up the vendor's active stock, oldest
+    first: just the active one, or for a same-day-append vendor every file
+    imported today (each was added below the one before)."""
+    active = _find_active_import(vendor_id, session)
+    if active is None:
+        return []
+    if not _append_same_day_vendor(vendor_id, session):
+        return [active]
+    midnight = now_ist_naive().replace(hour=0, minute=0, second=0, microsecond=0)
+    chain = list(
+        session.execute(
+            select(InventoryImport)
+            .where(
+                InventoryImport.vendor_id == vendor_id,
+                InventoryImport.id < active.id,
+                InventoryImport.status == ImportStatus.SUPERSEDED,
+                InventoryImport.completed_at >= midnight,
+            )
+            .order_by(InventoryImport.id)
+        ).scalars()
+    )
+    return chain + [active]
+
+
 def _activate(
     import_row: InventoryImport,
     previous_active: InventoryImport | None,
@@ -827,6 +918,16 @@ def run_import(
             logger.info(
                 "Import %s (%s): kept %d row(s) from the vendor's other stock file(s).",
                 import_row.id, import_row.file_name, carried,
+            )
+    elif _append_same_day_vendor(vendor_id, session):
+        session.flush()
+        kept = _append_below_todays_stock(import_row, active_import, session)
+        if kept:
+            import_row.row_count = row_count + kept
+            session.flush()
+            logger.info(
+                "Import %s (%s): added below today's %d earlier row(s).",
+                import_row.id, import_row.file_name, kept,
             )
 
     # `active_import` was already fetched (and the duplicate case already
