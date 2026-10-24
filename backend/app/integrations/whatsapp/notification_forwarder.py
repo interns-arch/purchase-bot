@@ -38,12 +38,13 @@ def format_notification(note: broker.Notification) -> str:
 
 def forward_notification(note: broker.Notification) -> None:
     """Broker forwarder: mirror one toast to WhatsApp (fire-and-forget).
-    Every configured admin number receives it. Events flagged `mirror=False`
-    (e.g. "the workbook was sent to WhatsApp" -- the file is already in the
-    chat) stay web-only, so the WhatsApp thread stays readable."""
+    Every configured admin number receives it, unless the event names its
+    own numbers (`note.to`). Events flagged `mirror=False` (e.g. "the
+    workbook was sent to WhatsApp" -- the file is already in the chat) stay
+    web-only, so the WhatsApp thread stays readable."""
     if not whatsapp_settings.forward_notifications or not note.mirror:
         return
-    recipients = whatsapp_settings.admin_phone_numbers
+    recipients = list(note.to) or whatsapp_settings.admin_phone_numbers
     if not recipients:
         return
     body = format_notification(note)

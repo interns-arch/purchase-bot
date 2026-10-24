@@ -37,6 +37,10 @@ class Notification:
     # chat, so mirroring the confirmation is pure noise). Such events still
     # appear as toasts and in the web UI; only the WhatsApp mirror skips them.
     mirror: bool = True
+    # WhatsApp numbers for the mirror instead of every admin (e.g. the daily
+    # Dealer Portal "some parts not uploaded" alert goes to Alam only).
+    # Empty = every admin number.
+    to: tuple[str, ...] = ()
 
 
 _lock = threading.Lock()
@@ -57,15 +61,18 @@ def add_forwarder(forwarder: Callable[[Notification], None]) -> None:
         _forwarders.append(forwarder)
 
 
-def publish(level: str, title: str, message: str = "", *, mirror: bool = True) -> int:
+def publish(
+    level: str, title: str, message: str = "", *, mirror: bool = True, to: list[str] | tuple[str, ...] = ()
+) -> int:
     """Add an event to the buffer. `level` is one of `LEVELS` (falls back to
     'info' if unrecognised). `mirror=False` keeps the event web-only (see
-    `Notification.mirror`). Returns the new event id."""
+    `Notification.mirror`); `to` limits the WhatsApp mirror to those numbers
+    (see `Notification.to`). Returns the new event id."""
     if level not in LEVELS:
         level = "info"
     with _lock:
         note = Notification(
-            id=next(_ids), level=level, title=title, message=message, mirror=mirror
+            id=next(_ids), level=level, title=title, message=message, mirror=mirror, to=tuple(to)
         )
         _buffer.append(note)
     # Outside the lock: a slow forwarder must not block other publishers.
@@ -80,7 +87,10 @@ def publish(level: str, title: str, message: str = "", *, mirror: bool = True) -
 def get_since(after_id: int) -> list[dict]:
     """Events newer than `after_id`, oldest first, as plain dicts."""
     with _lock:
-        return [asdict(note) for note in _buffer if note.id > after_id]
+        # `to` is WhatsApp routing only -- phone numbers never go to the web UI.
+        return [
+            {k: v for k, v in asdict(note).items() if k != "to"} for note in _buffer if note.id > after_id
+        ]
 
 
 def latest_id() -> int:

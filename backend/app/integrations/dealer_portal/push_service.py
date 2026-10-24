@@ -385,6 +385,18 @@ def _plain_failure(error: str | None) -> str:
     return text or "no reason given"
 
 
+def _alert_numbers() -> list[str]:
+    """DEALER_PORTAL_ALERT_NUMBERS (comma-separated): who gets the upload
+    alerts on WhatsApp ("some parts not uploaded", "stock NOT uploaded").
+    Unset = every admin number."""
+    import os
+
+    from backend.app.integrations.whatsapp.registry import normalize_number
+
+    raw = os.environ.get("DEALER_PORTAL_ALERT_NUMBERS") or ""
+    return [n for n in (normalize_number(x) for x in raw.split(",")) if n]
+
+
 def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, upload) -> None:
     """After an upload, tell the team what did NOT go up and why (Founder,
     14 Oct 2026): skipped for no price, refused by the portal, or the whole
@@ -450,7 +462,14 @@ def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, 
             detail = "\n".join(lines)
         from backend.app.notifications import broker
 
-        broker.publish("error" if status == DealerPortalPushStatus.FAILED else "warning", title, detail)
+        # Portal alerts are for whoever looks after the Portal, not every
+        # admin (24 Oct 2026: Alam sir, not Prateek sir).
+        broker.publish(
+            "error" if status == DealerPortalPushStatus.FAILED else "warning",
+            title,
+            detail,
+            to=_alert_numbers(),
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Could not announce Dealer Portal push %s.", push_id)
 
