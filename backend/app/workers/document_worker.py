@@ -1602,6 +1602,13 @@ def _process_staged_file(
         dealer_portal.request_push(
             getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
         )
+        # A file missing MRP / Part Description: ask the vendor and the
+        # purchase team for our format (once a day; never fails the import).
+        from backend.app.integrations.whatsapp import stock_format
+
+        stock_format.check_and_ask(
+            getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
+        )
 
     # Founder automation ("Combined ZIP" mode): a successfully imported
     # customer order is queued for automatic vendor selection; the batch runs
