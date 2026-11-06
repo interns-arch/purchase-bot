@@ -50,6 +50,23 @@ def forward_notification(note: broker.Notification) -> None:
     body = format_notification(note)
 
     def _send_all() -> None:
+        from backend.app.integrations.whatsapp import whapi
+
+        # With a WhatsApp team group (Whapi) an alert for everyone is posted
+        # there once instead of messaging each person. One addressed to
+        # named people (`note.to`, e.g. Dealer Portal -> Alam sir) still
+        # goes only to them.
+        # On a SHARED number (the group bot is Alam sir's own WhatsApp) these
+        # system messages never go to a group -- they would show up as him
+        # posting "Vendor Inventory imported successfully". They go to each
+        # person's own chat on the Meta number instead.
+        if whapi.shared_number():
+            with whapi.direct_only():
+                for to in recipients:
+                    send_reply_safe(to, body)
+            return
+        if not note.to and whapi.post_team(body):
+            return
         for to in recipients:
             send_reply_safe(to, body)
 

@@ -32,10 +32,21 @@ _IST_TZ = "Asia/Kolkata"
 
 
 def _run_safely(job_name: str, job) -> None:
+    # Nothing a scheduled job sends goes into a WhatsApp group: the daily
+    # stock status, Gmail-order purchase plans and the like reach each person
+    # on their own chat (2 Nov 2026: "Today's Vendor Stock Status" appeared
+    # in the team group as Rajkumar). The group stock request posts on its
+    # own, outside this routing, so it is unaffected.
+    from backend.app import bot_status
+    from backend.app.integrations.whatsapp import whapi
+
     try:
-        job()
+        with whapi.direct_only():
+            job()
+        bot_status.job_ok(job_name)
     except Exception:  # noqa: BLE001 -- a scheduled job must never kill the scheduler thread
         logger.exception("Scheduled job '%s' failed.", job_name)
+        bot_status.job_failed(job_name)
 
 
 def _parse_hhmm(value: str) -> tuple[int, int] | None:
@@ -73,7 +84,11 @@ def _schedule_whatsapp_daily_jobs() -> None:
     Each job is opt-in via its own setting; all times are IST."""
     if not whatsapp_settings.enabled:
         return
-    if whatsapp_settings.daily_request_enabled:
+    from backend.app.advance_orders import approval
+
+    # Purchase approval mode: the bot sends vendors nothing of its own.
+    vendor_jobs = not approval.enabled()
+    if whatsapp_settings.daily_request_enabled and vendor_jobs:
         _add_daily_ist_job(
             "whatsapp_morning_stock_request",
             whatsapp_settings.daily_request_time,
@@ -85,7 +100,7 @@ def _schedule_whatsapp_daily_jobs() -> None:
             whatsapp_settings.daily_summary_time,
             daily_stock.send_daily_summary,
         )
-    if whatsapp_settings.auto_reminder_time:
+    if whatsapp_settings.auto_reminder_time and vendor_jobs:
         _add_daily_ist_job(
             "whatsapp_auto_stock_reminder",
             whatsapp_settings.auto_reminder_time,
@@ -102,6 +117,46 @@ def _schedule_google_sheet_daily_reset() -> None:
             google_sheets_settings.daily_reset_time,
             reset_sheet_for_new_day_safe,
         )
+    from backend.app.integrations.google_sheets import dealer_stock
+
+    if google_sheets_settings.enabled and dealer_stock.ALL_STOCK_ENABLED:
+        # ALL STOCK is emptied every evening (team, 29 Oct 2026).
+        _add_daily_ist_job("google_sheet_all_stock_clear", dealer_stock.ALL_STOCK_CLEAR_TIME, dealer_stock.clear_all_stock_safe)
+
+
+def _schedule_group_stock_requests() -> None:
+    """"Stock share kar dijiye" in every vendor WhatsApp group (team, 29 Oct
+    2026) -- independent of purchase approval mode."""
+    from backend.app.integrations.whatsapp import group_stock_request
+
+    if not group_stock_request.enabled():
+        return
+    for at in group_stock_request.request_times():
+        _add_daily_ist_job(f"whapi_group_stock_request_{at.replace(':', '')}", at, group_stock_request.send_requests_safe)
+
+
+def _schedule_mrp_requests() -> None:
+    """"MRP list share kar dijiye" in every vendor WhatsApp group, once a month
+    (Founder, 2 Nov 2026)."""
+    from backend.app.integrations.whatsapp import mrp_list
+
+    if not mrp_list.asking_enabled():
+        return
+    parsed = _parse_hhmm(mrp_list.request_time())
+    if parsed is None:
+        logger.warning("Monthly MRP request NOT scheduled -- invalid time %r.", mrp_list.request_time())
+        return
+    _scheduler.add_job(
+        lambda: _run_safely("whapi_monthly_mrp_request", mrp_list.send_requests_safe),
+        "cron",
+        day=mrp_list.request_day(),
+        hour=parsed[0],
+        minute=parsed[1],
+        timezone=_IST_TZ,
+        id="whapi_monthly_mrp_request",
+        replace_existing=True,
+    )
+    logger.info("Monthly MRP request scheduled on day %d at %02d:%02d IST.", mrp_list.request_day(), *parsed)
 
 
 def _schedule_dealer_portal_retry() -> None:
@@ -226,12 +281,22 @@ def _schedule_part_brand_refresh() -> None:
     )
 
 
+def _schedule_heartbeat() -> None:
+    """Proof the scheduler is still running, read by /api/bot-status."""
+    from backend.app import bot_status
+
+    _scheduler.add_job(bot_status.beat, "interval", seconds=60, id="bot_status_heartbeat", replace_existing=True)
+
+
 def start_scheduler() -> None:
+    _schedule_heartbeat()
     _schedule_part_brand_refresh()
     _schedule_ai_learning()
     _schedule_whatsapp_daily_jobs()
     _schedule_advance_orders()
     _schedule_google_sheet_daily_reset()
+    _schedule_group_stock_requests()
+    _schedule_mrp_requests()
     _schedule_dealer_portal_retry()
     _schedule_startup_recovery()
 

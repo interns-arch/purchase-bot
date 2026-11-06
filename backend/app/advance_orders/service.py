@@ -269,6 +269,12 @@ def create_order(payload: dict, session: Session) -> m.AdvanceOrder:
     session.add(order)
     session.flush()
     logger.info("Advance order %s (%s) created: %d line(s).", order.id, ref, len(order.lines))
+    from backend.app.advance_orders import approval
+
+    if approval.enabled():
+        # Testing mode: Ujjwal sir approves, the team talks to the vendors.
+        approval.hold_for_approval(order, session)
+        return order
     _advance(order, session, now_ist_naive())
     return order
 
@@ -701,6 +707,12 @@ def _notify_if_changed(
 def tick(session: Session, now: datetime | None = None) -> None:
     """Send what is queued (inside vendor hours), move past silent vendors,
     and decide lines whose quote window has closed."""
+    from backend.app.advance_orders import approval
+
+    if approval.enabled():
+        # Purchase approval mode: no vendor is asked or reminded, including
+        # for orders still open from before the switch.
+        return
     now = now or now_ist_naive()
     overdue = session.execute(
         select(m.AdvanceVendorQuery).where(

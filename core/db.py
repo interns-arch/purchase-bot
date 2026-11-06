@@ -91,6 +91,8 @@ _SCHEMA_UPGRADES = (
     # Dealer Portal: parts skipped because no price is known.
     ("dealer_portal_pushes", "skipped_no_price", "INTEGER DEFAULT 0"),
     ("dealer_portal_pushes", "skipped_parts", "JSON"),
+    # Human takeover: who typed an outgoing message by hand (None = the bot).
+    ("whatsapp_chat_messages", "sent_by", "VARCHAR"),
 )
 # Values added to a Postgres ENUM type after it already existed. Like
 # columns, `create_all` never alters an existing type, and inserting a value

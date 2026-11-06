@@ -7,6 +7,7 @@ Messages to anyone else (approvers) are sent by `approvals`."""
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import timedelta
 
@@ -26,8 +27,26 @@ START_COMMANDS = {"new vendor", "register vendor", "vendor registration", "vendo
 SUMMARY = "summary"
 _YES = {"ok", "okay", "yes", "y", "haan", "ha", "han", "correct", "same", "theek", "thik"}
 _SKIP = {"skip", "no", "na", "n/a", "none", "nil", "-"}
+# Every remaining optional question skipped at once (founder, 28 Oct: only the
+# key details are a must, so a vendor can finish as soon as they are in).
+_SKIP_ALL = {"skip all", "skip rest", "skip the rest", "baaki skip", "baki skip", "skip baaki", "done", "finish"}
+
+
+def _skip_rest(request: m.VendorRegistrationRequest) -> None:
+    for question in QUESTIONS:
+        if question.optional and question.key not in (request.answers or {}):
+            _store(request, question.key, None)
 _CONFIRM = {"confirm", "submit", "done", "yes", "ok", "haan"}
 _CANCEL = {"cancel", "stop", "exit", "quit"}
+# A message about STOCK is not an answer to the form (Yash, 30 Oct: "stock
+# upload" got "GSTIN bhejiye" for two days from an empty draft).
+_STOCK_TALK = re.compile(r"\b(stock|stok|upload|inventory|closing)\b", re.IGNORECASE)
+_EMPTY_DRAFT_HOURS = float(os.environ.get("VENDOR_EMPTY_DRAFT_EXPIRY_HOURS", "2") or 2)
+
+
+def _is_empty(request: m.VendorRegistrationRequest) -> bool:
+    """Nothing filled in yet -- only the bookkeeping keys (_on_behalf ...)."""
+    return not any(not key.startswith("_") for key in (request.answers or {}))
 
 
 _START_WORDS = {
@@ -66,9 +85,10 @@ def open_draft(number: str, session: Session) -> m.VendorRegistrationRequest | N
     if draft is None:
         return None
     last_activity = draft.updated_at or draft.created_at
-    if last_activity and now_ist() - last_activity > timedelta(
-        hours=vendor_onboarding_settings.draft_expiry_hours
-    ):
+    # An EMPTY form goes quiet much sooner: nobody loses anything, and the
+    # person is not stuck answering "GSTIN bhejiye" to everything for two days.
+    hours = _EMPTY_DRAFT_HOURS if _is_empty(draft) else vendor_onboarding_settings.draft_expiry_hours
+    if last_activity and now_ist() - last_activity > timedelta(hours=hours):
         draft.status = m.REG_EXPIRED
         session.flush()
         logger.info("Vendor registration %s expired (no reply).", request_code(draft))
@@ -105,7 +125,7 @@ def _prompt(request: m.VendorRegistrationRequest, question: Question) -> str:
     if suggestion:
         lines.append(f"\nReply OK to use: {suggestion}")
     if question.optional:
-        lines.append("(Reply SKIP if not applicable)")
+        lines.append("(Reply SKIP if not applicable, or SKIP ALL to finish — the rest is optional)")
     return "\n".join(lines)
 
 
@@ -257,6 +277,19 @@ def answer(number: str, text: str, session: Session) -> list[str] | None:
         session.flush()
         return ["Registration cancelled. Send NEW VENDOR any time to start again."]
 
+    if _STOCK_TALK.search(lowered):
+        if _is_empty(request):
+            # Not a registration after all: close the empty form and let the
+            # message go to the normal stock handling (None = not ours).
+            request.status = m.REG_CANCELLED
+            session.flush()
+            logger.info("Vendor registration %s closed: %r is about stock.", request_code(request), lowered[:60])
+            return None
+        return [
+            f"Vendor registration {request_code(request)} abhi adhoori hai. Stock bhejna hai to pehle *cancel* likhiye, "
+            "ya registration poori kar lijiye."
+        ]
+
     ai_replies = _answer_with_ai(request, reply, lowered, session)
     if ai_replies is not None:
         return ai_replies
@@ -273,6 +306,9 @@ def answer(number: str, text: str, session: Session) -> list[str] | None:
         suggestion = question.suggest(request.answers or {}, _context(request))
         if suggestion:
             reply = suggestion
+    if lowered in _SKIP_ALL and question.optional:
+        _skip_rest(request)
+        return _advance(request)
     if lowered in _SKIP and question.optional:
         _store(request, question.key, None)
         return _advance(request)
@@ -454,6 +490,8 @@ def _answer_with_ai(
     edit_number = _EDIT_NUMBER.match(lowered)
     if question is not None and lowered in _YES and question.suggest:
         updates = {current: _ACCEPT}
+    elif question is not None and lowered in _SKIP_ALL and question.optional:
+        updates = {q.key: None for q in QUESTIONS if q.optional and q.key not in (request.answers or {})}
     elif question is not None and lowered in _SKIP and question.optional:
         updates = {current: None}
     elif question is not None and question.choices and lowered.isdigit():

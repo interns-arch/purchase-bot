@@ -32,6 +32,7 @@ const VendorInvoicesPage = lazy(() =>
   import("./pages/VendorInvoicesPage").then((m) => ({ default: m.VendorInvoicesPage }))
 );
 const ChatsPage = lazy(() => import("./pages/ChatsPage").then((m) => ({ default: m.ChatsPage })));
+const GroupsPage = lazy(() => import("./pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
 const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then((m) => ({ default: m.VendorPriorityPage })));
 const DealerPortalPage = lazy(() => import("./pages/DealerPortalPage").then((m) => ({ default: m.DealerPortalPage })));
 const TeamPerformancePage = lazy(() => import("./pages/TeamPerformancePage").then((m) => ({ default: m.TeamPerformancePage })));
@@ -126,6 +127,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <ChatsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/groups"
+              element={
+                <ProtectedRoute>
+                  <GroupsPage />
                 </ProtectedRoute>
               }
             />

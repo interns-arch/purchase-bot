@@ -65,6 +65,9 @@ def _mobile_from_number(_answers: dict, ctx: dict) -> str | None:
 
 
 QUESTIONS: list[Question] = [
+    # Founder, 28 Oct: only these eight are a must -- GSTIN, name, mobile, brands
+    # and the bank account -- and they come first, so a vendor who has given
+    # them can reply SKIP ALL and be done. Everything after is optional.
     Question(
         "gstin", "GSTIN", "What is your GSTIN? (15 characters, e.g. 07AALFN8339A1Z8)",
         lambda value, _a: v.gstin(value),
@@ -74,35 +77,13 @@ QUESTIONS: list[Question] = [
         lambda value, _a: v.text(value), suggest=_gst_name,
     ),
     Question(
-        "pan", "PAN", "Your PAN number?",
-        lambda value, answers: v.pan(value, gstin_value=answers.get("gstin")),
-        suggest=lambda answers, _ctx: (answers.get("gstin") or "")[2:12] or None,
-    ),
-    Question(
-        "vendor_type", "Vendor type", "What type of vendor are you?",
-        _choice_validator(lambda: vendor_onboarding_settings.vendor_types),
-        choices=lambda: vendor_onboarding_settings.vendor_types,
+        "mobile", "Mobile", "Contact mobile number?",
+        lambda value, _a: v.mobile(value), suggest=_mobile_from_number,
     ),
     Question(
         "brands_supplied", "Brands supplied",
         "Which brands do you supply? (e.g. Maruti, Hyundai, Bosch)",
         lambda value, _a: v.text(value),
-    ),
-    Question(
-        "contact_person", "Contact person", "Name of the contact person?",
-        lambda value, _a: v.text(value),
-    ),
-    Question(
-        "mobile", "Mobile", "Contact mobile number?",
-        lambda value, _a: v.mobile(value), suggest=_mobile_from_number,
-    ),
-    Question(
-        "email", "Email", "Email address?",
-        lambda value, _a: v.email(value), optional=True,
-    ),
-    Question(
-        "address", "Address", "Full business address?",
-        lambda value, _a: v.text(value, min_length=10), suggest=_gst_address,
     ),
     Question(
         "account_holder", "Account holder name", "Bank account holder name?",
@@ -122,13 +103,35 @@ QUESTIONS: list[Question] = [
         lambda value, _a: v.ifsc(value),
     ),
     Question(
+        "pan", "PAN", "Your PAN number?",
+        lambda value, answers: v.pan(value, gstin_value=answers.get("gstin")), optional=True,
+        suggest=lambda answers, _ctx: (answers.get("gstin") or "")[2:12] or None,
+    ),
+    Question(
+        "vendor_type", "Vendor type", "What type of vendor are you?",
+        _choice_validator(lambda: vendor_onboarding_settings.vendor_types), optional=True,
+        choices=lambda: vendor_onboarding_settings.vendor_types,
+    ),
+    Question(
+        "contact_person", "Contact person", "Name of the contact person?",
+        lambda value, _a: v.text(value), optional=True,
+    ),
+    Question(
+        "email", "Email", "Email address?",
+        lambda value, _a: v.email(value), optional=True,
+    ),
+    Question(
+        "address", "Address", "Full business address?",
+        lambda value, _a: v.text(value, min_length=10), suggest=_gst_address, optional=True,
+    ),
+    Question(
         "brand_discounts", "Brand-wise discount",
         "Brand-wise discount you give us. One brand per line, e.g.\nMaruti - 12\nHyundai - 10",
         lambda value, _a: v.brand_discounts(value), optional=True,
     ),
     Question(
         "credit_days", "Credit period (days)", "Credit period you give us, in days? (e.g. 30)",
-        lambda value, _a: v.days(value),
+        lambda value, _a: v.days(value), optional=True,
     ),
     Question(
         "credit_limit", "Credit limit (₹)", "Credit limit you extend to us, in ₹?",
@@ -136,12 +139,12 @@ QUESTIONS: list[Question] = [
     ),
     Question(
         "dispatch_mode", "Dispatch mode", "How do you dispatch goods?",
-        _choice_validator(lambda: vendor_onboarding_settings.dispatch_modes),
+        _choice_validator(lambda: vendor_onboarding_settings.dispatch_modes), optional=True,
         choices=lambda: vendor_onboarding_settings.dispatch_modes,
     ),
     Question(
         "freight_terms", "Freight terms", "Freight terms?",
-        _choice_validator(lambda: vendor_onboarding_settings.freight_terms),
+        _choice_validator(lambda: vendor_onboarding_settings.freight_terms), optional=True,
         choices=lambda: vendor_onboarding_settings.freight_terms,
     ),
     Question(

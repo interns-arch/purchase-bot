@@ -77,6 +77,12 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     and the log says nothing useful. Every branch below already guards
     itself; this exists so that a bug nobody anticipated still leaves a
     traceback and, for an ordinary sender, some acknowledgement."""
+    # A CHAT A PERSON HAS TAKEN OVER (integrations/whatsapp/takeover): the text
+    # is kept for the admin and the bot does not answer it.
+    from backend.app.integrations.whatsapp import takeover
+
+    if takeover.hold_incoming(message.sender, message.text, message.message_id):
+        return
     try:
         _handle_incoming_whatsapp_text(message)
     except Exception:  # noqa: BLE001 -- silence is the worst possible outcome
@@ -99,6 +105,19 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
                 )
         except Exception:  # noqa: BLE001
             logger.exception("Could not send the fallback reply to %s.", message.sender)
+
+
+def _purchase_approval_reply(message: IncomingWhatsAppText) -> bool:
+    from backend.app.advance_orders import approval
+
+    if not approval.enabled() or not (message.text or "").strip():
+        return False
+    try:
+        with get_session() as session:
+            return approval.handle_reply(message.sender, message.text, session)
+    except Exception:  # noqa: BLE001 -- never let this block the normal text handling
+        logger.exception("Purchase approval reply check failed for %s -- continuing.", message.sender)
+        return False
 
 
 def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
@@ -258,6 +277,54 @@ def _vendor_ledger_file(message: IncomingWhatsAppMessage) -> bool:
     return True
 
 
+def _mrp_list_file(message: IncomingWhatsAppMessage) -> bool:
+    """True when this file is a vendor's monthly MRP list and was handled.
+    Checked before the stock routes: importing one as stock would replace their
+    stock with a price list. Any doubt falls through to stock, as before."""
+    from backend.app.integrations.whatsapp import mrp_list
+
+    if not mrp_list.enabled():
+        return False
+    named = mrp_list.is_named(message.caption, message.filename)
+    with get_session() as session:
+        party = registry.lookup(message.sender, session)
+        if party is None or party.party_type != "vendor":
+            return False
+        if not named and not mrp_list.worth_opening(party.party_id, session):
+            return False
+
+    if getattr(message, "is_photo", False) or Path(message.filename or "").suffix.lower() not in mrp_list.SPREADSHEETS:
+        if named:
+            send_reply_safe(message.sender, mrp_list.SEND_AS_EXCEL)
+        return named
+
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        parsed = mrp_list.read_list(file_path)
+    except Exception:  # noqa: BLE001 -- the stock route reports its own failure
+        logger.exception("MRP list: could not read %s from %s.", message.filename, message.sender)
+        if named:
+            send_reply_safe(message.sender, mrp_list.NOT_READABLE)
+        return named
+
+    if not mrp_list.is_list(parsed, named=named):
+        if named:
+            send_reply_safe(message.sender, mrp_list.NOT_READABLE)
+            return True
+        file_path.unlink(missing_ok=True)  # the stock route downloads its own copy
+        return False
+
+    with get_session() as session:
+        mrp_list.save(party.party_id, parsed, message.filename, session)
+    logger.info("MRP list from %s: %d parts saved from %s.", party.name, len(parsed.items), message.filename)
+    send_reply_safe(message.sender, mrp_list.reply_for(parsed))
+    # New prices reach the Portal the same way as new stock: same quantities,
+    # same DEALER_PORTAL_ENABLED / _SHADOW switches. Never raises.
+    dealer_portal.request_push(party.party_id, party.name)
+    return True
+
+
 def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     """A plain text message. Priority:
     1. A known routing command -> remember it for this number.
@@ -270,6 +337,11 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # Only while a photo is actually waiting for him, and only for a plain
     # yes/no -- anything else he types goes on as usual.
     if _photo_stock_reply(message):
+        return
+
+    # Ujjwal sir's APPROVE / REJECT of a purchase order
+    # (PURCHASE_APPROVAL_MODE=true). Only his numbers; else nothing is claimed.
+    if _purchase_approval_reply(message):
         return
 
     # A vendor answering an advance-order question ("haan 5 din", "nahi")
@@ -530,6 +602,11 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
         from backend.app.ai import staff_assistant
 
         if staff_assistant.is_staff(message.sender) and staff_assistant.handle(message.sender, message.text):
+            return
+        if (message.message_id or "").startswith("whapi:"):
+            # A WhatsApp GROUP: people talk to each other there -- a message
+            # nobody's tool answers gets no reply, never the menu.
+            logger.info("Group text from %s not for the assistant (%r) -- left alone.", message.sender, message.text[:80])
             return
         # Anyone else: understand what they want in plain words (Gemini)
         # instead of answering every message with the fixed menu.
@@ -899,6 +976,9 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     if _vendor_ledger_file(message):
         return
 
+    if _mrp_list_file(message):
+        return
+
     # A PHOTO. Only a registered vendor's is read (as a stock list, confirmed
     # with him before import). Everyone else's photos are ignored, exactly as
     # they were before photos were parsed at all.
@@ -967,6 +1047,37 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     with get_session() as session:
         command_key = command_store.get_fresh_command(message.sender, window, session)
     command = commands.get_command(command_key)
+    if command is None and _is_direct_uploader(message.sender):
+        # Alam sir (STOCK_DIRECT_UPLOADERS) only ever sends stock: a file from
+        # him is imported straight away, with or without a caption or a
+        # "vendor" first (31 Oct 2026). The vendor comes from the caption,
+        # else the file name, else the file's own parts; only if all three
+        # fail is he asked which vendor it is (the usual bare-file question).
+        found = _direct_vendor_name(message)
+        if found:
+            message.caption = found
+        command = commands.get_command("vendor")
+        with get_session() as session:
+            command_store.set_command(message.sender, "vendor", session)
+        logger.info(
+            "WhatsApp file %r from direct uploader %s -> Vendor Inventory, vendor %s.",
+            message.filename,
+            message.sender,
+            found or "unknown (will ask)",
+        )
+    if command is None and _caption_names_known_vendor(message):
+        # A team member's file captioned with an EXISTING vendor's name
+        # ("BIJWASHAN STOCK") is that vendor's stock -- no "vendor" first
+        # (31 Oct 2026: Alam sir's warehouse files were refused on 29-31 Oct
+        # because he sent the file before typing "vendor").
+        command = commands.get_command("vendor")
+        with get_session() as session:
+            command_store.set_command(message.sender, "vendor", session)
+        logger.info(
+            "WhatsApp file from %s captioned %r (a known vendor) -- routed as Vendor Inventory without a command.",
+            message.sender,
+            message.caption,
+        )
     if command is None:
         logger.info(
             "WhatsApp file from %s has no pending routing command -- not importing; "
@@ -1007,6 +1118,149 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
             with get_session() as session:
                 command_store.clear_command(message.sender, session)
             logger.info("Cleared pending WhatsApp command for %s after processing.", message.sender)
+
+
+def _is_direct_uploader(sender: str) -> bool:
+    """STOCK_DIRECT_UPLOADERS: numbers whose every file is stock (Alam sir)."""
+    import os
+
+    wanted = {
+        registry.normalize_number(part.split(":")[-1])
+        for part in (os.environ.get("STOCK_DIRECT_UPLOADERS") or "").split(",")
+        if part.strip()
+    }
+    return bool(wanted) and registry.normalize_number(sender) in wanted
+
+
+def _direct_vendor_name(message: IncomingWhatsAppMessage) -> str | None:
+    """Which vendor a direct uploader's file belongs to: the caption, else the
+    file name ("honda 31-10-2026.xlsx"), else its parts compared with every
+    vendor's recent stock (Bijwasan and Jaipur send the SAME "ClosingStock"
+    export -- only the contents tell them apart). None = ask him. Never
+    raises, never creates a vendor."""
+    import re
+
+    from core.services import vendor_service
+
+    try:
+        with get_session() as session:
+            caption = (message.caption or "").strip()
+            if caption and len(caption) <= 80:
+                vendor = vendor_service.get_vendor_by_name(caption, session)
+                if vendor is not None:
+                    return vendor.name
+            stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", message.filename or "")
+            stem = re.sub(r"\(\d+\)|\d{1,4}[-./]\d{1,2}[-./]\d{1,4}|T?\d{2,}[:.]?\d*", " ", stem)
+            stem = re.sub(r"[_\-]+", " ", stem).strip()
+            if len(stem) >= 3:
+                vendor = vendor_service.get_vendor_by_name(stem, session)
+                if vendor is not None:
+                    logger.info("Direct upload %r: vendor %s from the file name.", message.filename, vendor.name)
+                    return vendor.name
+        return _vendor_from_contents(message)
+    except Exception:  # noqa: BLE001 -- a guess must never stop the import
+        logger.exception("Could not work out the vendor of %r.", message.filename)
+        return None
+
+
+def _vendor_from_contents(message: IncomingWhatsAppMessage) -> str | None:
+    """The vendor whose recent stock list is most like this file (shared parts
+    / all parts of both lists) -- only when the match is clear (>= 50 %, and
+    15 points ahead of the next vendor)."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from core.ingestion.column_detector import find_inventory_columns, normalise_part_number
+    from core.models import InventoryImport, Vendor, VendorInventory
+    from core.services.inventory_import_service import _read_file
+    from core.time_utils import now_ist_naive
+
+    client = WhatsAppClient(whatsapp_settings)
+    path = download_document_media(message.media_id, message.filename, client)
+    try:
+        parsed = _read_file(path)
+        part_col, _qty_col = find_inventory_columns(parsed.headers, path.name, parsed.rows)
+        parts = {normalise_part_number(r.get(part_col, "")) for r in parsed.rows}
+        parts.discard("")
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if len(parts) < 5:
+        return None
+    since = now_ist_naive() - timedelta(days=14)
+    scores = []
+    with get_session() as session:
+        recent = session.execute(
+            select(InventoryImport.id, InventoryImport.vendor_id, InventoryImport.created_at).where(
+                InventoryImport.is_active.is_(True), InventoryImport.created_at >= since
+            )
+        ).all()
+        lists: dict[int, set] = {}
+        updated: dict[int, object] = {}
+        for import_id, vendor_id, created_at in recent:
+            theirs = set(
+                session.execute(
+                    select(VendorInventory.normalized_part_number).where(VendorInventory.import_id == import_id)
+                ).scalars()
+            )
+            if theirs:
+                lists[vendor_id] = theirs
+                updated[vendor_id] = created_at
+                # Shared parts over ALL parts of both lists: Jaipur's ~680 parts
+                # are nearly all inside Bijwasan's ~8,500, so 'share of the file'
+                # alone cannot tell them apart; this can (31 Oct 2026).
+                scores.append((len(parts & theirs) / len(parts | theirs), vendor_id))
+        scores.sort(reverse=True)
+        if not scores:
+            return None
+        best, vendor_id = scores[0]
+        # The close runners-up may be DUPLICATE records of the same stock
+        # ("jaipur stokc", made from a typo on 18 Oct, still holds Jaipur's
+        # list). Copies of the leader's own list are not rivals: the most
+        # recently updated of them is the live one and wins.
+        def _same(a: set, b: set) -> bool:
+            return len(a & b) / len(a | b) >= 0.9
+        copies = [vid for score, vid in scores if best - score < 0.15 and _same(lists[vid], lists[vendor_id])]
+        if len(copies) > 1:
+            vendor_id = max(copies, key=lambda vid: updated[vid])
+            best = next(score for score, vid in scores if vid == vendor_id)
+        rivals = [score for score, vid in scores if vid not in copies]
+        runner_up = rivals[0] if rivals else 0.0
+        vendor = session.get(Vendor, vendor_id)
+        logger.info(
+            "Direct upload %r: best content match %s (%.0f%%, next %.0f%%).",
+            message.filename, vendor.name if vendor else vendor_id, best * 100, runner_up * 100,
+        )
+        if vendor is not None and best >= 0.5 and best - runner_up >= 0.15:
+            return vendor.name
+    return None
+
+
+def _caption_names_known_vendor(message: IncomingWhatsAppMessage) -> bool:
+    """True for a file from an admin / purchase-team member whose caption is
+    the name of a vendor we already have. Never creates a vendor, never
+    applies to anyone else (a vendor's own number is handled by the registry
+    above). Best-effort: any doubt -> False, and the usual instruction goes."""
+    caption = (message.caption or "").strip()
+    if not caption or len(caption) > 80:
+        return False
+    try:
+        from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+        from core.services import vendor_service
+
+        staff = daily_stock.is_admin_sender(message.sender) or vendor_onboarding_settings.is_purchase_team(
+            registry.normalize_number(message.sender)
+        )
+        if not staff:
+            return False
+        with get_session() as session:
+            return vendor_service.get_vendor_by_name(caption, session) is not None
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not check the caption %r against vendors.", caption)
+        return False
 
 
 _SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".csv"}
@@ -1355,6 +1609,71 @@ def _registered_result_reply(party, result, document_type: IncomingDocumentType)
     )
 
 
+def _is_vendors_own_number(sender: str) -> bool:
+    """True when the sender is a registered VENDOR number. Staff, admins and
+    unknown numbers are not -- their bare files are never grouped."""
+    try:
+        with get_session() as session:
+            party = registry.lookup(sender, session)
+        return party is not None and party.party_type == "vendor"
+    except Exception:  # noqa: BLE001 -- unsure: ask, never guess a vendor
+        logger.exception("Registry lookup failed for %s -- not grouping.", sender)
+        return False
+
+
+def _drop_held_copies(sender: str, file_path) -> None:
+    """Held bare files from this sender with the same bytes as `file_path`."""
+    from core.hashing import sha256_of_file
+
+    try:
+        digest = sha256_of_file(Path(file_path))
+        with get_session() as session:
+            for row in pending_vendor_files.list_for(sender, session):
+                try:
+                    same = sha256_of_file(Path(row.staged_path)) == digest
+                except OSError:
+                    continue
+                if same:
+                    pending_vendor_files.remove(row.id, session)
+                    logger.info(
+                        "Held vendor file '%s' from %s dropped: the same file came again with its vendor name.",
+                        row.original_filename,
+                        sender,
+                    )
+    except Exception:  # noqa: BLE001 -- a held copy left behind is the old behaviour
+        logger.exception("Could not check held copies for %s.", sender)
+
+
+def _imported_recently(sender: str, file_path, minutes: int = 30) -> bool:
+    """This exact file was imported from this number within `minutes`."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from backend.app.documents.models import IncomingDocument
+    from core.hashing import sha256_of_file
+    from core.models import InventoryImport
+    from core.time_utils import now_ist_naive
+
+    try:
+        digest = sha256_of_file(Path(file_path))
+        with get_session() as session:
+            hit = session.execute(
+                select(InventoryImport.id)
+                .join(IncomingDocument, IncomingDocument.inventory_import_id == InventoryImport.id)
+                .where(
+                    IncomingDocument.sender == sender,
+                    InventoryImport.content_hash == digest,
+                    InventoryImport.created_at >= now_ist_naive() - timedelta(minutes=minutes),
+                )
+                .limit(1)
+            ).first()
+        return hit is not None
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not check recent imports for %s.", sender)
+        return False
+
+
 def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCommand) -> None:
     """Download the media and run it through the existing import workflow the
     resolved `command` maps to. Unchanged from the original single-workflow
@@ -1410,7 +1729,26 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
                     )
                 return
             vendor_name = confirmed
-        if not vendor_name:
+            # The same file sent again WITH its name (29 Oct, Seema: the Ford
+            # file arrived twice a second apart, the first bare): the bare
+            # copy held for a name is this one -- dropped, or the next name
+            # she typed would have imported it under that vendor too.
+            _drop_held_copies(message.sender, file_path)
+        if not vendor_name and _imported_recently(message.sender, file_path):
+            logger.info(
+                "WhatsApp vendor file '%s' from %s has no caption and is a copy of a file "
+                "imported from this number in the last 30 min -- skipped.",
+                message.filename,
+                message.sender,
+            )
+            send_reply_safe(message.sender, f"ℹ️ '{message.filename}' was already received a moment ago. Nothing changed.")
+            return
+        if not vendor_name and _is_vendors_own_number(message.sender):
+            # GROUPING ONLY FOR A VENDOR'S OWN NUMBER (29 Oct): a vendor sending
+            # several of its own files is one vendor. Staff forward files of
+            # MANY vendors back to back -- Seema's bare Ford file went under
+            # Ark Vehicles, the name she had typed 5 minutes earlier for the
+            # Toyota file. Staff are asked for every bare file.
             with get_session() as session:
                 remembered = vendor_memory.recall(message.sender, window, session)
             if remembered:

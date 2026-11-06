@@ -25,22 +25,28 @@ def in_service_window(to: str) -> bool:
     """True when `to` has written to the bot within the last ~24 hours, so a
     plain message is allowed. False otherwise -- WhatsApp would refuse it
     with 131047 (found live 10 Oct 2026: 16 messages to Prateek sir failed in
-    one day). Unknown -> True (old behaviour)."""
+    one day). Unknown -> True (old behaviour). A number whose messages go to
+    a WhatsApp group (Whapi) has no window at all -> True."""
     try:
         from datetime import timedelta
 
-        from sqlalchemy import func, select
+        from sqlalchemy import func, or_, select
 
+        from backend.app.integrations.whatsapp import whapi
         from backend.app.integrations.whatsapp.models import WhatsAppChatMessage
         from backend.app.integrations.whatsapp.registry import normalize_number
         from core.db import get_session
         from core.time_utils import now_ist_naive
 
+        if whapi.route_for(to):
+            return True
         with get_session() as session:
             last_in = session.execute(
                 select(func.max(WhatsAppChatMessage.created_at)).where(
                     WhatsAppChatMessage.whatsapp_number == normalize_number(to),
                     WhatsAppChatMessage.direction == "in",
+                    # a message in a group opens no window on the Meta number
+                    or_(WhatsAppChatMessage.wamid.is_(None), ~WhatsAppChatMessage.wamid.startswith(whapi.PREFIX)),
                 )
             ).scalar()
         return last_in is not None and now_ist_naive() - last_in < timedelta(hours=_WINDOW_HOURS)
@@ -94,6 +100,14 @@ def send_document_safe(
     any failure (logged, never raised) -- an output-delivery failure must never
     affect the already-committed import. Never logs the access token."""
     try:
+        from backend.app.integrations.whatsapp import whapi
+        from backend.app.integrations.whatsapp.client import _DIRECT, _TEAM_DOWN, _via_group
+
+        # Posted straight into the WhatsApp group; direct when there is none
+        # or the team group cannot be reached.
+        if _via_group(to, "document", caption, filename,
+                      lambda group: whapi.send_document(group, content, filename, mime_type, caption)) not in (_DIRECT, _TEAM_DOWN):
+            return True
         client = WhatsAppClient(whatsapp_settings)
         media_id = client.upload_media(content, filename, mime_type)
         client.send_document_message(to, media_id, filename, caption=caption)

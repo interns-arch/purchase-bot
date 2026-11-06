@@ -112,11 +112,13 @@ def _alarm(text: str, *, key: str, force: bool = False) -> None:
 
     def send() -> None:
         try:
+            from backend.app.integrations.whatsapp import whapi
             from backend.app.integrations.whatsapp.config import whatsapp_settings
             from backend.app.integrations.whatsapp.outbound import send_reply_safe
 
-            for number in whatsapp_settings.admin_phone_numbers:
-                send_reply_safe(number, text)
+            with whapi.direct_only():  # a system alarm, never into a WhatsApp group
+                for number in whatsapp_settings.admin_phone_numbers:
+                    send_reply_safe(number, text)
         except Exception:  # noqa: BLE001
             logger.exception("Could not send the AI health alarm.")
 

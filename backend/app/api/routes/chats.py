@@ -3,10 +3,12 @@ Reads the permanent message log (`integrations/whatsapp/chat_log.py`)."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -112,6 +114,9 @@ def list_chats(q: str = Query("", max_length=100), limit: int = Query(150, le=50
         matching_numbers |= {n for n, p in people.items() if needle in (p.get("name") or "").lower()}
 
 
+    from backend.app.integrations.whatsapp import takeover
+
+    taken = takeover.summary()
     chats = []
     for number, count, last_at in stats:
         if matching_numbers is not None and number not in matching_numbers:
@@ -130,6 +135,7 @@ def list_chats(q: str = Query("", max_length=100), limit: int = Query(150, le=50
                 "last_at": ist_isoformat(last_at),
                 "preview": _preview(last) if last else "",
                 "last_status": last.status if last else None,
+                "takeover": taken.get(number),
             }
         )
     chats.sort(key=lambda c: c["last_at"] or "", reverse=True)
@@ -166,10 +172,87 @@ def get_chat(number: str, limit: int = Query(300, le=2000), before_id: int | Non
                 "status": r.status,
                 "error": r.error,
                 "created_at": ist_isoformat(r.created_at),
+                "sent_by": getattr(r, "sent_by", None),
             }
             for r in rows
         ],
+        "takeover": _takeover().view(number),
     }
+
+
+def _takeover():
+    from backend.app.integrations.whatsapp import takeover
+
+    return takeover
+
+
+class TakeoverIn(BaseModel):
+    on: bool
+    version: int | None = None
+
+
+class AdminTextIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class HeldIn(BaseModel):
+    action: str
+
+
+def _who(user) -> str:
+    return (getattr(user, "full_name", None) or getattr(user, "username", None) or "admin")[:40]
+
+
+def _send_error(exc: Exception) -> str:
+    why = str(exc)
+    if re.search(r"131047|24 ?hour|re-engagement", why, re.I):
+        return "Not delivered: more than 24 hours since they last wrote; WhatsApp allows only a template now."
+    return "Not sent: " + why[:200]
+
+
+# HUMAN TAKEOVER (founder, 28 Oct, like the sales bot's console): ON, the bot
+# says nothing to this chat and you reply from here; OFF, the bot answers the
+# latest message once, if it still needs an answer. A switch made on an older
+# view of the chat (someone else moved it since) is refused with 409.
+@router.post("/{number}/takeover")
+def switch_takeover(number: str, body: TakeoverIn, user=Depends(get_current_user)) -> dict:
+    by = _who(user)
+    t = _takeover()
+    result = t.set_mode(number, True, by=by, version=body.version) if body.on else t.hand_back(number, by=by, version=body.version)
+    if result.get("conflict"):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"error": "someone else changed it just now", "state": result.get("state")})
+    if not result.get("ok"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=result.get("error") or "could not switch")
+    return result
+
+
+@router.post("/{number}/send")
+def send_by_hand(number: str, body: AdminTextIn, user=Depends(get_current_user)) -> dict:
+    t = _takeover()
+    if not t.active(number):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Take over the chat first: the bot is answering it.")
+    try:
+        wamid = t.send_admin_text(number, body.text.strip(), _who(user))
+    except Exception as exc:  # noqa: BLE001 -- WhatsApp refused it: nothing is marked answered
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=_send_error(exc)) from None
+    return {"sent": True, "wamid": wamid, "state": t.view(number)}
+
+
+@router.post("/{number}/held/{held_id}")
+def held_message(number: str, held_id: str, body: HeldIn, user=Depends(get_current_user)) -> dict:
+    t = _takeover()
+    if body.action == "drop":
+        result = t.drop_held(number, held_id, _who(user))
+    elif body.action == "send":
+        try:
+            result = t.send_held(number, held_id, _who(user))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=_send_error(exc)) from None
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="action must be send or drop")
+    if not result.get("ok"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=result.get("error"))
+    return result
 
 
 @router.get("/messages/{message_id}/file")

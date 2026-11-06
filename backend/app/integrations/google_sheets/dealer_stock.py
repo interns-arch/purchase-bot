@@ -51,6 +51,19 @@ FRESH_DAYS = max(0, int(os.environ.get("GOOGLE_SHEETS_DEALER_STOCK_FRESH_DAYS", 
 DEBOUNCE_SECONDS = float(os.environ.get("GOOGLE_SHEETS_DEALER_STOCK_DEBOUNCE_SECONDS", "20"))
 WRITE_CHUNK_ROWS = 5000
 
+# ALL STOCK (29 Oct 2026): every stock in ONE list -- our own warehouses first,
+# in the team's order (Bijwashan, Honda, Jaipur), then each vendor below the
+# other in the order their files arrived. Cleared at 20:00 IST every day, so
+# it only ever shows what was uploaded since the last clear.
+ALL_STOCK_ENABLED = os.environ.get("GOOGLE_SHEETS_ALL_STOCK_ENABLED", "false").strip().lower() == "true"
+ALL_STOCK_TAB = os.environ.get("GOOGLE_SHEETS_ALL_STOCK_TAB", "ALL STOCK").strip() or "ALL STOCK"
+ALL_STOCK_PRIORITY = [
+    code.strip().upper()
+    for code in os.environ.get("GOOGLE_SHEETS_ALL_STOCK_PRIORITY", "CT_BS,CT_HS,CT_JS").split(",")
+    if code.strip()
+]
+ALL_STOCK_CLEAR_TIME = os.environ.get("GOOGLE_SHEETS_ALL_STOCK_CLEAR_TIME", "20:00").strip() or "20:00"
+
 TEAM_HEADERS = ["PartNo", "Part Description", "Stock"]
 DEALER_HEADERS = ["Vendor Code", "Vendor", "PartNo", "Part Description", "Stock", "MRP", "Rate", "Updated"]
 
@@ -191,6 +204,52 @@ def dealer_stock_table(session: Session) -> tuple[list[str], list[list]]:
     return DEALER_HEADERS, table
 
 
+def last_clear(now=None):
+    """The most recent ALL STOCK clear (20:00 IST), as a naive IST datetime --
+    the same clock InventoryImport.created_at is stored in."""
+    from core.time_utils import now_ist_naive
+
+    now = now or now_ist_naive()
+    hour, minute = (int(x) for x in ALL_STOCK_CLEAR_TIME.split(":", 1))
+    cleared = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return cleared if now >= cleared else cleared - timedelta(days=1)
+
+
+def all_stock_table(session: Session, now=None) -> tuple[list[str], list[list]]:
+    """Every vendor's active stock uploaded since the last clear: the priority
+    vendors first (ALL_STOCK_PRIORITY order), then the rest by arrival."""
+    from core.models import InventoryImport, Vendor, VendorInventory
+
+    since = last_clear(now)
+    active = session.execute(
+        select(InventoryImport, Vendor)
+        .join(Vendor, Vendor.id == InventoryImport.vendor_id)
+        .where(InventoryImport.is_active.is_(True), InventoryImport.created_at >= since)
+    ).all()
+    rank = {code: i for i, code in enumerate(ALL_STOCK_PRIORITY)}
+    active.sort(key=lambda pair: (
+        rank.get((pair[1].vendor_code or "").upper(), len(rank)),
+        pair[0].created_at,
+    ))
+    table = []
+    for imp, vendor in active:
+        stamp = imp.created_at.strftime("%d-%m-%Y %H:%M") if imp.created_at else ""
+        for r in session.execute(
+            select(VendorInventory).where(VendorInventory.import_id == imp.id).order_by(VendorInventory.row_number)
+        ).scalars():
+            table.append([
+                vendor.vendor_code or "",
+                vendor.name,
+                str(r.vendor_part_number),
+                _description(r.raw_data),
+                _number(r.quantity_available),
+                _number(r.mrp),
+                _number(r.price),
+                stamp,
+            ])
+    return DEALER_HEADERS, table
+
+
 def write_tab(spreadsheet, title: str, headers: list[str], table: list[list]) -> None:
     """Replace a tab's contents, sized to fit, part numbers kept as text."""
     import gspread
@@ -215,26 +274,42 @@ def write_tab(spreadsheet, title: str, headers: list[str], table: list[list]) ->
 
 
 def rebuild_dealer_stock() -> int:
-    """Rebuild the DEALER STOCK tab now. Returns the number of rows written."""
+    """Rebuild the DEALER STOCK and ALL STOCK tabs (each when switched on).
+    Returns the number of rows written."""
     from backend.app.integrations.google_sheets.config import google_sheets_settings
     from backend.app.integrations.google_sheets.sync_service import _build_client
     from core.db import get_session
 
-    if not (DEALER_STOCK_ENABLED and google_sheets_settings.enabled and google_sheets_settings.is_configured()):
+    if not ((DEALER_STOCK_ENABLED or ALL_STOCK_ENABLED) and google_sheets_settings.enabled and google_sheets_settings.is_configured()):
         return 0
+    tabs = []
     with get_session() as session:
-        headers, table = dealer_stock_table(session)
+        if DEALER_STOCK_ENABLED:
+            tabs.append((DEALER_STOCK_TAB, *dealer_stock_table(session)))
+        if ALL_STOCK_ENABLED:
+            tabs.append((ALL_STOCK_TAB, *all_stock_table(session)))
     spreadsheet = _build_client().open_by_key(google_sheets_settings.sheet_id)
-    write_tab(spreadsheet, DEALER_STOCK_TAB, headers, table)
-    logger.info("Google Sheet %r rebuilt: %d row(s).", DEALER_STOCK_TAB, len(table))
-    return len(table)
+    written = 0
+    for title, headers, table in tabs:
+        write_tab(spreadsheet, title, headers, table)
+        logger.info("Google Sheet %r rebuilt: %d row(s).", title, len(table))
+        written += len(table)
+    return written
 
 
 def rebuild_dealer_stock_safe() -> None:
     try:
         rebuild_dealer_stock()
     except Exception:  # noqa: BLE001 -- an output must never hurt an import
-        logger.exception("Could not rebuild the %r tab.", DEALER_STOCK_TAB)
+        logger.exception("Could not rebuild the %r / %r tabs.", DEALER_STOCK_TAB, ALL_STOCK_TAB)
+
+
+def clear_all_stock_safe() -> None:
+    """20:00 IST: empty ALL STOCK. Rebuilt from 'since the last clear', so it
+    is left with the headers only until the next upload. Never raises."""
+    if not ALL_STOCK_ENABLED:
+        return
+    rebuild_dealer_stock_safe()
 
 
 _timer: threading.Timer | None = None
@@ -244,7 +319,7 @@ _lock = threading.Lock()
 def request_rebuild() -> None:
     """Ask for a DEALER STOCK rebuild; a burst of requests becomes one."""
     global _timer
-    if not DEALER_STOCK_ENABLED:
+    if not (DEALER_STOCK_ENABLED or ALL_STOCK_ENABLED):
         return
     with _lock:
         if _timer is not None:

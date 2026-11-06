@@ -66,6 +66,29 @@ _token_cache: dict[str, tuple[str, float]] = {}
 _token_lock = threading.Lock()
 
 
+class _PortalHttp:
+    """`requests`, with the Portal's Cloudflare Access service token added to
+    every call (config `access_headers`, 29 Oct 2026). Every Portal request in
+    ProcureHub goes through `_requests()`, so none can leave without it."""
+
+    def __init__(self, requests):
+        self._requests = requests
+
+    def _with_access(self, kwargs: dict) -> dict:
+        headers = dict(kwargs.get("headers") or {})
+        headers.update(dealer_portal_settings.access_headers())
+        return {**kwargs, "headers": headers}
+
+    def get(self, url, **kwargs):
+        return self._requests.get(url, **self._with_access(kwargs))
+
+    def post(self, url, **kwargs):
+        return self._requests.post(url, **self._with_access(kwargs))
+
+    def __getattr__(self, name):
+        return getattr(self._requests, name)
+
+
 def _requests():
     """Imported lazily so that merely importing this integration never adds a
     hard dependency to a ProcureHub process that will not use it."""
@@ -75,7 +98,12 @@ def _requests():
         raise DealerPortalError(
             "The 'requests' package is required for the Dealer Portal integration."
         ) from exc
-    return requests
+    return _PortalHttp(requests)
+
+
+def _blocked_by_cloudflare(response) -> bool:
+    text = (getattr(response, "text", "") or "")[:2000]
+    return "cloudflare" in text.lower() and ("Cloudflare Access" in text or response.status_code in (302, 403))
 
 
 def _login(account: DealerPortalAccount) -> str:
@@ -94,6 +122,12 @@ def _login(account: DealerPortalAccount) -> str:
     except Exception as exc:  # noqa: BLE001 -- network layer
         raise DealerPortalError(f"Dealer Portal login request failed: {exc}") from exc
 
+    if _blocked_by_cloudflare(response):
+        raise DealerPortalError(
+            "Dealer Portal is behind Cloudflare Access and refused us: the service token "
+            "(DEALER_PORTAL_CF_CLIENT_ID / _SECRET in backend/.env) is missing, wrong or revoked "
+            "-- ask the Portal team."
+        )
     if response.status_code == 409:
         raise DealerPortalError(
             "Dealer Portal login returned 409 SESSION_ALREADY_ACTIVE for account "
@@ -258,10 +292,64 @@ def upload_csv(
     if response.status_code != 200:
         raise DealerPortalError(
             f"Dealer Portal upload for {account.key} failed: HTTP "
-            f"{response.status_code}."
+            f"{response.status_code}.{_error_detail(response)}"
         )
 
     return _parse_upload_response(response)
+
+
+def _error_detail(response) -> str:
+    """DP's own reason for a failed call, e.g. its 500 body
+    {"error": "name 'datetime' is not defined"} (26 Oct 2026) -- without it
+    the alert said only "HTTP 500" and hid that the fault was DP's."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = (response.text or "").strip()
+    if isinstance(body, dict):
+        body = body.get("error") or body.get("message") or body.get("detail") or ""
+    text = " ".join(str(body).split())[:200]
+    return f" DP says: {text}" if text else ""
+
+
+def product_part_numbers(account: DealerPortalAccount) -> set[str]:
+    """GET /products/: the part numbers DP lists for this dealer (in stock or
+    not), exactly as DP spells them. Used to send a part in DP's own form when
+    the vendor's file differs only by leading zeros (28 Oct 2026: 94 Mohan
+    Spares parts like 0928907005 were refused, DP knows them as 928907005)."""
+    requests = _requests()
+    url = f"{dealer_portal_settings.base_url}/products/"
+
+    def _get(token: str):
+        return requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=dealer_portal_settings.timeout_seconds,
+        )
+
+    try:
+        response = _get(_cached_token(account))
+        if response.status_code == 401 and not account.uses_permanent_token:
+            response = _get(_cached_token(account, force_refresh=True))
+    except DealerPortalError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- network layer
+        raise DealerPortalError(f"Dealer Portal products request failed: {exc}") from exc
+    if response.status_code != 200:
+        raise DealerPortalError(
+            f"Dealer Portal products for {account.key} failed: HTTP {response.status_code}."
+        )
+    try:
+        items = response.json()
+    except ValueError as exc:
+        raise DealerPortalError(f"Dealer Portal products for {account.key}: not JSON.") from exc
+    if isinstance(items, dict):
+        items = items.get("items") or items.get("data") or []
+    return {
+        str(item.get("part_no")).strip().upper()
+        for item in items
+        if isinstance(item, dict) and item.get("part_no")
+    }
 
 
 def reset_own_stock(account: DealerPortalAccount) -> bool:

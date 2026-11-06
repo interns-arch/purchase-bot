@@ -15,6 +15,7 @@ const NAV = [
   { to: "/dealer-portal", label: "Dealer Portal" },
   { to: "/performance", label: "Performance" },
   { to: "/chats", label: "Chats" },
+  { to: "/groups", label: "Groups" },
 ];
 
 const MORE = [
@@ -36,6 +37,7 @@ const PAGE_PURPOSE = {
   "/settings": "Account, integrations and system status.",
   "/vendor-priority": "Brand-wise vendor lists: every vendor of the brand is asked for a part at once. Add vendors, reorder, see who replies best.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
+  "/groups": "The WhatsApp groups the bot is in — every message, live.",
   "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",
 };
 

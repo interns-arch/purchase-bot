@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -25,6 +26,11 @@ class _Settings:
     ledger_url: str = (os.environ.get("DEALER_PORTAL_LEDGER_API_URL") or "").strip()
     api_key: str = (os.environ.get("DEALER_PORTAL_VENDOR_API_KEY") or "").strip()
     dry_run: bool = os.environ.get("DEALER_PORTAL_VENDOR_API_DRY_RUN", "true").strip().lower() != "false"
+    # The IT mailbox the sales bot's data-entry robot reads (founder, 28 Oct):
+    # set -> an approved vendor goes there as a "Vendor Creation Request" and
+    # the robot creates the Portal account with its admin login. Wins over the
+    # API above, which the Portal team never gave us.
+    mail_to: str = (os.environ.get("DEALER_PORTAL_VENDOR_MAIL_TO") or "").strip()
     timeout: float = float(os.environ.get("DEALER_PORTAL_VENDOR_API_TIMEOUT", "30") or 30)
 
 
@@ -106,7 +112,49 @@ def _post(url: str, payload: dict, what: str) -> PortalResult:
     return PortalResult(ok=True, reference=reference or "OK")
 
 
+def _request_mail(answers: dict, *, vendor_code: str | None, gst: dict | None) -> PortalResult:
+    """The approved vendor as the data-entry robot reads it
+    (cartrends-autoflow core/dataEntryRequests): "Label: Value" lines, and a
+    VEND-ddmmyy-hhmmss-XXXX id in a subject that says "Creation Request".
+    The labels are the robot's; a renamed label is a field it never sees."""
+    from backend.app.integrations.gmail.mailer import send_email
+    from core.time_utils import now_ist
+
+    now = now_ist()
+    suffix = re.sub(r"[^A-Z0-9]", "", (vendor_code or "").upper()) or "PH"
+    request_id = f"VEND-{now:%d%m%y}-{now:%H%M%S}-{suffix}"
+    bank = [answers.get(k) for k in ("account_holder", "bank_name", "account_number", "ifsc")]
+    rows = [
+        ("Vendor Name", answers.get("vendor_name")),
+        ("GSTIN", answers.get("gstin")),
+        ("PAN", answers.get("pan")),
+        ("Contact Person", answers.get("contact_person")),
+        ("Mobile", answers.get("mobile")),
+        ("Email", answers.get("email")),
+        ("Address", answers.get("address") or (gst or {}).get("address")),
+        ("Credit Period", answers.get("credit_days")),
+        ("Credit Limit", answers.get("credit_limit")),
+        ("Bank Account Holder", bank[0]),
+        ("Bank Name", bank[1]),
+        ("Account Number", bank[2]),
+        ("IFSC", bank[3]),
+        ("Brands Supplied", answers.get("brands_supplied")),
+        ("Dispatch Mode", answers.get("dispatch_mode")),
+        ("Freight Terms", answers.get("freight_terms")),
+        ("Lead Time", answers.get("lead_time_days")),
+        ("Remarks", f"Registered and approved on WhatsApp in ProcureHub (vendor code {vendor_code or '-'})."),
+    ]
+    body = "\n".join(f"{label}: {' '.join(str(value).split())}" for label, value in rows if value not in (None, ""))
+    subject = f"[Data Entry] Vendor Creation Request {request_id}"
+    if not send_email(settings.mail_to, subject, body):
+        return PortalResult(ok=False, error=f"could not email the vendor request to {settings.mail_to}")
+    logger.info("Vendor %s sent to the data-entry robot as %s.", answers.get("vendor_name"), request_id)
+    return PortalResult(ok=True, reference=request_id)
+
+
 def create_vendor(answers: dict, *, vendor_code: str | None, gst: dict | None) -> PortalResult:
+    if settings.mail_to:
+        return _request_mail(answers, vendor_code=vendor_code, gst=gst)
     return _post(settings.vendor_url, _vendor_payload(answers, vendor_code=vendor_code, gst=gst), "vendor create")
 
 

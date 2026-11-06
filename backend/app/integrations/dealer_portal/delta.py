@@ -213,6 +213,15 @@ def build_delta(account: DealerPortalAccount, session) -> DeltaResult:
     prev_qty, prev_price, _ = _collapse(prev_rows, strategy)
     result.duplicate_count = new_dupes
 
+    # The vendor's monthly MRP list (2 Nov 2026) replaces the MRP in their stock
+    # files. A part their file gives a Rate for keeps that Rate. Off by default.
+    from backend.app.integrations.whatsapp import mrp_list
+
+    rated = {(row.normalized_part_number or "").strip() for row in new_rows if row.price is not None}
+    new_price.update(
+        mrp_list.prices_for(account.vendor_ids, [part for part in new_qty if part not in rated], session)
+    )
+
     # Last known price from the vendor's WHOLE history, for parts the latest
     # two files carry no price for (14 Oct 2026: forwarded copies of Spares
     # 4U's files had the MRP column removed two days running -> 63 parts went

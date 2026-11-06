@@ -255,11 +255,40 @@ def parse_reply(text: str | None) -> tuple[str, str, int, str] | None:
     )
 
 
+# An approver's decision WITHOUT the code -- "Approved", "ok approve", "reject
+# price list nahi hai" (NK Jain sir, 30 Oct 2026: his "Approved" for VR-15 was
+# not taken and the chat assistant answered as if it had been).
+_BARE = re.compile(
+    r"^\s*(?:ok\s+|yes\s+|haan\s+)?(?P<verb>approve|approved|reject|rejected)\b[\s:\-,.!]*(?P<reason>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _bare_decision(sender: str, text: str | None, session: Session) -> list[str] | None:
+    match = _BARE.match(text or "")
+    if not match or sender not in settings.approver_numbers:
+        return None
+    waiting = session.execute(
+        select(m.VendorRegistrationRequest.id, m.VendorRegistrationRequest.vendor_name)
+        .where(m.VendorRegistrationRequest.status == m.REG_AWAITING_APPROVAL)
+        .order_by(m.VendorRegistrationRequest.id)
+    ).all()
+    if not waiting:
+        return None  # nothing waiting: perhaps a purchase order -- not ours
+    verb = match.group("verb").lower()
+    if len(waiting) > 1:
+        word = "APPROVE" if verb.startswith("approve") else "REJECT"
+        return ["Kaun sa vendor? Abhi ye approval ke liye ruke hain:\n"
+                + "\n".join(f"• VR-{row_id} {name or ''}" for row_id, name in waiting)
+                + f"\n\nReply *{word} VR-<number>*."]
+    return _decide_vendor(sender, verb, waiting[0][0], " ".join(match.group("reason").split()), session)
+
+
 def handle_reply(sender: str, text: str | None, session: Session) -> list[str] | None:
     """Replies for the sender when `text` is a decision, else None (not ours)."""
     parsed = parse_reply(text)
     if parsed is None:
-        return None
+        return _bare_decision(sender, text, session)
     verb, kind, row_id, reason = parsed
     if kind == "vr":
         if verb.startswith(("pass", "fail")):

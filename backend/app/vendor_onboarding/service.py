@@ -92,6 +92,32 @@ def _ensure_procurehub_vendor(request: m.VendorRegistrationRequest, session: Ses
     return vendor
 
 
+def _welcome(number: str, name: str, code: str, text: str) -> None:
+    """The "you are registered" message. A new vendor has usually never
+    written to the bot, so WhatsApp only lets a template through -- and the
+    general purchase_bot_update is a MARKETING template Meta held back
+    (131049, NIRMAL OIL STORE, 30 Oct 2026). With VENDOR_WELCOME_TEMPLATE
+    set (the UTILITY `vendor_registration_complete`: {{1}} company, {{2}}
+    code) that template goes instead."""
+    import os
+
+    from backend.app.integrations.whatsapp import outbound
+    from backend.app.integrations.whatsapp.client import WhatsAppClient
+    from backend.app.integrations.whatsapp.config import whatsapp_settings
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    template = (os.environ.get("VENDOR_WELCOME_TEMPLATE") or "").strip()
+    if template and not outbound.in_service_window(number):
+        try:
+            WhatsAppClient(whatsapp_settings).send_template_message(
+                number, template, vendor_onboarding_settings.template_language, [name, code]
+            )
+            return
+        except Exception:  # noqa: BLE001 -- fall back to the usual message
+            logger.exception("Welcome template %s to %s failed.", template, number)
+    send_reply_safe(number, text)
+
+
 def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Session) -> tuple[bool, str]:
     """(ok, detail). Sets the request status to CREATED or CREATE_FAILED."""
     code = f"VR-{request.id}"
@@ -123,6 +149,8 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
     portal_note = (
         "Dealer Portal: pending (API not connected yet)."
         if request.dealer_portal_ref == "DRY-RUN"
+        else f"Dealer Portal: request {request.dealer_portal_ref} sent to data entry — the Portal account is created in a few minutes."
+        if str(request.dealer_portal_ref or "").startswith("VEND-")
         else f"Dealer Portal ref {request.dealer_portal_ref}."
     )
     if (request.answers or {}).get("_on_behalf"):
@@ -133,12 +161,18 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
             f"Vendor {vendor.name} is created. Vendor code: {vendor.vendor_code}. "
             f"Its WhatsApp {_vendor_whatsapp(request)} is registered for stock and ledgers. {portal_note}",
         )
-    send_reply_safe(
+    _welcome(
         _vendor_whatsapp(request),
+        vendor.name,
+        vendor.vendor_code,
         f"Congratulations! {vendor.name} is now registered with CarTrends.\n"
         f"Your vendor code: {vendor.vendor_code}\n"
         "You can send your stock list and ledger to this number any time "
         "(send a ledger with the caption LEDGER).",
     )
+    # Its own WhatsApp group with the team (Whapi), made in the background.
+    from backend.app.integrations.whatsapp import vendor_group
+
+    vendor_group.create_for_vendor_in_background(vendor.vendor_code, vendor.name, _vendor_whatsapp(request))
     logger.info("%s: vendor %s created (%s, %s).", code, vendor.name, vendor.vendor_code, request.dealer_portal_ref)
     return True, f"Created as {vendor.vendor_code}. {portal_note}"

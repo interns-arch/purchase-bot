@@ -179,8 +179,12 @@ def _check_and_ask(vendor_id: int) -> bool:
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 caption="Is format mein stock bhejiye",
             )
-    for number in team_numbers():
-        outbound.send_reply_safe(number, team_message(name, missing, file_name, vendor_told))
+    from backend.app.integrations.whatsapp import whapi
+
+    team_text = team_message(name, missing, file_name, vendor_told)
+    if not whapi.post_team(team_text):  # no team group: tell each person
+        for number in team_numbers():
+            outbound.send_reply_safe(number, team_text)
     logger.info(
         "Stock format: %s's file %s lacks %s -- asked vendor (%d number(s), told=%s) and the team.",
         name, file_name, missing, len(vendor_numbers), vendor_told,

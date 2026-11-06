@@ -96,6 +96,22 @@ services:
       - appdb:/app/database
     restart: unless-stopped
 
+  # Sends "Purchase Bot is not working" alerts. Separate from the backend and
+  # with no depends_on, so it keeps running when the backend or database stops.
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.scripts.bot_watch"]
+    env_file:
+      - path: backend/.env
+        required: false
+    healthcheck:
+      disable: true
+    volumes:
+      - appdb:/app/database
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

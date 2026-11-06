@@ -34,6 +34,7 @@ order must not interleave.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from collections import defaultdict
@@ -260,6 +261,10 @@ def push_account(
     # list after a reset would wipe stock the vendor still has.
     import os
 
+    csv_bytes = csv_builder.build_csv(
+        _in_portal_form(account, result.rows), tat_days=account.tat_days
+    )
+
     if account.full_snapshot and (
         account.reset_before_upload
         or (os.environ.get(f"DEALER_PORTAL_{account.key}_RESET_BEFORE_UPLOAD") or "").strip().lower() == "true"
@@ -304,6 +309,36 @@ def push_account(
         upload.failed_count,
     )
     return _finish(push_id, status, error=error, upload=upload, is_retry=is_retry)
+
+
+def _in_portal_form(account: DealerPortalAccount, rows: list) -> list:
+    """Rename a part to DP's own spelling when the vendor's differs only by
+    leading zeros: DP refuses 0928907005 but lists 928907005 for this dealer
+    (Mohan Spares, 28 Oct 2026). Only when DP lacks the exact number, has the
+    bare one, and the file does not already carry the bare one (that would
+    send the part twice). If DP's list can't be read, the rows go unchanged."""
+    try:
+        known = client.product_part_numbers(account)
+    except client.DealerPortalError as exc:
+        logger.warning("Dealer Portal %s: product list unavailable, part numbers sent as-is -- %s", account.key, exc)
+        return rows
+    in_file = {(row.part_no or "").strip().upper() for row in rows}
+    renamed: list[str] = []
+    out = []
+    for row in rows:
+        part = (row.part_no or "").strip().upper()
+        bare = part.lstrip("0")
+        if bare and bare != part and part not in known and bare in known and bare not in in_file:
+            row = dataclasses.replace(row, part_no=bare)
+            renamed.append(part)
+            in_file.add(bare)
+        out.append(row)
+    if renamed:
+        logger.info(
+            "Dealer Portal %s: %d part(s) sent without leading zeros, as DP lists them (%s%s).",
+            account.key, len(renamed), ", ".join(renamed[:5]), "..." if len(renamed) > 5 else "",
+        )
+    return out
 
 
 def _outcome(upload, *, rows_sent: int) -> tuple[DealerPortalPushStatus, str | None]:
@@ -371,6 +406,10 @@ def _finish(
 def _plain_failure(error: str | None) -> str:
     """The upload error in words the purchase team can act on."""
     text = error or ""
+    if "upload for" in text and "failed: HTTP 5" in text:
+        return (f"the portal itself crashed ({text}). This is a fault on the portal's side -- ask the portal "
+                "team to fix it. The old stock was already cleared, so this dealer may show 0 stock on the "
+                "portal until an upload goes through.")
     if "HTTP 401" in text:
         return ("the portal refused the dealer's password (it has probably been changed). "
                 "Update it on the bot's Dealer Portal page -> Change login.")

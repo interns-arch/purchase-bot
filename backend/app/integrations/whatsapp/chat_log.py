@@ -89,7 +89,7 @@ def log_incoming(
 
 def log_outgoing(
     number: str, *, kind: str, text: str | None = None, filename: str | None = None,
-    wamid: str | None = None, error: str | None = None,
+    wamid: str | None = None, error: str | None = None, sent_by: str | None = None,
 ) -> None:
     try:
         from backend.app.integrations.whatsapp.models import WhatsAppChatMessage
@@ -101,6 +101,7 @@ def log_outgoing(
                     whatsapp_number=_number(number), direction="out", kind=kind,
                     text=(text or None), filename=filename, wamid=wamid,
                     status="failed" if error else "sent", error=(error or None),
+                    sent_by=(sent_by or None),
                 )
             )
     except Exception:  # noqa: BLE001

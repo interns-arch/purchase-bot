@@ -455,7 +455,8 @@ def _append_same_day_vendor(vendor_id: int, session: Session) -> bool:
     Srawan Jain, 9928587053, added 20 Oct 2026). For them a second file on
     the same IST day is ADDED BELOW the first instead of replacing it; the
     first file of a new day still replaces yesterday's stock.
-    STOCK_APPEND_SAME_DAY_VENDORS=comma-separated vendor codes or names."""
+    STOCK_APPEND_SAME_DAY_VENDORS=comma-separated vendor codes or names, or
+    * for every vendor (Founder, 3 Nov 2026)."""
     keys = {
         n.strip().lower().rstrip(".")
         for n in (os.environ.get("STOCK_APPEND_SAME_DAY_VENDORS") or "").split(",")
@@ -463,6 +464,8 @@ def _append_same_day_vendor(vendor_id: int, session: Session) -> bool:
     }
     if not keys:
         return False
+    if "*" in keys:
+        return True
     vendor = session.get(Vendor, vendor_id)
     if vendor is None:
         return False

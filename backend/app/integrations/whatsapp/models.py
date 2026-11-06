@@ -13,8 +13,9 @@ next file from that number."""
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, func
+from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, Numeric, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models import Base
@@ -232,6 +233,35 @@ class WhatsAppChatMessage(Base):
     status: Mapped[str] = mapped_column(default="received")
     error: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), index=True)
+    # Who typed an outgoing message by hand during a human takeover
+    # (integrations/whatsapp/takeover.py); None = the bot.
+    sent_by: Mapped[str | None] = mapped_column(default=None)
+
+
+class WhatsAppTakeover(Base):
+    """HUMAN TAKEOVER of one chat (founder, 28 Oct, like the sales bot's): a
+    person replies by hand from the Chats page and the bot says nothing
+    there until it is handed back. One row per number, kept for good -- a
+    takeover lasts until someone hands it back, restarts included.
+
+    `pending`: what they sent since our last successful send (answered at
+    hand-back). `held`: what the bot wanted to send meanwhile, for the admin
+    to send or drop. `audit`: every switch, send and drop, with who."""
+
+    __tablename__ = "whatsapp_takeovers"
+
+    whatsapp_number: Mapped[str] = mapped_column(primary_key=True)
+    active: Mapped[bool] = mapped_column(default=False)
+    version: Mapped[int] = mapped_column(default=0)
+    by: Mapped[str | None] = mapped_column(default=None)
+    since: Mapped[datetime | None] = mapped_column(default=None)
+    changed_at: Mapped[datetime | None] = mapped_column(default=None)
+    handed_back_at: Mapped[datetime | None] = mapped_column(default=None)
+    pending: Mapped[list | None] = mapped_column(JSON, default=None)
+    held: Mapped[list | None] = mapped_column(JSON, default=None)
+    handled: Mapped[dict | None] = mapped_column(JSON, default=None)
+    resume: Mapped[dict | None] = mapped_column(JSON, default=None)
+    audit: Mapped[list | None] = mapped_column(JSON, default=None)
 
 
 class AiConversationMessage(Base):
@@ -248,3 +278,64 @@ class AiConversationMessage(Base):
     role: Mapped[str] = mapped_column()
     text: Mapped[str] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WhapiVendorGroup(Base):
+    """A vendor's WhatsApp group the bot works in (Whapi, 29 Oct 2026): the
+    existing groups linked by hand and the ones it creates for each new
+    vendor. Read together with WHAPI_VENDOR_GROUPS; one vendor may have
+    several groups."""
+
+    __tablename__ = "whapi_vendor_groups"
+
+    group_id: Mapped[str] = mapped_column(primary_key=True)
+    vendor_code: Mapped[str] = mapped_column(index=True)
+    name: Mapped[str | None] = mapped_column(default=None)
+    created_by_bot: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class VendorMrpList(Base):
+    """One MRP list a vendor sent (see `mrp_list.py`); a row for this month means
+    that vendor is not asked again."""
+
+    __tablename__ = "vendor_mrp_lists"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("vendors.id"), index=True)
+    month: Mapped[str] = mapped_column(index=True)  # "2026-11"
+    file_name: Mapped[str | None] = mapped_column(default=None)
+    parts: Mapped[int] = mapped_column(default=0)
+    bad_rows: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class VendorMrpItem(Base):
+    """A vendor's latest MRP for one part, from their monthly list."""
+
+    __tablename__ = "vendor_mrp_items"
+    __table_args__ = (UniqueConstraint("vendor_id", "normalized_part_number", name="ux_vendor_mrp_items_part"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("vendors.id"), index=True)
+    normalized_part_number: Mapped[str] = mapped_column(index=True)
+    part_no: Mapped[str | None] = mapped_column(default=None)
+    description: Mapped[str | None] = mapped_column(default=None)
+    mrp: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    list_month: Mapped[str] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WhapiActivity(Base):
+    """What the bot did in the WhatsApp groups, one row per action (2 Nov
+    2026) -- the live feed on the console's Groups page: a file or question
+    taken from a group, a reply or stock request posted, a group created."""
+
+    __tablename__ = "whapi_activity"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[str] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column()
+    who: Mapped[str | None] = mapped_column(default=None)
+    text: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), index=True)

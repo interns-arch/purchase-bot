@@ -45,6 +45,8 @@ from backend.app.api.routes.vendor_performance import router as vendor_performan
 from backend.app.api.routes.vendor_selection import router as vendor_selection_router
 from backend.app.api.routes.notifications import router as notifications_router
 from backend.app.api.routes.whatsapp import router as whatsapp_router
+from backend.app.api.routes.whapi import router as whapi_router
+from backend.app.api.routes.groups import router as groups_router
 from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
@@ -87,6 +89,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     # request via get_db() and cost ~2.4-3.6s each time (see
     # backend/app/database/session.py).
     init_db()
+    # A takeover hand-back a restart cut off is not run again by itself.
+    from backend.app.integrations.whatsapp import takeover
+
+    takeover.on_boot()
     _bootstrap_admin_if_configured()
     # Mirror UI toast notifications to the Founder's WhatsApp (best-effort).
     notification_forwarder.register()
@@ -168,6 +174,8 @@ app.include_router(vendor_performance_router)
 app.include_router(vendor_invoices_router)
 app.include_router(purchase_orders_router)
 app.include_router(whatsapp_router)
+app.include_router(whapi_router)
+app.include_router(groups_router)
 app.include_router(notifications_router)
 # Advance orders from the sales bot: answer 503 unless ADVANCE_ORDERS_ENABLED=true.
 app.include_router(advance_orders_api_router)
@@ -183,6 +191,16 @@ def health_check() -> dict[str, str]:
     """Used by Render (and the keep-alive pinger) to determine whether the
     service is up."""
     return {"status": "ok"}
+
+
+@app.get("/api/bot-status", tags=["health"])
+def bot_status_check() -> dict:
+    """What is wrong with the bot right now, for the watcher that sends the
+    "Purchase Bot is not working" alerts (backend/scripts/bot_watch.py)."""
+    from backend.app import bot_status
+
+    found = bot_status.problems()
+    return {"working": not found, "problems": found}
 
 
 @app.get("/api/version", tags=["health"])

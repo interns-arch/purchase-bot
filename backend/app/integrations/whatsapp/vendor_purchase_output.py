@@ -560,15 +560,21 @@ def send_vendor_messages(
 
         stamp = now_ist().strftime("%Y%m%d_%H%M")
 
-        # PRIMARY OUTPUT (Founder, 1 Sep 2026): ONE Excel with one sheet per
-        # vendor, rather than one text message per vendor. Each sheet carries
-        # the detail a text cannot -- customer requested and vendor available
-        # alongside the allocated quantity. Set WHATSAPP_VENDOR_WORKBOOK=false
-        # to go back to the per-vendor text messages.
-        if whatsapp_settings.vendor_workbook:
-            return _send_vendor_workbook(by_vendor, shortages, recipients, stamp)
+        # An internal document for the team: each person's own chat, never
+        # the WhatsApp group (2 Nov 2026: a shortages-only workbook appeared
+        # in the team group as Rajkumar).
+        from backend.app.integrations.whatsapp import whapi
 
-        return _send_vendor_texts(by_vendor, recipients, stamp)
+        with whapi.direct_only():
+            # PRIMARY OUTPUT (Founder, 1 Sep 2026): ONE Excel with one sheet per
+            # vendor, rather than one text message per vendor. Each sheet carries
+            # the detail a text cannot -- customer requested and vendor available
+            # alongside the allocated quantity. Set WHATSAPP_VENDOR_WORKBOOK=false
+            # to go back to the per-vendor text messages.
+            if whatsapp_settings.vendor_workbook:
+                return _send_vendor_workbook(by_vendor, shortages, recipients, stamp)
+
+            return _send_vendor_texts(by_vendor, recipients, stamp)
     except Exception:  # noqa: BLE001 -- an output must never affect an allocation
         logger.exception("Vendor-wise purchase messages failed (allocation unaffected).")
         return 0
