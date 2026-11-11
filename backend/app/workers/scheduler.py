@@ -211,9 +211,11 @@ def _schedule_advance_orders() -> None:
     """Advance orders from the sales bot: send queued vendor questions inside
     vendor hours and move past vendors who did not answer in time. Does
     nothing unless ADVANCE_ORDERS_ENABLED=true."""
-    from backend.app.advance_orders.config import advance_order_settings
+    from backend.app.advance_orders.config import advance_order_settings, engine_enabled
 
-    if not advance_order_settings.enabled:
+    # Sales-bot orders (ADVANCE_ORDERS_ENABLED) or Portal demand
+    # (PORTAL_PROCUREMENT_ENABLED) -- the same vendor-question engine.
+    if not engine_enabled():
         return
 
     def _tick() -> None:
@@ -258,9 +260,9 @@ def _schedule_ai_learning() -> None:
 def _schedule_part_brand_refresh() -> None:
     """Advance orders route a part to its brand's vendors; the part -> brand
     list is rebuilt nightly from the Brand column of that day's stock files."""
-    from backend.app.advance_orders.config import advance_order_settings
+    from backend.app.advance_orders.config import engine_enabled
 
-    if not advance_order_settings.enabled:
+    if not engine_enabled():
         return
 
     def _refresh() -> None:
@@ -281,6 +283,39 @@ def _schedule_part_brand_refresh() -> None:
     )
 
 
+def _schedule_portal_procurement() -> None:
+    """Dealer Portal Active Procurement -> vendors -> PO-MST -> Odoo -> PDF
+    (backend/app/portal_procurement). Nothing unless PORTAL_PROCUREMENT_ENABLED=true."""
+    from backend.app.portal_procurement.config import settings as portal
+
+    if not portal.enabled:
+        return
+    from backend.app.portal_procurement import service
+
+    _scheduler.add_job(
+        lambda: _run_safely("portal_procurement_poll", service.poll_job),
+        "interval",
+        minutes=portal.poll_minutes,
+        id="portal_procurement_poll",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        lambda: _run_safely("portal_procurement_steps", service.steps_job),
+        "interval",
+        minutes=portal.step_minutes,
+        id="portal_procurement_steps",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info(
+        "Portal procurement enabled -- Active Procurement read every %d min, steps every %d min.",
+        portal.poll_minutes, portal.step_minutes,
+    )
+
+
 def _schedule_heartbeat() -> None:
     """Proof the scheduler is still running, read by /api/bot-status."""
     from backend.app import bot_status
@@ -294,6 +329,7 @@ def start_scheduler() -> None:
     _schedule_ai_learning()
     _schedule_whatsapp_daily_jobs()
     _schedule_advance_orders()
+    _schedule_portal_procurement()
     _schedule_google_sheet_daily_reset()
     _schedule_group_stock_requests()
     _schedule_mrp_requests()

@@ -131,7 +131,9 @@ def _handle_delivery_failure(report) -> None:
             report.error_code,
             report.error_title,
         )
-        if not advance_order_settings.enabled:
+        from backend.app.advance_orders.config import engine_enabled
+
+        if not engine_enabled():
             return
         from backend.app.advance_orders import service as advance_orders
 

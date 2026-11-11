@@ -116,7 +116,10 @@ def handle_reply(sender: str, text: str, session: Session) -> bool:
     number = service._normalize(sender)
     if not number or number not in {service._normalize(n) for n in cfg.escalation_numbers}:
         return False
-    waiting = _open_escalations(session)
+    from backend.app.advance_orders.config import order_in_scope
+
+    # Only orders the engine is switched on for (sales-bot orders stay off).
+    waiting = [o for o in _open_escalations(session) if order_in_scope(o)]
     if not waiting:
         return False
     body = (text or "").strip()

@@ -121,9 +121,9 @@ def _purchase_approval_reply(message: IncomingWhatsAppText) -> bool:
 
 
 def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
-    from backend.app.advance_orders.config import advance_order_settings
+    from backend.app.advance_orders.config import engine_enabled
 
-    if not advance_order_settings.enabled or not (message.text or "").strip():
+    if not engine_enabled() or not (message.text or "").strip():
         return False
     try:
         from backend.app.advance_orders import escalation
@@ -338,6 +338,12 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # yes/no -- anything else he types goes on as usual.
     if _photo_stock_reply(message):
         return
+
+    # A purchase user writing to the bot opens their 24 h window: any Portal
+    # PO PDF waiting for them goes now. Claims nothing; handling continues.
+    from backend.app.portal_procurement.notify import deliver_pending
+
+    deliver_pending(message.sender)
 
     # Ujjwal sir's APPROVE / REJECT of a purchase order
     # (PURCHASE_APPROVAL_MODE=true). Only his numbers; else nothing is claimed.

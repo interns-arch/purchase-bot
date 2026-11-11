@@ -108,6 +108,16 @@ class AdvanceOrderSettings:
         os.environ.get("ADVANCE_ORDER_ESCALATE_ON_SILENCE", "true").strip().lower() == "true"
     )
 
+    # --- where a vendor is asked -------------------------------------------
+    # User, 11 Nov 2026: "sab group me" -- a vendor with a WhatsApp group
+    # (Whapi, WHAPI_ACTIVE_GROUPS) is asked about parts IN THAT GROUP, never on
+    # his personal chat. "group_first" (default): no group -> his own number,
+    # as before. "group_only": a vendor without a group is not asked at all.
+    vendor_route: str = (os.environ.get("ADVANCE_ORDER_VENDOR_ROUTE") or "group_first").strip().lower()
+    # Seconds between two posts into vendor groups (one group at a time,
+    # nothing in bulk -- a burst got Rajkumar's number banned, 2 Nov 2026).
+    group_gap_seconds: float = float(os.environ.get("ADVANCE_ORDER_GROUP_GAP_SECONDS") or 20)
+
     # --- handing the answer back to the sales bot --------------------------
     # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},
     # which keeps working either way. Set it and ProcureHub POSTs the order
@@ -128,3 +138,27 @@ class AdvanceOrderSettings:
 
 
 advance_order_settings = AdvanceOrderSettings()
+
+
+def portal_procurement_on() -> bool:
+    """Portal demand (backend/app/portal_procurement) drives this same engine."""
+    from backend.app.portal_procurement.config import settings
+
+    return settings.enabled
+
+
+def engine_enabled() -> bool:
+    """The vendor-question engine runs for sales-bot orders
+    (ADVANCE_ORDERS_ENABLED) or Portal demand (PORTAL_PROCUREMENT_ENABLED)."""
+    return advance_order_settings.enabled or portal_procurement_on()
+
+
+def order_in_scope(order) -> bool:
+    """May the engine work on this order right now? Portal demand needs the
+    Portal switch; anything else needs ADVANCE_ORDERS_ENABLED (user, 11 Nov
+    2026: the sales bot never asks the purchase bot -- that switch is off)."""
+    from backend.app.portal_procurement.config import SOURCE
+
+    if getattr(order, "source", None) == SOURCE:
+        return portal_procurement_on()
+    return advance_order_settings.enabled

@@ -49,6 +49,9 @@ def main() -> int:
     service._send_template = lambda to, name, lang, params: sent.append((to, f"[template {name}]")) or f"wamid.{len(sent)}"
     service._internal_numbers = lambda session: []
     outbound.in_service_window = lambda to: True
+    # The engine only works on sales-bot orders while their switch is on
+    # (Portal demand has its own); this check is about the sales-bot flow.
+    cfg.enabled = True
     cfg.vendor_hours = "09:00-21:00"
     cfg.vendor_wait_minutes = 120
     cfg.followup_minutes = 15

@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.advance_orders import callback, escalation, models as m, quotes, ranking
 from backend.app.advance_orders.config import advance_order_settings as cfg
+from backend.app.advance_orders.config import order_in_scope
 from backend.app.advance_orders.parser import LineAnswer, parse_vendor_reply
 from core.logging_setup import get_logger
 from core.models import Vendor
@@ -67,6 +68,41 @@ def _send_template(to: str, name: str, language: str, params: list[str]) -> str 
     from backend.app.integrations.whatsapp.config import whatsapp_settings
 
     return WhatsAppClient(whatsapp_settings).send_template_message(to, name, language, params)
+
+
+_last_group_post = 0.0
+
+
+def _vendor_group(vendor_id: int, session: Session) -> str | None:
+    """The vendor's WhatsApp group (Whapi), when he has an active one."""
+    try:
+        from backend.app.integrations.whatsapp import whapi
+
+        if not whapi.enabled():
+            return None
+        vendor = session.get(Vendor, vendor_id)
+        code = (getattr(vendor, "vendor_code", None) or "").strip().upper()
+        return whapi.vendor_groups().get(code) if code else None
+    except Exception:  # noqa: BLE001 -- no group known -> the normal route
+        logger.exception("Could not look up the WhatsApp group of vendor %s.", vendor_id)
+        return None
+
+
+def _send_group(group: str, body: str) -> str | None:
+    """Post a vendor question into his group, one post at a time, spaced
+    `group_gap_seconds` apart."""
+    import time
+
+    from backend.app.integrations.whatsapp import whapi
+
+    global _last_group_post
+    wait = cfg.group_gap_seconds - (time.monotonic() - _last_group_post)
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        return whapi.send_text(group, body)
+    finally:
+        _last_group_post = time.monotonic()
 
 
 def _internal_numbers(session: Session) -> list[str]:
@@ -271,8 +307,10 @@ def create_order(payload: dict, session: Session) -> m.AdvanceOrder:
     logger.info("Advance order %s (%s) created: %d line(s).", order.id, ref, len(order.lines))
     from backend.app.advance_orders import approval
 
-    if approval.enabled():
+    if approval.enabled() and not _is_portal(order):
         # Testing mode: Ujjwal sir approves, the team talks to the vendors.
+        # Portal demand has its own approvals (Super Admin knockoff) and is
+        # never held here.
         approval.hold_for_approval(order, session)
         return order
     _advance(order, session, now_ist_naive())
@@ -610,6 +648,24 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         delivered: list[str] = []
         sent_ids: dict[str, str] = {}
         use_template = _vendor_template_ready()
+        group = _vendor_group(q.vendor_id, session)
+        if group or cfg.vendor_route == "group_only":
+            # "Sab group me" (11 Nov 2026): one post in his group, never his
+            # personal chat. A reply in the group arrives as his main number,
+            # so every number of his is kept for matching it.
+            numbers = []
+            if group:
+                try:
+                    message_id = _send_group(group, _question_text(order, lines, want_rate))
+                    delivered = [n for n in (_normalize(x) for x in _vendor_numbers(q.vendor_id, session)) if n]
+                    if isinstance(message_id, str) and message_id:
+                        sent_ids[message_id] = group
+                except Exception:  # noqa: BLE001 -- the next vendor is tried
+                    logger.exception("Advance order %s: question to vendor %s in group %s failed.",
+                                     order.id, q.vendor_id, group)
+            else:
+                logger.info("Advance order %s: vendor %s has no WhatsApp group -- not asked (group_only).",
+                            order.id, q.vendor_id)
         for number in numbers:
             try:
                 if use_template:
@@ -683,6 +739,22 @@ def _settle(order: m.AdvanceOrder) -> None:
     logger.info("Advance order %s is %s.", order.id, order.status)
 
 
+def _is_portal(order: m.AdvanceOrder | None) -> bool:
+    from backend.app.portal_procurement.config import SOURCE
+
+    return order is not None and order.source == SOURCE
+
+
+def _workable(order: m.AdvanceOrder | None) -> bool:
+    """Order switched on for the engine, and not held by purchase approval
+    mode (which covers sales-bot orders only)."""
+    from backend.app.advance_orders import approval
+
+    if order is None or not order_in_scope(order):
+        return False
+    return _is_portal(order) or not approval.enabled()
+
+
 def _snapshot(order: m.AdvanceOrder) -> tuple[str, tuple[tuple[int, str], ...]]:
     return order.status, tuple((line.id, line.status) for line in order.lines)
 
@@ -694,8 +766,8 @@ def _notify_if_changed(
     Silent otherwise -- a vendor saying "nahi" to one of three asked is not
     news the bot can act on."""
     after = _snapshot(order)
-    if after == before:
-        return
+    if after == before or _is_portal(order):
+        return  # Portal demand is never reported to the sales bot
     event = (
         callback.EVENT_ORDER_SETTLED
         if before[0] == m.ASKING and order.status != m.ASKING
@@ -707,12 +779,9 @@ def _notify_if_changed(
 def tick(session: Session, now: datetime | None = None) -> None:
     """Send what is queued (inside vendor hours), move past silent vendors,
     and decide lines whose quote window has closed."""
-    from backend.app.advance_orders import approval
-
-    if approval.enabled():
-        # Purchase approval mode: no vendor is asked or reminded, including
-        # for orders still open from before the switch.
-        return
+    # Purchase approval mode / ADVANCE_ORDERS_ENABLED=false: no vendor is
+    # asked or reminded for a sales-bot order (`_workable`); Portal demand
+    # carries on while PORTAL_PROCUREMENT_ENABLED=true.
     now = now or now_ist_naive()
     overdue = session.execute(
         select(m.AdvanceVendorQuery).where(
@@ -720,11 +789,15 @@ def tick(session: Session, now: datetime | None = None) -> None:
         )
     ).scalars().all()
     for q in overdue:
+        if not _workable(session.get(m.AdvanceOrder, q.advance_order_id)):
+            continue
         q.status = m.Q_TIMEOUT
         logger.info("Advance order %s: vendor %s did not answer in time.", q.advance_order_id, q.vendor_id)
     session.flush()
     _send_followups(session, now)
     for order in session.execute(select(m.AdvanceOrder).where(m.AdvanceOrder.status == m.ASKING)).scalars():
+        if not _workable(order):
+            continue
         before = _snapshot(order)
         if order.deadline_at is not None and now >= order.deadline_at:
             _expire(order, session)
@@ -759,7 +832,7 @@ def _send_followups(session: Session, now: datetime) -> None:
         if now < due or (q.deadline_at is not None and now >= q.deadline_at):
             continue
         order = session.get(m.AdvanceOrder, q.advance_order_id)
-        if order is None or order.status != m.ASKING:
+        if order is None or order.status != m.ASKING or not _workable(order):
             continue
         lines = [line for line in order.lines if line.id in (q.line_ids or []) and line.status == m.LINE_ASKING]
         if not lines:
@@ -767,7 +840,15 @@ def _send_followups(session: Session, now: datetime) -> None:
         from backend.app.integrations.whatsapp import outbound
 
         ids = dict(q.message_ids or {})
-        for number in q.numbers or []:
+        group = _vendor_group(q.vendor_id, session)
+        if group:
+            try:
+                message_id = _send_group(group, _followup_text(order, lines, done + 1))
+                if isinstance(message_id, str) and message_id:
+                    ids[message_id] = group
+            except Exception:  # noqa: BLE001
+                logger.exception("Advance order %s: follow-up in group %s failed.", order.id, group)
+        for number in ([] if group or cfg.vendor_route == "group_only" else (q.numbers or [])):
             try:
                 # Outside the 24 h window: re-send the approved enquiry template.
                 if not outbound.in_service_window(number) and _vendor_template_ready():
@@ -1128,6 +1209,8 @@ def handle_vendor_text(sender: str, text: str, session: Session, now: datetime |
         # decided, can no longer be answered. It is closed here rather than
         # left to catch -- and swallow -- this vendor's reply to a LIVE one.
         live_order = session.get(m.AdvanceOrder, x.advance_order_id)
+        if live_order is not None and not order_in_scope(live_order):
+            continue  # switched off: leave the question, claim nothing
         live = (
             live_order is not None
             and live_order.status == m.ASKING

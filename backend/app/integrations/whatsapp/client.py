@@ -321,7 +321,7 @@ class WhatsAppClient:
 
     def send_document_message(
         self, to: str, media_id: str, filename: str, caption: str | None = None
-    ) -> None:
+    ) -> str | None:
         """Send a previously-uploaded document (by media id) to `to`, with a
         download filename and optional caption (step 2 of sending a
         document)."""
@@ -351,7 +351,7 @@ class WhatsAppClient:
                 response.raise_for_status()
                 return _message_id(response)
 
-        _logged(to, "document", caption, filename, lambda: _with_retries(f"send_document_message({filename})", _call))
+        return _logged(to, "document", caption, filename, lambda: _with_retries(f"send_document_message({filename})", _call))
 
     def get_phone_number_info(self) -> dict[str, Any]:
         """Used only by the interactive "Test Connection" action on the

@@ -23,6 +23,7 @@ from backend.app.api.routes.advance_orders import desk_router as advance_orders_
 from backend.app.api.routes.advance_orders import dealer_stock_router as dealer_stock_orders_router
 from backend.app.api.routes.chats import router as chats_router
 from backend.app.api.routes.priority import router as priority_router
+from backend.app.api.routes.portal_procurement import router as portal_procurement_router
 from backend.app.api.routes.dealer_portal_accounts import router as dealer_portal_accounts_router
 from backend.app.api.routes.team_performance import router as team_performance_router
 from backend.app.api.routes.command_centre import router as command_centre_router
@@ -181,6 +182,8 @@ app.include_router(notifications_router)
 app.include_router(advance_orders_api_router)
 app.include_router(advance_orders_desk_router)
 app.include_router(dealer_stock_orders_router)
+# Dealer Portal Active Procurement -> vendors -> PO-MST -> Odoo (PORTAL_PROCUREMENT_ENABLED).
+app.include_router(portal_procurement_router)
 
 
 # HEAD is accepted alongside GET: free uptime pingers (UptimeRobot's free
