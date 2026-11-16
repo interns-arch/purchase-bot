@@ -59,6 +59,50 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 # ALTER TABLE once per process. Additive-only -- nothing is ever dropped.
 _SCHEMA_UPGRADES = (
     ("incoming_documents", "stored_path", "VARCHAR"),
+    # Advance-order quote comparison. These tables are imported at startup, so
+    # on an existing database they already exist -- empty -- and create_all
+    # will not add the new columns to them. Every type here is valid on both
+    # SQLite and Postgres. `discount_type` carries a DEFAULT so any row made
+    # before this change reads as a percentage vendor with no percentage on
+    # file -- which `quotes.wants_rate()` treats as "no terms known", so that
+    # vendor keeps the original availability-and-days question unchanged.
+    ("vendor_brands", "discount_type", "VARCHAR DEFAULT 'percent'"),
+    ("vendor_brands", "discount_pct", "NUMERIC(6, 3)"),
+    ("vendor_brands", "discount_note", "VARCHAR"),
+    ("vendor_brands", "transport", "VARCHAR"),
+    ("vendor_brands", "payment_terms", "VARCHAR"),
+    ("vendor_brands", "can_share_stock", "BOOLEAN"),
+    ("vendor_brands", "updated_at", "TIMESTAMP"),
+    ("advance_order_lines", "tat_days", "INTEGER"),
+    ("advance_order_lines", "mrp", "NUMERIC(18, 4)"),
+    ("advance_order_lines", "discount_pct", "NUMERIC(6, 3)"),
+    ("advance_order_lines", "net_price", "NUMERIC(18, 4)"),
+    ("advance_order_lines", "winning_quote_id", "INTEGER"),
+    # Case 2 (dealer stock orders). Existing orders read as case 3.
+    ("advance_orders", "kind", "VARCHAR DEFAULT 'advance'"),
+    ("advance_orders", "deadline_at", "TIMESTAMP"),
+    ("advance_order_lines", "dealer_id", "INTEGER"),
+    ("advance_order_lines", "stock_import_id", "INTEGER"),
+    ("advance_vendor_queries", "message_ids", "JSON"),
+    # Dealer Portal PO + transit references, set when the customer confirms.
+    ("advance_orders", "dealer_portal", "JSON"),
+    # Vendor follow-ups (2 reminders, 15 min apart) before Prateek sir is asked.
+    ("advance_vendor_queries", "followups_sent", "INTEGER DEFAULT 0"),
+    # Step-by-step vendor questions: pcs, MRP, discount, days (13 Nov 2026).
+    ("advance_vendor_queries", "step", "VARCHAR"),
+    ("advance_vendor_queries", "draft", "JSON"),
+    # Vendor POC tab (14 Nov 2026).
+    ("advance_vendor_contacts", "name", "VARCHAR"),
+    ("advance_vendor_contacts", "treat_as_vendor", "BOOLEAN DEFAULT FALSE"),
+    # Minimum margin on Portal procurement (14 Nov 2026).
+    ("portal_demand_lines", "portal_mrp", "NUMERIC(18, 4)"),
+    ("portal_demand_lines", "customer_discount_pct", "NUMERIC(6, 3)"),
+    ("portal_demand_lines", "sale_price", "NUMERIC(18, 4)"),
+    # Dealer Portal: parts skipped because no price is known.
+    ("dealer_portal_pushes", "skipped_no_price", "INTEGER DEFAULT 0"),
+    ("dealer_portal_pushes", "skipped_parts", "JSON"),
+    # Human takeover: who typed an outgoing message by hand (None = the bot).
+    ("whatsapp_chat_messages", "sent_by", "VARCHAR"),
 )
 # Values added to a Postgres ENUM type after it already existed. Like
 # columns, `create_all` never alters an existing type, and inserting a value

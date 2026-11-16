@@ -21,6 +21,17 @@ def detect_encoding(file_path: Path) -> str:
     Select a practical CSV encoding.
     UTF-8-SIG handles files exported by Excel with a BOM.
     """
+    # A UTF-16 export (Brite Autocars' "output (53).csv", 19 Oct 2026: tab
+    # separated, starts FF FE) must be recognised by its byte-order mark
+    # BEFORE the 8-bit encodings -- cp1252 "decodes" it without error into
+    # text full of NUL characters, and no header row is then found.
+    with file_path.open("rb") as raw:
+        start = raw.read(4)
+    if start[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"
+    if len(start) >= 4 and start[1] == 0 and start[3] == 0 and start[0] != 0:
+        return "utf-16-le"  # UTF-16 without a BOM (ASCII text: byte, 00, byte, 00)
+
     encodings = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 
     for encoding in encodings:

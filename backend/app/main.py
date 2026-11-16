@@ -20,6 +20,12 @@ from sqlalchemy import func, select
 
 from backend.app.api.routes.advance_orders import api_router as advance_orders_api_router
 from backend.app.api.routes.advance_orders import desk_router as advance_orders_desk_router
+from backend.app.api.routes.advance_orders import dealer_stock_router as dealer_stock_orders_router
+from backend.app.api.routes.chats import router as chats_router
+from backend.app.api.routes.priority import router as priority_router
+from backend.app.api.routes.portal_procurement import router as portal_procurement_router
+from backend.app.api.routes.dealer_portal_accounts import router as dealer_portal_accounts_router
+from backend.app.api.routes.team_performance import router as team_performance_router
 from backend.app.api.routes.command_centre import router as command_centre_router
 from backend.app.api.routes.customer_orders import router as customer_orders_router
 from backend.app.api.routes.dashboard import router as dashboard_router
@@ -34,10 +40,16 @@ from backend.app.api.routes.inventory import router as inventory_router
 from backend.app.api.routes.purchase_orders import router as purchase_orders_router
 from backend.app.api.routes.vendor_comparison import router as vendor_comparison_router
 from backend.app.api.routes.vendor_invoices import router as vendor_invoices_router
+# Registers the vendor-onboarding tables before init_db() runs create_all.
+import backend.app.vendor_onboarding.models  # noqa: E402,F401
 from backend.app.api.routes.vendor_performance import router as vendor_performance_router
 from backend.app.api.routes.vendor_selection import router as vendor_selection_router
 from backend.app.api.routes.notifications import router as notifications_router
 from backend.app.api.routes.whatsapp import router as whatsapp_router
+from backend.app.api.routes.whapi import router as whapi_router
+from backend.app.api.routes.groups import router as groups_router
+from backend.app.api.routes.vendor_pocs import router as vendor_pocs_router
+from backend.app.api.routes.vendor_registrations import router as vendor_registrations_router
 from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
@@ -80,6 +92,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     # request via get_db() and cost ~2.4-3.6s each time (see
     # backend/app/database/session.py).
     init_db()
+    # A takeover hand-back a restart cut off is not run again by itself.
+    from backend.app.integrations.whatsapp import takeover
+
+    takeover.on_boot()
     _bootstrap_admin_if_configured()
     # Mirror UI toast notifications to the Founder's WhatsApp (best-effort).
     notification_forwarder.register()
@@ -140,6 +156,10 @@ async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSON
 
 
 app.include_router(auth_router)
+app.include_router(chats_router)
+app.include_router(priority_router)
+app.include_router(dealer_portal_accounts_router)
+app.include_router(team_performance_router)
 app.include_router(command_centre_router)
 app.include_router(dashboard_router)
 app.include_router(data_management_router)
@@ -157,10 +177,17 @@ app.include_router(vendor_performance_router)
 app.include_router(vendor_invoices_router)
 app.include_router(purchase_orders_router)
 app.include_router(whatsapp_router)
+app.include_router(whapi_router)
+app.include_router(groups_router)
+app.include_router(vendor_pocs_router)
+app.include_router(vendor_registrations_router)
 app.include_router(notifications_router)
 # Advance orders from the sales bot: answer 503 unless ADVANCE_ORDERS_ENABLED=true.
 app.include_router(advance_orders_api_router)
 app.include_router(advance_orders_desk_router)
+app.include_router(dealer_stock_orders_router)
+# Dealer Portal Active Procurement -> vendors -> PO-MST -> Odoo (PORTAL_PROCUREMENT_ENABLED).
+app.include_router(portal_procurement_router)
 
 
 # HEAD is accepted alongside GET: free uptime pingers (UptimeRobot's free
@@ -171,6 +198,16 @@ def health_check() -> dict[str, str]:
     """Used by Render (and the keep-alive pinger) to determine whether the
     service is up."""
     return {"status": "ok"}
+
+
+@app.get("/api/bot-status", tags=["health"])
+def bot_status_check() -> dict:
+    """What is wrong with the bot right now, for the watcher that sends the
+    "Purchase Bot is not working" alerts (backend/scripts/bot_watch.py)."""
+    from backend.app import bot_status
+
+    found = bot_status.problems()
+    return {"working": not found, "problems": found}
 
 
 @app.get("/api/version", tags=["health"])

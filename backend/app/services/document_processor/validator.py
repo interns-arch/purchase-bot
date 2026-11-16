@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-STRUCTURED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
+# .docx / .txt are vendor stock formats (Word table, text list); the
+# order and delivery importers still refuse them with a reason.
+STRUCTURED_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls", ".docx", ".txt"}
 INVOICE_EXTENSIONS = {".pdf"}
 SUPPORTED_EXTENSIONS = STRUCTURED_EXTENSIONS | INVOICE_EXTENSIONS
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.auth import service as auth_service
@@ -21,9 +24,30 @@ _CREDENTIALS_ERROR = HTTPException(
 )
 
 
+def _auth_disabled() -> bool:
+    """AUTH_DISABLED=true (Founder, 10 Oct 2026: "remove login id and
+    password"): the website opens without a login and every request acts as
+    the first active user. Set it back to false to bring the login back."""
+    return (os.environ.get("AUTH_DISABLED") or "").strip().lower() == "true"
+
+
 def get_current_user(
     token: str | None = Depends(oauth2_scheme), db: Session = Depends(get_db)
 ) -> User:
+    if _auth_disabled():
+        try:
+            return _user_from_token(token, db)
+        except HTTPException:
+            user = db.execute(
+                select(User).where(User.is_active.is_(True)).order_by(User.id).limit(1)
+            ).scalar_one_or_none()
+            if user is None:
+                raise
+            return user
+    return _user_from_token(token, db)
+
+
+def _user_from_token(token: str | None, db: Session) -> User:
     if token is None:
         raise _CREDENTIALS_ERROR
 

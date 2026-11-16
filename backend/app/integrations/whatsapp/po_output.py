@@ -68,7 +68,10 @@ def po_recipients(po, session) -> tuple[list[str], bool]:
     numbers: list[str] = []
 
     vendor_included = False
-    if whatsapp_settings.send_po_to_vendor:
+    from backend.app.advance_orders import approval
+
+    # Purchase approval mode: the team talks to the vendors, never the bot.
+    if whatsapp_settings.send_po_to_vendor and not approval.enabled():
         vendor_numbers = list(session.execute(
             select(WhatsAppRegisteredNumber.whatsapp_number).where(
                 WhatsAppRegisteredNumber.vendor_id == po.vendor_id

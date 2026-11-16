@@ -95,6 +95,8 @@ class DeltaResult:
     withheld_zero_count: int = 0
     duplicate_count: int = 0
     priceless_count: int = 0
+    # The part numbers skipped for having no price (for the team's message).
+    priceless_parts: list[str] = field(default_factory=list)
 
     @property
     def rows_sent(self) -> int:
@@ -161,8 +163,11 @@ def _collapse(
 
         # Price: the highest non-null price seen for the part, matching DP's
         # own "max price wins" tie-break for duplicates.
-        if row.price is not None:
-            prices[part] = max(prices.get(part, row.price), row.price)
+        # A file with MRP but no price column (Spares 4U): MRP is the price
+        # (Founder, 12 Oct 2026) -- never a 0 that would wipe the portal price.
+        price = row.price if row.price is not None else getattr(row, "mrp", None)
+        if price is not None:
+            prices[part] = max(prices.get(part, price), price)
 
     return quantities, prices, duplicates
 
@@ -208,14 +213,48 @@ def build_delta(account: DealerPortalAccount, session) -> DeltaResult:
     prev_qty, prev_price, _ = _collapse(prev_rows, strategy)
     result.duplicate_count = new_dupes
 
+    # The vendor's monthly MRP list (2 Nov 2026) replaces the MRP in their stock
+    # files. A part their file gives a Rate for keeps that Rate. Off by default.
+    from backend.app.integrations.whatsapp import mrp_list
+
+    rated = {(row.normalized_part_number or "").strip() for row in new_rows if row.price is not None}
+    new_price.update(
+        mrp_list.prices_for(account.vendor_ids, [part for part in new_qty if part not in rated], session)
+    )
+
+    # Last known price from the vendor's WHOLE history, for parts the latest
+    # two files carry no price for (14 Oct 2026: forwarded copies of Spares
+    # 4U's files had the MRP column removed two days running -> 63 parts went
+    # to the portal at price 0).
+    missing = [p for p in new_qty if new_price.get(p) is None and prev_price.get(p) is None]
+    history: dict[str, Decimal] = {}
+    if missing and account.vendor_ids:
+        for part, price, mrp in (
+            session.query(VendorInventory.normalized_part_number, VendorInventory.price, VendorInventory.mrp)
+            .filter(
+                VendorInventory.vendor_id.in_(account.vendor_ids),
+                VendorInventory.normalized_part_number.in_(missing),
+            )
+            .filter((VendorInventory.price.isnot(None)) | (VendorInventory.mrp.isnot(None)))
+            .order_by(VendorInventory.id.desc())
+            .all()
+        ):
+            history.setdefault(part, price if price is not None else mrp)
+
     # 1. Everything in the new snapshot, at its stated quantity.
     for part, quantity in new_qty.items():
         price = new_price.get(part)
         if price is None:
             price = prev_price.get(part)  # carry forward, never invent a 0
             if price is None:
-                price = Decimal(0)
+                price = history.get(part)
+            if price is None:
+                # No price anywhere -- in this file, the last one, or the
+                # vendor's history. NOT uploaded: the portal would show it at
+                # Rs 0 (Founder, 14 Oct 2026: skip it, and say how many).
                 result.priceless_count += 1
+                result.priceless_parts.append(part)
+                continue
         result.rows.append(
             DeltaRow(part_no=part, quantity=int(quantity), price=price)
         )

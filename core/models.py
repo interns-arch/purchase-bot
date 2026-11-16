@@ -93,7 +93,7 @@ class Vendor(Base):
     name: Mapped[str] = mapped_column(nullable=False)
     # Permanent identifier used throughout the app for inventory imports
     # (see core.services.vendor_code_service) -- <first two letters of
-    # name>_CT, e.g. "AR_CT", with a numeric suffix on collision. NOT the
+    # CT_<initials of the name>, e.g. "CT_AR" (was AR_CT before 5 Oct 2026). NOT the
     # same thing as `whatsapp_number` below: multiple vendors share a single
     # WhatsApp Business number, so the sender's phone number can never
     # identify which vendor a file came from -- only the vendor code
@@ -1017,6 +1017,9 @@ class DealerPortalPush(Base):
     batch_id: Mapped[str | None] = mapped_column(default=None)  # from DP's response
     rows_sent: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     zeroed_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    # Parts NOT uploaded because no price is known for them anywhere.
+    skipped_no_price: Mapped[int | None] = mapped_column(default=0)
+    skipped_parts: Mapped[list | None] = mapped_column(JSON, default=None)  # first few, for the message
     inserted_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     updated_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     # Parts DP rejected because they are absent from its parts master. This

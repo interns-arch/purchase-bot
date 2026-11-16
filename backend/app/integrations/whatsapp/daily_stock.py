@@ -80,9 +80,62 @@ def participation_today(session: Session) -> tuple[list[str], list[str], set[int
     return received, pending, pending_ids
 
 
+_template_info: dict[str, tuple[str, int]] = {}
+_template_info_at = 0.0
+
+
+def _meta_templates() -> dict[str, tuple[str, int]]:
+    """{name: (status, number of {{n}} placeholders)} from Meta, cached 10 min."""
+    import os
+    import re
+    import time
+
+    import httpx
+
+    global _template_info, _template_info_at
+    if _template_info and time.time() - _template_info_at < 600:
+        return _template_info
+    waba = os.environ.get("WHATSAPP_BUSINESS_ACCOUNT_ID", "").strip()
+    if not waba:
+        return {}
+    try:
+        data = httpx.get(
+            f"{whatsapp_settings.graph_api_base_url}/{waba}/message_templates",
+            params={"fields": "name,status,components", "limit": 200},
+            headers={"Authorization": f"Bearer {whatsapp_settings.access_token}"},
+            timeout=15,
+        ).json()
+        info = {}
+        for item in data.get("data", []):
+            body = next((c.get("text", "") for c in item.get("components", []) if c.get("type") == "BODY"), "")
+            info[item["name"]] = (item.get("status", ""), len(set(re.findall(r"\{\{(\d+)\}\}", body))))
+        _template_info, _template_info_at = info, time.time()
+    except Exception:  # noqa: BLE001 -- fall back to the first configured name
+        logger.exception("Could not read WhatsApp template statuses from Meta.")
+    return _template_info
+
+
+def _pick_template(configured: str) -> tuple[str, int]:
+    """`configured` may list several names, best first
+    ("vendor_stock_request,stock_request"): the first one Meta has APPROVED
+    is used, so a newly submitted template takes over by itself the moment
+    it is approved. Returns (name, number of placeholders)."""
+    names = [n.strip() for n in (configured or "").split(",") if n.strip()]
+    info = _meta_templates()
+    for name in names:
+        status, params = info.get(name, ("", 0))
+        if status == "APPROVED":
+            return name, params
+    fallback = names[-1] if names else configured
+    return fallback, info.get(fallback, ("", 0))[1]
+
+
 def _send_template_to_contacts(contacts, template_name: str) -> tuple[int, int]:
-    """Send `template_name` to each `registry.VendorContact`. Returns
-    (sent, failed). One bad number never blocks the rest."""
+    """Send the template to each `registry.VendorContact` -- the vendor's
+    name fills {{1}} when the template has one. Returns (sent, failed). One
+    bad number never blocks the rest."""
+    template_name, placeholders = _pick_template(template_name)
+    logger.info("Stock template in use: %s (%d placeholder(s)).", template_name, placeholders)
     client = WhatsAppClient(whatsapp_settings)
     sent = failed = 0
     for contact in contacts:
@@ -91,6 +144,7 @@ def _send_template_to_contacts(contacts, template_name: str) -> tuple[int, int]:
                 contact.whatsapp_number,
                 template_name,
                 whatsapp_settings.template_language,
+                [contact.vendor_name or "Sir"] if placeholders else None,
             )
             sent += 1
         except Exception:  # noqa: BLE001 -- one undeliverable vendor must not stop the batch
@@ -153,6 +207,39 @@ def _summary_text(received: list[str], pending: list[str]) -> str:
     return "\n".join(lines)
 
 
+SUMMARY_TEMPLATE = "daily_vendor_stock_status"
+
+
+def _send_summary(to: str, text: str, received: list[str], pending: list[str]) -> bool:
+    """The full text when the admin is inside WhatsApp's 24 h window; the
+    approved summary template (same facts) when he is not."""
+    from backend.app.integrations.whatsapp.outbound import (
+        flatten_for_template,
+        in_service_window,
+        template_approved,
+    )
+
+    if in_service_window(to) or not template_approved(SUMMARY_TEMPLATE):
+        return send_reply_safe(to, text)
+    try:
+        WhatsAppClient(whatsapp_settings).send_template_message(
+            to,
+            SUMMARY_TEMPLATE,
+            whatsapp_settings.template_language,
+            [
+                datetime.now(_IST).strftime("%d %b"),
+                str(len(received)),
+                str(len(received) + len(pending)),
+                flatten_for_template(", ".join(received) or "none yet", 600),
+                flatten_for_template(", ".join(pending) or "none", 600),
+            ],
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("Daily summary template to %s failed.", to)
+        return False
+
+
 def send_daily_summary() -> None:
     """Scheduled: the received/pending participation summary, straight to the
     admin number (plain text -- the admin talks to the bot daily, so the 24h
@@ -168,7 +255,7 @@ def send_daily_summary() -> None:
             logger.info("Daily summary: no registered vendors yet -- nothing to report.")
             return
         text = _summary_text(received, pending)
-        delivered = [send_reply_safe(to, text) for to in recipients]
+        delivered = [_send_summary(to, text, received, pending) for to in recipients]
         if not any(delivered):
             broker.publish(
                 "warning",

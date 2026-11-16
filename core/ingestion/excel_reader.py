@@ -38,11 +38,22 @@ def _trim_trailing_blank_columns(header_row: tuple[object, ...]) -> int:
     return last_non_empty + 1
 
 
-def _select_sheet_and_parse(sheets: list[RawSheet], file_name: str) -> ParsedFile:
+def _same_columns(primary: list[str], other: list[str]) -> bool:
+    """One sheet's columns are the other's, give or take some (Spares 4U:
+    HYUNDAI / VW / TOYOTA / HONDA sheets, HONDA without TOTAL)."""
+    a = {h.strip().upper() for h in primary if h.strip()}
+    b = {h.strip().upper() for h in other if h.strip()}
+    return bool(a) and bool(b) and (a <= b or b <= a)
+
+
+def _select_sheet_and_parse(
+    sheets: list[RawSheet], file_name: str, *, merge_matching_sheets: bool = False
+) -> ParsedFile:
     primary_sheet_name: str | None = None
     headers: list[str] = []
     rows: list[dict[str, str]] = []
     ignored_sheets: list[str] = []
+    merged_sheets: list[str] = []
 
     for sheet_name, raw_rows in sheets:
         non_blank_rows = [row for row in raw_rows if not _is_blank_row(row)]
@@ -51,6 +62,27 @@ def _select_sheet_and_parse(sheets: list[RawSheet], file_name: str) -> ParsedFil
             continue  # completely blank sheet, nothing to report
 
         if primary_sheet_name is not None:
+            if merge_matching_sheets:
+                # A workbook split by brand (one sheet per brand, same
+                # columns) is ONE stock list: every such sheet is read, not
+                # just the first (Founder, 12 Oct 2026). Rows are keyed by the
+                # FIRST sheet's spelling of each column.
+                extra_row = non_blank_rows[0]
+                extra_count = _trim_trailing_blank_columns(extra_row)
+                extra_headers = [_clean_cell(value) for value in extra_row[:extra_count]]
+                if _same_columns(headers, extra_headers):
+                    by_upper = {h.strip().upper(): h for h in headers}
+                    for data_row in non_blank_rows[1:]:
+                        padded = list(data_row) + [None] * max(0, extra_count - len(data_row))
+                        cleaned_row = {h: "" for h in headers}
+                        for i in range(extra_count):
+                            key = by_upper.get(extra_headers[i].strip().upper())
+                            if key is not None:
+                                cleaned_row[key] = _clean_cell(padded[i])
+                        if any(cleaned_row.values()):
+                            rows.append(cleaned_row)
+                    merged_sheets.append(sheet_name)
+                    continue
             ignored_sheets.append(sheet_name)
             continue
 
@@ -75,12 +107,12 @@ def _select_sheet_and_parse(sheets: list[RawSheet], file_name: str) -> ParsedFil
     return ParsedFile(
         rows=rows,
         headers=headers,
-        sheet_name=primary_sheet_name,
+        sheet_name=", ".join([primary_sheet_name, *merged_sheets]) if merged_sheets else primary_sheet_name,
         ignored_sheets=ignored_sheets,
     )
 
 
-def read_xlsx_rows(file_path: Path) -> ParsedFile:
+def read_xlsx_rows(file_path: Path, *, merge_matching_sheets: bool = False) -> ParsedFile:
     """Read an Excel .xlsx/.xlsm file."""
     import openpyxl
 
@@ -93,10 +125,10 @@ def read_xlsx_rows(file_path: Path) -> ParsedFile:
     finally:
         workbook.close()
 
-    return _select_sheet_and_parse(sheets, file_path.name)
+    return _select_sheet_and_parse(sheets, file_path.name, merge_matching_sheets=merge_matching_sheets)
 
 
-def read_xls_rows(file_path: Path) -> ParsedFile:
+def read_xls_rows(file_path: Path, *, merge_matching_sheets: bool = False) -> ParsedFile:
     """Read a legacy Excel .xls file."""
     import xlrd
 
@@ -109,18 +141,18 @@ def read_xls_rows(file_path: Path) -> ParsedFile:
         for sheet in workbook.sheets()
     ]
 
-    return _select_sheet_and_parse(sheets, file_path.name)
+    return _select_sheet_and_parse(sheets, file_path.name, merge_matching_sheets=merge_matching_sheets)
 
 
-def read_excel_rows(file_path: Path) -> ParsedFile:
+def read_excel_rows(file_path: Path, *, merge_matching_sheets: bool = False) -> ParsedFile:
     """Dispatch to the correct reader based on file extension."""
     suffix = file_path.suffix.lower()
 
     if suffix in (".xlsx", ".xlsm"):
-        return read_xlsx_rows(file_path)
+        return read_xlsx_rows(file_path, merge_matching_sheets=merge_matching_sheets)
 
     if suffix == ".xls":
-        return read_xls_rows(file_path)
+        return read_xls_rows(file_path, merge_matching_sheets=merge_matching_sheets)
 
     raise ValueError(f"Unsupported Excel extension '{suffix}' for '{file_path.name}'.")
 

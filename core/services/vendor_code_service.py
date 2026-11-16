@@ -3,7 +3,12 @@ throughout the app for inventory imports (manual and WhatsApp alike),
 replacing WhatsApp sender-number identification -- every vendor messages the
 same shared WhatsApp Business number, so the sender's phone number can never
 tell them apart. A vendor's own inventory filename carries the code instead
-(`<VENDOR_CODE>_Inventory.xlsx`, e.g. `SBM_CT_Inventory.xlsx`).
+(`<VENDOR_CODE>_Inventory.xlsx`, e.g. `CT_SBM_Inventory.xlsx`).
+
+FORMAT (changed 5 Oct 2026, Boodmo-style): `CT_` + the name's initials --
+Yash Gupta -> CT_YG, Northend Distributors -> CT_ND. Codes used to be the
+other way round (ND_CT); every existing code was renamed, and an old-style
+code in a filename or anywhere else is still understood (`canonical_code`).
 
 Identity rules:
 - `vendor_code` is a STABLE, UNIQUE identifier. It is generated ONCE, when a
@@ -19,13 +24,13 @@ initial suggestion, but ALWAYS checks for collisions and, on collision,
 produces another meaningful, name-derived unique code rather than a blind
 `_2`/`_3` suffix:
 
-    Shree Balaji Motors      -> SBM_CT
-    Shree Balaji Auto Parts  -> SBA_CT
-    Shree Balaji Enterprises -> SBE_CT
+    Shree Balaji Motors      -> CT_SBM
+    Shree Balaji Auto Parts  -> CT_SBA
+    Shree Balaji Enterprises -> CT_SBE
 
-Single-word names keep the historical two-letter form (MAHINDRA -> MA_CT,
-BIJVASAN -> BI_CT, DELHI -> DE_CT), lengthening only on collision
-(MAHINDRA -> MA_CT, MARUTI -> MAR_CT).
+Single-word names keep the historical two-letter form (MAHINDRA -> CT_MA,
+BIJVASAN -> CT_BI, DELHI -> CT_DE), lengthening only on collision
+(MAHINDRA -> CT_MA, MARUTI -> CT_MAR).
 
 Pure business logic -- no FastAPI/print()/input() here.
 """
@@ -41,12 +46,14 @@ from sqlalchemy.orm import Session
 
 from core.models import Vendor
 
-_CODE_SUFFIX = "_CT"
-# A code is a run of alphanumerics + "_CT" (variable-length stem, so 2-letter
-# AR_CT and 3+-letter SBM_CT / hash-fallback SBM3F_CT all parse), optionally
-# followed by a legacy numeric suffix (_2/_3 from older data), then "_" before
-# the rest of the filename. Case-insensitive (filename is upper()ed first).
-_CODE_PREFIX_PATTERN = re.compile(r"^([A-Z0-9]+_CT(?:_\d+)?)_")
+_CODE_PREFIX = "CT_"
+# A filename starts with the code, then "_": CT_AR_Inventory.xlsx. The stem is
+# a run of alphanumerics (CT_AR, CT_SBM, hash-fallback CT_SBM3F), optionally
+# with a legacy numeric suffix (CT_MA_2). Case-insensitive.
+_CODE_PREFIX_PATTERN = re.compile(r"^(CT_[A-Z0-9]+(?:_\d+)?)_")
+# The OLD format (AR_CT_Inventory.xlsx), still accepted and translated.
+_LEGACY_PREFIX_PATTERN = re.compile(r"^([A-Z0-9]+_CT(?:_\d+)?)_")
+_LEGACY_CODE = re.compile(r"^([A-Z0-9]+)_CT((?:_\d+)?)$")
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _MAX_CONCISE_INITIALS = 3
@@ -102,7 +109,7 @@ def generate_vendor_code(name: str, session: Session) -> str:
     re-derive an existing vendor's code.
     """
     for stem in _candidate_stems(name):
-        code = f"{stem}{_CODE_SUFFIX}"
+        code = f"{_CODE_PREFIX}{stem}"
         if get_vendor_by_code(code, session) is None:
             return code
 
@@ -110,22 +117,44 @@ def generate_vendor_code(name: str, session: Session) -> str:
     base = next(_candidate_stems(name), "XX")
     digest = hashlib.sha1((name or "").strip().lower().encode("utf-8")).hexdigest().upper()
     for index in range(len(digest) - 1):
-        code = f"{base}{digest[index:index + 2]}{_CODE_SUFFIX}"
+        code = f"{_CODE_PREFIX}{base}{digest[index:index + 2]}"
         if get_vendor_by_code(code, session) is None:
             return code
 
     raise RuntimeError(f"Unable to generate a unique vendor code for {name!r}.")
 
 
+def canonical_code(code: str) -> str:
+    """The current form of a vendor code: 'ND_CT' -> 'CT_ND', 'MA_CT_2' ->
+    'CT_MA_2'; a code already in CT_ form is returned upper-cased."""
+    text = (code or "").strip().upper()
+    legacy = _LEGACY_CODE.match(text)
+    if legacy:
+        return f"{_CODE_PREFIX}{legacy.group(1)}{legacy.group(2)}"
+    return text
+
+
 def parse_vendor_code_from_filename(filename: str) -> str | None:
-    """Return the leading vendor-code prefix (e.g. "AR_CT", "SBM_CT",
-    "MA_CT_2") from a filename like "SBM_CT_Inventory.xlsx", or `None` if the
-    filename has no code-shaped prefix at all. Case-insensitive."""
-    match = _CODE_PREFIX_PATTERN.match(filename.strip().upper())
-    return match.group(1) if match else None
+    """Return the leading vendor code (in the CURRENT CT_ form) from a
+    filename like "CT_SBM_Inventory.xlsx" -- or the old "SBM_CT_Inventory.xlsx"
+    -- or `None` if the filename has no code-shaped prefix. Case-insensitive."""
+    name = filename.strip().upper()
+    match = _CODE_PREFIX_PATTERN.match(name)
+    if match:
+        return match.group(1)
+    legacy = _LEGACY_PREFIX_PATTERN.match(name)
+    return canonical_code(legacy.group(1)) if legacy else None
+
+
+def is_legacy_style(filename: str) -> bool:
+    """True when the filename used the OLD 'XX_CT_' prefix."""
+    name = filename.strip().upper()
+    return not _CODE_PREFIX_PATTERN.match(name) and bool(_LEGACY_PREFIX_PATTERN.match(name))
 
 
 def get_vendor_by_code(code: str, session: Session) -> Vendor | None:
+    """Exact code match, accepting either the CT_ form or the old XX_CT form."""
+    wanted = {canonical_code(code), (code or "").strip().upper()}
     return session.execute(
-        select(Vendor).where(func.upper(Vendor.vendor_code) == code.upper())
-    ).scalar_one_or_none()
+        select(Vendor).where(func.upper(Vendor.vendor_code).in_(wanted))
+    ).scalars().first()

@@ -29,6 +29,36 @@ class WhatsAppNotConfiguredError(Exception):
     """Raised when the client is used without a configured access token."""
 
 
+def _message_id(response) -> str | None:
+    """The wamid in a /messages reply ({"messages": [{"id": "wamid..."}]}),
+    or None. Never raises -- a sent message stays sent."""
+    try:
+        return ((response.json() or {}).get("messages") or [{}])[0].get("id")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _logged(to: str, kind: str, text: str | None, filename: str | None, send: Callable[[], _T]) -> _T:
+    """Send, and record the message for the Chats page -- also when it fails
+    (the error is re-raised unchanged)."""
+    from backend.app.integrations.whatsapp import chat_log, takeover
+
+    # A chat a person has taken over (takeover.py): nothing automatic is sent.
+    # Kept on the chat for the admin to send or drop, never silently gone.
+    if takeover.blocks(to):
+        takeover.park(to, kind, text, filename)
+        return None  # type: ignore[return-value]
+    by = takeover.admin_name()
+    try:
+        result = send()
+    except Exception as exc:
+        chat_log.log_outgoing(to, kind=kind, text=text, filename=filename, error=str(exc)[:300], sent_by=by)
+        raise
+    chat_log.log_outgoing(to, kind=kind, text=text, filename=filename, wamid=result if isinstance(result, str) else None, sent_by=by)
+    takeover.note_outgoing(to)
+    return result
+
+
 def _with_retries(description: str, call: Callable[[], _T]) -> _T:
     last_exc: Exception | None = None
     for attempt, backoff in enumerate((0, *_RETRY_BACKOFF_SECONDS), start=1):
@@ -42,6 +72,40 @@ def _with_retries(description: str, call: Callable[[], _T]) -> _T:
                 "%s failed (attempt %d/%d): %s", description, attempt, _RETRY_ATTEMPTS + 1, exc
             )
     raise WhatsAppClientError(f"{description} failed after retries.") from last_exc
+
+
+def _group_route(to: str) -> str | None:
+    """The WhatsApp group (via Whapi) a message to `to` belongs in, or None
+    for the normal Cloud API route. See `whapi.route_for`."""
+    from backend.app.integrations.whatsapp import whapi
+
+    return whapi.route_for(to)
+
+
+_DIRECT = object()
+_TEAM_DOWN = object()  # like _DIRECT, after the team group refused the post
+
+
+def _via_group(to: str, kind: str, text: str | None, filename: str | None, post: Callable[[str], _T]):
+    """Send through `to`'s WhatsApp group when he has one. Returns the result,
+    or `_DIRECT` when the caller should use the normal Meta route: he has no
+    group -- or `_TEAM_DOWN` when the TEAM group could not be reached (30 Oct
+    2026: the Whapi trial limit left Prateek sir's vendor approvals stuck in
+    a group nobody could post to). A vendor group failing is not sent to him
+    directly -- that would put the bot's report in the vendor's own chat."""
+    from backend.app.integrations.whatsapp import whapi
+
+    group = _group_route(to)
+    if not group:
+        return _DIRECT
+    try:
+        return _logged(to, kind, text, filename, lambda: post(group))
+    except whapi.WhapiError:
+        if group != whapi.team_group():
+            raise
+        whapi.mark_team_group_down()
+        logger.warning("Team group unreachable -- sending to %s directly instead.", to)
+        return _TEAM_DOWN
 
 
 class WhatsAppClient:
@@ -59,6 +123,10 @@ class WhatsAppClient:
     def get_media_url(self, media_id: str) -> dict[str, Any]:
         """Resolves a media id to its (short-lived) download URL, mime type,
         and file size. https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media"""
+        from backend.app.integrations.whatsapp import whapi
+
+        if media_id.startswith(whapi.PREFIX):  # a file posted in a WhatsApp group
+            return {"url": media_id, "mime_type": None, "file_size": None}
         access_token = self._require_access_token()
         url = f"{self._settings.graph_api_base_url}/{media_id}"
 
@@ -85,6 +153,10 @@ class WhatsAppClient:
     def download_media(self, media_url: str) -> bytes:
         """Downloads the actual file bytes from the URL returned by
         `get_media_url` -- Meta requires the same Bearer token here too."""
+        from backend.app.integrations.whatsapp import whapi
+
+        if media_url.startswith(whapi.PREFIX):
+            return _with_retries(f"whapi download({media_url})", lambda: whapi.download(media_url))
         access_token = self._require_access_token()
 
         def _call() -> bytes:
@@ -105,13 +177,26 @@ class WhatsAppClient:
 
         return _with_retries(f"download_media({media_url})", _call)
 
-    def send_text_message(self, to: str, body: str) -> None:
+    def send_text_message(self, to: str, body: str) -> str | None:
         """Send a plain-text WhatsApp message back to `to` (an inbound sender
         number). Used only for the routing command prompts/confirmations --
         never to deliver business documents to a vendor. Requires
         `WHATSAPP_PHONE_NUMBER_ID`. Wrapped in the same retry/backoff as the
         media calls since it also runs inside a background task.
         https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages"""
+        from backend.app.integrations.whatsapp import whapi
+
+        result = _via_group(to, "text", body, None, lambda group: whapi.send_text(group, body))
+        if result is _TEAM_DOWN:
+            # Again through the normal reply path: with the group now marked
+            # down it goes direct, as the approved template when he is
+            # outside WhatsApp's 24-hour window.
+            from backend.app.integrations.whatsapp.outbound import send_reply_safe
+
+            send_reply_safe(to, body)
+            return None
+        if result is not _DIRECT:
+            return result
         access_token = self._require_access_token()
         if not self._settings.phone_number_id:
             raise WhatsAppNotConfiguredError(
@@ -127,7 +212,7 @@ class WhatsAppClient:
             "text": {"preview_url": False, "body": body},
         }
 
-        def _call() -> None:
+        def _call() -> str | None:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(
                     url,
@@ -135,8 +220,69 @@ class WhatsAppClient:
                     json=payload,
                 )
                 response.raise_for_status()
+                return _message_id(response)
 
-        _with_retries(f"send_text_message({to})", _call)
+        # The WhatsApp message id (wamid) -- what a later delivery report
+        # names. Callers that do not need it simply ignore it.
+        return _logged(to, "text", body, None, lambda: _with_retries(f"send_text_message({to})", _call))
+
+    def send_button_message(
+        self,
+        to: str,
+        body: str,
+        buttons: list[tuple[str, str]],
+        *,
+        header: str | None = None,
+        footer: str | None = None,
+    ) -> str | None:
+        """An interactive message with up to 3 REPLY BUTTONS (id, title).
+        A tap comes back as an "interactive" message carrying the button id
+        (parser.py turns it into text). Only inside the 24-hour window, and
+        only on the Meta number -- a Whapi group has no such buttons, so a
+        number routed to a group raises and the caller sends plain text.
+        Body max 1024 characters, title 20, header 60, footer 60."""
+        if _group_route(to):
+            raise WhatsAppNotConfiguredError("buttons are not available in a WhatsApp group")
+        access_token = self._require_access_token()
+        if not self._settings.phone_number_id:
+            raise WhatsAppNotConfiguredError(
+                "WHATSAPP_PHONE_NUMBER_ID is not configured -- cannot send a message."
+            )
+        interactive: dict[str, Any] = {
+            "type": "button",
+            "body": {"text": body[:1024]},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": button_id[:256], "title": title[:20]}}
+                    for button_id, title in buttons[:3]
+                ]
+            },
+        }
+        if header:
+            interactive["header"] = {"type": "text", "text": header[:60]}
+        if footer:
+            interactive["footer"] = {"text": footer[:60]}
+        url = f"{self._settings.graph_api_base_url}/{self._settings.phone_number_id}/messages"
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+
+        def _call() -> str | None:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                return _message_id(response)
+
+        logged = "\n".join(filter(None, [header, body, footer, " | ".join(f"[{t}]" for _i, t in buttons)]))
+        return _logged(to, "text", logged, None, lambda: _with_retries(f"send_button_message({to})", _call))
 
     def send_template_message(
         self,
@@ -144,13 +290,20 @@ class WhatsAppClient:
         template_name: str,
         language_code: str = "en",
         body_parameters: list[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Send a PRE-APPROVED template message (Meta requirement for
         business-initiated messages outside the 24h customer-service window
         -- e.g. the fixed-time morning stock request and pending-vendor
         reminders). `body_parameters` fills the template's {{1}}, {{2}}, ...
         placeholders in order; omit for templates with fixed text.
         https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-message-templates"""
+        if _group_route(to):  # a group has no 24 h window: the template's text goes as plain text
+            from backend.app.integrations.whatsapp import chat_log, whapi
+
+            text = chat_log.template_text(template_name, body_parameters or [], self)
+            result = _via_group(to, "text", text, None, lambda group: whapi.send_text(group, text))
+            if result not in (_DIRECT, _TEAM_DOWN):
+                return result
         access_token = self._require_access_token()
         if not self._settings.phone_number_id:
             raise WhatsAppNotConfiguredError(
@@ -179,7 +332,7 @@ class WhatsAppClient:
             "template": template,
         }
 
-        def _call() -> None:
+        def _call() -> str | None:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(
                     url,
@@ -187,8 +340,15 @@ class WhatsAppClient:
                     json=payload,
                 )
                 response.raise_for_status()
+                return _message_id(response)
 
-        _with_retries(f"send_template_message({template_name} -> {to})", _call)
+        from backend.app.integrations.whatsapp import chat_log
+
+        text = chat_log.template_text(template_name, body_parameters or [], self)
+        return _logged(
+            to, "template", text, None,
+            lambda: _with_retries(f"send_template_message({template_name} -> {to})", _call),
+        )
 
     def upload_media(self, content: bytes, filename: str, mime_type: str) -> str:
         """Upload a document to WhatsApp's media store and return its media id
@@ -219,7 +379,7 @@ class WhatsAppClient:
 
     def send_document_message(
         self, to: str, media_id: str, filename: str, caption: str | None = None
-    ) -> None:
+    ) -> str | None:
         """Send a previously-uploaded document (by media id) to `to`, with a
         download filename and optional caption (step 2 of sending a
         document)."""
@@ -241,14 +401,15 @@ class WhatsAppClient:
             "document": document,
         }
 
-        def _call() -> None:
+        def _call() -> str | None:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(
                     url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
                 )
                 response.raise_for_status()
+                return _message_id(response)
 
-        _with_retries(f"send_document_message({filename})", _call)
+        return _logged(to, "document", caption, filename, lambda: _with_retries(f"send_document_message({filename})", _call))
 
     def get_phone_number_info(self) -> dict[str, Any]:
         """Used only by the interactive "Test Connection" action on the

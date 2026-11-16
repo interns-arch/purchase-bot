@@ -88,14 +88,17 @@ def send_topup_report(result) -> bool:
         caption_lines += [labels.get(order_id, f"Order {order_id}") for order_id in result.order_ids]
         caption = "\n".join(caption_lines)
 
+        from backend.app.integrations.whatsapp import whapi
+
         sent = False
-        for to in recipients:
-            sent = (
-                outbound.send_document_safe(
-                    to, buffer.getvalue(), file_name, XLSX_MIME_TYPE, caption
+        with whapi.direct_only():  # an internal document: never into the WhatsApp group
+            for to in recipients:
+                sent = (
+                    outbound.send_document_safe(
+                        to, buffer.getvalue(), file_name, XLSX_MIME_TYPE, caption
+                    )
+                    or sent
                 )
-                or sent
-            )
         if sent:
             logger.info("Reallocation workbook %s sent (%s order(s)).", file_name, len(labels))
         return sent

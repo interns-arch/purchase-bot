@@ -222,16 +222,19 @@ def _run_batch(order_ids: list[int]) -> None:
     )
     if order_labels:
         caption += "\n" + "\n".join(order_labels)
+    from backend.app.integrations.whatsapp import whapi
+
     sent = False
-    for to in recipients:
-        delivered = outbound.send_document_safe(
-            to,
-            buffer.getvalue(),
-            file_name,
-            XLSX_MIME_TYPE,
-            caption=caption,
-        )
-        sent = sent or delivered
+    with whapi.direct_only():  # an internal document: never into the WhatsApp group
+        for to in recipients:
+            delivered = outbound.send_document_safe(
+                to,
+                buffer.getvalue(),
+                file_name,
+                XLSX_MIME_TYPE,
+                caption=caption,
+            )
+            sent = sent or delivered
     if sent:
         # Web-only: the allocation workbook itself just arrived in the chat
         # (with the customer names in its caption) -- a second "it was sent"

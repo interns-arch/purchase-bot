@@ -39,9 +39,12 @@ from backend.app.integrations.whatsapp import (
     daily_stock,
     failed_file,
     pending_customer_files,
+    pdf_choice,
     pending_vendor_files,
+    photo_stock,
     registry,
     vendor_memory,
+    vendor_text_stock,
 )
 from backend.app.integrations.whatsapp.client import WhatsAppClient
 from backend.app.integrations.whatsapp.commands import WhatsAppCommand
@@ -74,6 +77,12 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     and the log says nothing useful. Every branch below already guards
     itself; this exists so that a bug nobody anticipated still leaves a
     traceback and, for an ordinary sender, some acknowledgement."""
+    # A CHAT A PERSON HAS TAKEN OVER (integrations/whatsapp/takeover): the text
+    # is kept for the admin and the bot does not answer it.
+    from backend.app.integrations.whatsapp import takeover
+
+    if takeover.hold_incoming(message.sender, message.text, message.message_id):
+        return
     try:
         _handle_incoming_whatsapp_text(message)
     except Exception:  # noqa: BLE001 -- silence is the worst possible outcome
@@ -98,19 +107,222 @@ def handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
             logger.exception("Could not send the fallback reply to %s.", message.sender)
 
 
-def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
-    from backend.app.advance_orders.config import advance_order_settings
+def _purchase_approval_reply(message: IncomingWhatsAppText) -> bool:
+    from backend.app.advance_orders import approval
 
-    if not advance_order_settings.enabled or not (message.text or "").strip():
+    if not approval.enabled() or not (message.text or "").strip():
         return False
     try:
+        with get_session() as session:
+            return approval.handle_reply(message.sender, message.text, session)
+    except Exception:  # noqa: BLE001 -- never let this block the normal text handling
+        logger.exception("Purchase approval reply check failed for %s -- continuing.", message.sender)
+        return False
+
+
+def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
+    from backend.app.advance_orders.config import engine_enabled
+
+    if not engine_enabled() or not (message.text or "").strip():
+        return False
+    try:
+        from backend.app.advance_orders import escalation
         from backend.app.advance_orders import service as advance_orders
 
         with get_session() as session:
+            # Prateek sir answering an escalated part comes first.
+            if escalation.handle_reply(message.sender, message.text, session):
+                return True
             return advance_orders.handle_vendor_text(message.sender, message.text, session)
     except Exception:  # noqa: BLE001 -- never let this block the normal text handling
         logger.exception("Advance-order reply check failed for %s -- continuing.", message.sender)
         return False
+
+
+LEDGER_COMMAND_KEY = "ledger"
+
+
+def _vendor_onboarding_text(message: IncomingWhatsAppText) -> bool:
+    """True when the vendor-onboarding module handled this text. Never raises."""
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    if not vendor_onboarding_settings.enabled or not (message.text or "").strip():
+        return False
+    try:
+        from backend.app.vendor_onboarding import approvals, conversation, learning, ledger
+
+        # Admin: "lessons" / "lesson off 3" -- what the assistant taught itself.
+        lesson_reply = learning.handle_lesson_command(message.sender, message.text)
+        if lesson_reply:
+            send_reply_safe(message.sender, lesson_reply)
+            return True
+
+        with get_session() as session:
+            replies = approvals.handle_reply(message.sender, message.text, session)
+            if replies is None:
+                replies = ledger.provide_vendor_name(message.sender, message.text, session)
+            if replies is None:
+                replies = conversation.answer(message.sender, message.text, session)
+            if replies is None and conversation.is_start_command(message.text):
+                replies = conversation.start(message.sender, session, message.text)
+            if replies is None and ledger.is_ledger_word(message.text):
+                command_store.set_command(message.sender, LEDGER_COMMAND_KEY, session)
+                replies = [
+                    "Send the ledger now — a PDF, Excel, or a clear photo of each page."
+                ]
+    except Exception:  # noqa: BLE001 -- never block the normal text handling
+        logger.exception("Vendor onboarding text handling failed for %s.", message.sender)
+        return False
+    finally:
+        from backend.app.vendor_onboarding import ai_chat
+
+        ai_chat.flush_memory()  # after the turn's transaction has committed
+    if replies is None:
+        return False
+    for reply in replies:
+        send_reply_safe(message.sender, reply)
+    return True
+
+
+_ROUTE_COMMANDS = {
+    "vendor_stock": "vendor",
+    "customer_order": "customer",
+    "invoice": "invoice",
+    "ledger": LEDGER_COMMAND_KEY,
+}
+
+
+def _ai_route_text(message: IncomingWhatsAppText) -> bool:
+    """A free-text message from someone who has not sent a command: work out
+    what they want and answer like a person. True when a reply was sent;
+    False (-> the fixed menu) when the AI is unavailable. Never raises."""
+    from backend.app.vendor_onboarding import ai_chat
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    try:
+        if not ai_chat.available():
+            return False
+        routed = ai_chat.route(
+            message.text,
+            chat_history=ai_chat.history(message.sender),
+            onboarding_enabled=vendor_onboarding_settings.enabled,
+            person=ai_chat.who_is(message.sender),
+        )
+        if routed is None:
+            return False
+        action, reply = routed["action"], routed["reply"]
+        logger.info("WhatsApp text from %s routed by AI: %r -> %s", message.sender, (message.text or "")[:80], action)
+        replies: list[str] = []
+        with get_session() as session:
+            if action == "register_vendor" and vendor_onboarding_settings.enabled:
+                from backend.app.vendor_onboarding import conversation
+
+                ai_chat.remember(message.sender, "in", message.text)
+                replies = conversation.start(message.sender, session, message.text)
+            else:
+                if action in _ROUTE_COMMANDS:
+                    command_store.set_command(message.sender, _ROUTE_COMMANDS[action], session)
+                if not reply:
+                    return False
+                ai_chat.remember(message.sender, "in", message.text)
+                ai_chat.remember(message.sender, "out", reply)
+                replies = [reply]
+        from backend.app.vendor_onboarding import learning
+
+        learning.log_turn(message.sender, "route", message.text, intent=action, reply=reply or None)
+        ai_chat.flush_memory()  # after the turn's transaction has committed
+        for text in replies:
+            send_reply_safe(message.sender, text)
+        return bool(replies)
+    except Exception:  # noqa: BLE001 -- fall back to the fixed menu
+        logger.exception("AI routing failed for %s.", message.sender)
+        return False
+
+
+def _vendor_ledger_file(message: IncomingWhatsAppMessage) -> bool:
+    """True when this file is a vendor LEDGER (caption "ledger", or sent after
+    the "ledger" text) and was handled. Checked before every other file route
+    so a registered vendor's ledger is never imported as stock."""
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+
+    if not vendor_onboarding_settings.enabled:
+        return False
+    from backend.app.vendor_onboarding import ledger
+
+    try:
+        is_ledger = ledger.is_ledger_word(message.caption)
+        if not is_ledger:
+            with get_session() as session:
+                is_ledger = (
+                    command_store.get_fresh_command(
+                        message.sender, whatsapp_settings.grouping_window_minutes, session
+                    )
+                    == LEDGER_COMMAND_KEY
+                )
+        if not is_ledger:
+            return False
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        with get_session() as session:
+            # "ledger" applies to the NEXT file only, so a stock sheet sent a
+            # few minutes later is not mistaken for another ledger.
+            if command_store.get_command(message.sender, session) == LEDGER_COMMAND_KEY:
+                command_store.clear_command(message.sender, session)
+            replies = ledger.receive(message.sender, file_path, message.filename, session)
+    except Exception:  # noqa: BLE001 -- the sender must hear something
+        logger.exception("Vendor ledger handling failed for %s (%s).", message.sender, message.filename)
+        replies = ["Sorry — I couldn't process that ledger. Please send it again with the caption LEDGER."]
+    for reply in replies:
+        send_reply_safe(message.sender, reply)
+    return True
+
+
+def _mrp_list_file(message: IncomingWhatsAppMessage) -> bool:
+    """True when this file is a vendor's monthly MRP list and was handled.
+    Checked before the stock routes: importing one as stock would replace their
+    stock with a price list. Any doubt falls through to stock, as before."""
+    from backend.app.integrations.whatsapp import mrp_list
+
+    if not mrp_list.enabled():
+        return False
+    named = mrp_list.is_named(message.caption, message.filename)
+    with get_session() as session:
+        party = registry.lookup(message.sender, session)
+        if party is None or party.party_type != "vendor":
+            return False
+        if not named and not mrp_list.worth_opening(party.party_id, session):
+            return False
+
+    if getattr(message, "is_photo", False) or Path(message.filename or "").suffix.lower() not in mrp_list.SPREADSHEETS:
+        if named:
+            send_reply_safe(message.sender, mrp_list.SEND_AS_EXCEL)
+        return named
+
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        parsed = mrp_list.read_list(file_path)
+    except Exception:  # noqa: BLE001 -- the stock route reports its own failure
+        logger.exception("MRP list: could not read %s from %s.", message.filename, message.sender)
+        if named:
+            send_reply_safe(message.sender, mrp_list.NOT_READABLE)
+        return named
+
+    if not mrp_list.is_list(parsed, named=named):
+        if named:
+            send_reply_safe(message.sender, mrp_list.NOT_READABLE)
+            return True
+        file_path.unlink(missing_ok=True)  # the stock route downloads its own copy
+        return False
+
+    with get_session() as session:
+        mrp_list.save(party.party_id, parsed, message.filename, session)
+    logger.info("MRP list from %s: %d parts saved from %s.", party.name, len(parsed.items), message.filename)
+    send_reply_safe(message.sender, mrp_list.reply_for(parsed))
+    # New prices reach the Portal the same way as new stock: same quantities,
+    # same DEALER_PORTAL_ENABLED / _SHADOW switches. Never raises.
+    dealer_portal.request_push(party.party_id, party.name)
+    return True
 
 
 def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
@@ -121,10 +333,33 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
        every held file for that vendor (identity from the NAME, never the
        filename).
     3. Otherwise -> reply with the instruction (requirement 6)."""
+    # A vendor confirming the stock read off his PHOTO ("haan" / "nahi").
+    # Only while a photo is actually waiting for him, and only for a plain
+    # yes/no -- anything else he types goes on as usual.
+    if _photo_stock_reply(message):
+        return
+
+    # A purchase user writing to the bot opens their 24 h window: any Portal
+    # PO PDF waiting for them goes now. Claims nothing; handling continues.
+    from backend.app.portal_procurement.notify import deliver_pending
+
+    deliver_pending(message.sender)
+
+    # Ujjwal sir's APPROVE / REJECT of a purchase order
+    # (PURCHASE_APPROVAL_MODE=true). Only his numbers; else nothing is claimed.
+    if _purchase_approval_reply(message):
+        return
+
     # A vendor answering an advance-order question ("haan 5 din", "nahi")
     # from the sales bot. Only numbers with an OPEN question are claimed, and
     # only while ADVANCE_ORDERS_ENABLED=true; everything else continues below.
     if _advance_order_reply(message):
+        return
+
+    # Vendor onboarding / ledgers (VENDOR_ONBOARDING_ENABLED): approval and
+    # ledger PASS/FAIL replies, a vendor filling the registration form, and
+    # the "new vendor" / "ledger" commands. Off -> nothing is claimed.
+    if _vendor_onboarding_text(message):
         return
 
     # Founder command "send reminder" (daily participation follow-up): only
@@ -260,6 +495,41 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
                 )
                 _process_text_order(message.sender, order, customer_id=registered.party_id)
                 return
+        # The vendor answering "stock list hai ya bill?" about a PDF he sent.
+        # Only while a PDF is actually held for him -- otherwise "stock" is an
+        # ordinary message, handled below exactly as before.
+        if registered.party_type == "vendor":
+            choice = pdf_choice.answer(message.text)
+            if choice is not None:
+                with get_session() as session:
+                    held = pdf_choice.take(message.sender, session) if pdf_choice.has_pending(message.sender, session) else []
+                if held:
+                    document_type = (
+                        IncomingDocumentType.VENDOR_INVOICE if choice == "invoice" else IncomingDocumentType.VENDOR_INVENTORY
+                    )
+                    for row in held:
+                        logger.info(
+                            "Vendor %s says held PDF '%s' is a %s.", registered.name, row.original_filename, choice
+                        )
+                        _process_registered_file(
+                            message.sender, registered, Path(row.staged_path), row, document_type
+                        )
+                    return
+
+        # A registered VENDOR may type his stock instead of sending a file.
+        # Only a message that actually reads as part + quantity lines is
+        # taken; "good morning sir" and "kal aayega" stay ignored.
+        if registered.party_type == "vendor" and vendor_text_stock.ENABLED:
+            stock = vendor_text_stock.parse_stock_text(message.text)
+            if stock.is_stock_list:
+                logger.info(
+                    "WhatsApp text from registered vendor %s (%s) read as STOCK: %d part(s).",
+                    message.sender,
+                    registered.name,
+                    len(stock.lines),
+                )
+                _process_text_stock(message.sender, stock, vendor_id=registered.party_id)
+                return
         logger.info(
             "WhatsApp text from registered %s number %s (%s) ignored: %r",
             registered.party_type,
@@ -326,7 +596,27 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
                 vendor_name,
                 len(held),
             )
-            _process_pending_vendor_files(message.sender, vendor_name, held)
+            confirmed = _confirm_vendor_name(
+                message.sender, vendor_name, f"{len(held)} held file(s)"
+            )
+            if confirmed is not None:
+                _process_pending_vendor_files(message.sender, confirmed, held)
+            return
+        # STAFF (admins, purchase team) asking in plain words -- answered by
+        # the AI assistant from the database. Last of all, so every command
+        # above still wins; with no AI, staff get the instructions as before.
+        from backend.app.ai import staff_assistant
+
+        if staff_assistant.is_staff(message.sender) and staff_assistant.handle(message.sender, message.text):
+            return
+        if (message.message_id or "").startswith("whapi:"):
+            # A WhatsApp GROUP: people talk to each other there -- a message
+            # nobody's tool answers gets no reply, never the menu.
+            logger.info("Group text from %s not for the assistant (%r) -- left alone.", message.sender, message.text[:80])
+            return
+        # Anyone else: understand what they want in plain words (Gemini)
+        # instead of answering every message with the fixed menu.
+        if _ai_route_text(message):
             return
         logger.info(
             "WhatsApp text from %s is not a routing command (%r) -- replying with instructions.",
@@ -367,6 +657,120 @@ def _apply_customer_contacts_safe(sender: str, rows) -> None:
             sender,
             "Sorry — that customer list could not be applied. Please check the "
             "numbers and try again.",
+        )
+
+
+def _photo_stock_reply(message: IncomingWhatsAppText) -> bool:
+    """True when this text answered a pending photo-stock question. Never raises."""
+    try:
+        choice = photo_stock.answer(message.text)
+        if choice is None:
+            return False
+        with get_session() as session:
+            if not photo_stock.has_pending(message.sender, session):
+                return False
+            held = photo_stock.take(message.sender, session)
+        if held is None:
+            return False  # expired: the text is handled as an ordinary message
+        vendor_id, parsed = held
+        if choice == "no":
+            send_reply_safe(message.sender, photo_stock.CANCELLED)
+            return True
+        _process_text_stock(message.sender, parsed, vendor_id=vendor_id)
+        return True
+    except Exception:  # noqa: BLE001 -- never block the other handlers
+        logger.exception("Photo-stock confirmation from %s failed.", message.sender)
+        return False
+
+
+def _handle_vendor_photo(message: IncomingWhatsAppMessage, party) -> None:
+    """A registered vendor's photo of his stock list. Never raises."""
+    try:
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        image = Path(file_path).read_bytes()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not download photo %s from %s.", message.media_id, message.sender)
+        send_reply_safe(message.sender, "❌ Photo receive nahi hui. Please dobara bhejiye.")
+        return
+    _read_photos_and_ask(message.sender, party, [image], message.filename)
+
+
+def _read_photos_and_ask(sender: str, party, images: list[bytes], source_filename: str | None) -> None:
+    """Read one or more images (a photo, or a scanned PDF's pages), then show
+    the vendor every line and ask him to confirm. Never raises."""
+    from backend.app.ai import vision
+
+    try:
+        send_reply_safe(sender, photo_stock.RECEIVED)
+        texts, used_model, why = [], None, ""
+        for image in images:
+            text, info = vision.read_stock_image(image)
+            if text:
+                texts.append(text)
+                used_model = info
+            else:
+                why = info
+        parsed = photo_stock.read_lines("\n".join(texts)) if texts else None
+        if parsed is None or not parsed.is_stock_list:
+            send_reply_safe(sender, photo_stock.CANNOT_READ.format(why=why or "koi part number aur quantity nahi mili"))
+            notifications_text = (
+                f"Photo stock from {party.name} ({sender}) could not be read: {why or 'no part/qty lines found'}."
+            )
+            logger.warning(notifications_text)
+            return
+        with get_session() as session:
+            photo_stock.hold(sender, party.party_id, parsed, session, source_filename=source_filename, model=used_model)
+        for body in photo_stock.confirmation_messages(parsed):
+            send_reply_safe(sender, body)
+        logger.info(
+            "Photo stock from %s read by %s: %d line(s), %d unreadable -- waiting for haan.",
+            party.name,
+            used_model,
+            len(parsed.lines),
+            len(parsed.unreadable),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not read the photo stock from %s.", sender)
+        send_reply_safe(sender, photo_stock.CANNOT_READ.format(why="technical problem"))
+
+
+def _process_text_stock(sender: str, stock, *, vendor_id: int) -> None:
+    """Apply a vendor's TYPED stock list to his stock and run it through the
+    same pipeline a stock file takes. Never raises.
+
+    The typed lines are applied inside his current stock (merge mode, the
+    default) -- see `vendor_text_stock`. The CSV produced is staged and
+    processed exactly like an uploaded file, so the Google Sheet, Dealer
+    Portal push, top-up and admin notifications all happen as usual."""
+    try:
+        with get_session() as session:
+            outcome = vendor_text_stock.build_stock_csv(vendor_id, stock, session)
+        stamp = now_ist().strftime("%Y%m%d_%H%M%S_%f")
+        file_name = f"whatsapp_text_stock_{stamp}_{(sender or 'x')[-4:]}.csv"
+        file_path = staging.save_incoming_bytes(outcome.csv_bytes, file_name, DocumentSource.WHATSAPP)
+        metadata = DocumentMetadata(
+            sender=sender,
+            caption=None,
+            original_filename=file_name,
+            document_type_hint=IncomingDocumentType.VENDOR_INVENTORY,
+            vendor_id_hint=vendor_id,
+        )
+        result = _process_staged_file(file_path, metadata, file_name, notify_sender=False)
+        if _is_successful_inventory_import(result):
+            send_reply_safe(sender, vendor_text_stock.reply_text(outcome, stock))
+        else:
+            reason = getattr(result, "message", None) or "the list could not be read"
+            send_reply_safe(
+                sender,
+                f"❌ Stock not updated: {str(reason)[:200]}\n"
+                "Please send one part per line: part number and quantity, e.g. 16510M68K10 5",
+            )
+    except Exception:  # noqa: BLE001 -- a typed list must never kill the worker
+        logger.exception("Could not process the typed stock list from %s.", sender)
+        send_reply_safe(
+            sender,
+            "Sorry — your stock list could not be processed. Please re-send it, or send it as an Excel file.",
         )
 
 
@@ -459,6 +863,67 @@ def _process_pending_customer_files(sender: str, customer_name: str, held) -> No
                 pending_customer_files.remove(row.id, session)
 
 
+_NEW_VENDOR_PREFIX = "new "
+
+
+def _confirm_vendor_name(sender: str, vendor_name: str, filename_hint: str) -> str | None:
+    """The vendor name to import under, or None when the sender must confirm
+    it first (the caller keeps the file held).
+
+    A name that resolves to an existing vendor (exact, case/filler-tolerant,
+    remembered alias or one-letter typo -- `vendor_service.get_vendor_by_name`)
+    is used as-is. A name that matches NOTHING is never onboarded silently: a
+    typo like 'bJ STOCK' would otherwise create a brand-new vendor and import
+    the whole sheet under it (wrong own-stock status, wrong Dealer Stock
+    sheet). The sender is shown the closest existing vendors and must either
+    reply with one of them or reply 'NEW <name>' to create a new vendor."""
+    from core.services import vendor_service
+
+    if vendor_name.lower().startswith(_NEW_VENDOR_PREFIX):
+        confirmed = vendor_name[len(_NEW_VENDOR_PREFIX):].strip()
+        if confirmed and not vendor_service.is_generic_vendor_name(confirmed):
+            return confirmed
+        return None
+
+    if vendor_service.is_generic_vendor_name(vendor_name):
+        # "STOCK" says what the file is, not who sent it. Ask -- suggesting a
+        # vendor from the filename ("honda_06-10-2026.xlsx" -> honda stock).
+        with get_session() as session:
+            stem = Path(filename_hint.strip("'")).stem
+            suggestions = [] if vendor_service.is_generic_vendor_name(stem) else vendor_service.suggest_vendor_names(stem, session)
+        lines = [f"Which vendor is {filename_hint} from? '{vendor_name}' doesn't tell me the vendor."]
+        if suggestions:
+            lines.append("Is it one of these? Reply with the exact name:")
+            lines.extend(f"• {suggestion}" for suggestion in suggestions)
+        else:
+            lines.append("Reply with the vendor name.")
+        send_reply_safe(sender, "\n".join(lines))
+        return None
+
+    with get_session() as session:
+        if vendor_service.get_vendor_by_name(vendor_name, session) is not None:
+            return vendor_name
+        suggestions = vendor_service.suggest_vendor_names(vendor_name, session)
+
+    logger.info(
+        "WhatsApp vendor name %r from %s matches no existing vendor -- holding %s "
+        "and asking the sender to confirm (suggestions: %s).",
+        vendor_name,
+        sender,
+        filename_hint,
+        suggestions,
+    )
+    lines = [f"No vendor named '{vendor_name}' exists, so {filename_hint} was NOT imported yet."]
+    if suggestions:
+        lines.append("Did you mean one of these? Reply with the exact name:")
+        lines.extend(f"• {suggestion}" for suggestion in suggestions)
+    else:
+        lines.append("Reply with the correct vendor name.")
+    lines.append(f"If this really is a new vendor, reply: NEW {vendor_name}")
+    send_reply_safe(sender, "\n".join(lines))
+    return None
+
+
 def _process_pending_vendor_files(sender: str, vendor_name: str, held) -> None:
     """Import every held Vendor Inventory file for `sender` under the vendor
     name they just supplied, oldest first. Each file is removed from the
@@ -514,6 +979,26 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
         message.message_id,
     )
 
+    if _vendor_ledger_file(message):
+        return
+
+    if _mrp_list_file(message):
+        return
+
+    # A PHOTO. Only a registered vendor's is read (as a stock list, confirmed
+    # with him before import). Everyone else's photos are ignored, exactly as
+    # they were before photos were parsed at all.
+    if getattr(message, "is_photo", False):
+        party = None
+        if whatsapp_settings.registry_enabled:
+            with get_session() as session:
+                party = registry.lookup(message.sender, session)
+        if party is not None and party.party_type == "vendor":
+            _handle_vendor_photo(message, party)
+        else:
+            logger.info("WhatsApp photo from %s ignored (not a registered vendor).", message.sender)
+        return
+
     # Founder contact-list upload: an admin file captioned "register"/
     # "contacts" (or following a "register" text) UPDATES THE NUMBER REGISTRY
     # instead of importing as stock. "register team" works the same way for
@@ -568,6 +1053,37 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
     with get_session() as session:
         command_key = command_store.get_fresh_command(message.sender, window, session)
     command = commands.get_command(command_key)
+    if command is None and _is_direct_uploader(message.sender):
+        # Alam sir (STOCK_DIRECT_UPLOADERS) only ever sends stock: a file from
+        # him is imported straight away, with or without a caption or a
+        # "vendor" first (31 Oct 2026). The vendor comes from the caption,
+        # else the file name, else the file's own parts; only if all three
+        # fail is he asked which vendor it is (the usual bare-file question).
+        found = _direct_vendor_name(message)
+        if found:
+            message.caption = found
+        command = commands.get_command("vendor")
+        with get_session() as session:
+            command_store.set_command(message.sender, "vendor", session)
+        logger.info(
+            "WhatsApp file %r from direct uploader %s -> Vendor Inventory, vendor %s.",
+            message.filename,
+            message.sender,
+            found or "unknown (will ask)",
+        )
+    if command is None and _caption_names_known_vendor(message):
+        # A team member's file captioned with an EXISTING vendor's name
+        # ("BIJWASHAN STOCK") is that vendor's stock -- no "vendor" first
+        # (31 Oct 2026: Alam sir's warehouse files were refused on 29-31 Oct
+        # because he sent the file before typing "vendor").
+        command = commands.get_command("vendor")
+        with get_session() as session:
+            command_store.set_command(message.sender, "vendor", session)
+        logger.info(
+            "WhatsApp file from %s captioned %r (a known vendor) -- routed as Vendor Inventory without a command.",
+            message.sender,
+            message.caption,
+        )
     if command is None:
         logger.info(
             "WhatsApp file from %s has no pending routing command -- not importing; "
@@ -608,6 +1124,149 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
             with get_session() as session:
                 command_store.clear_command(message.sender, session)
             logger.info("Cleared pending WhatsApp command for %s after processing.", message.sender)
+
+
+def _is_direct_uploader(sender: str) -> bool:
+    """STOCK_DIRECT_UPLOADERS: numbers whose every file is stock (Alam sir)."""
+    import os
+
+    wanted = {
+        registry.normalize_number(part.split(":")[-1])
+        for part in (os.environ.get("STOCK_DIRECT_UPLOADERS") or "").split(",")
+        if part.strip()
+    }
+    return bool(wanted) and registry.normalize_number(sender) in wanted
+
+
+def _direct_vendor_name(message: IncomingWhatsAppMessage) -> str | None:
+    """Which vendor a direct uploader's file belongs to: the caption, else the
+    file name ("honda 31-10-2026.xlsx"), else its parts compared with every
+    vendor's recent stock (Bijwasan and Jaipur send the SAME "ClosingStock"
+    export -- only the contents tell them apart). None = ask him. Never
+    raises, never creates a vendor."""
+    import re
+
+    from core.services import vendor_service
+
+    try:
+        with get_session() as session:
+            caption = (message.caption or "").strip()
+            if caption and len(caption) <= 80:
+                vendor = vendor_service.get_vendor_by_name(caption, session)
+                if vendor is not None:
+                    return vendor.name
+            stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", message.filename or "")
+            stem = re.sub(r"\(\d+\)|\d{1,4}[-./]\d{1,2}[-./]\d{1,4}|T?\d{2,}[:.]?\d*", " ", stem)
+            stem = re.sub(r"[_\-]+", " ", stem).strip()
+            if len(stem) >= 3:
+                vendor = vendor_service.get_vendor_by_name(stem, session)
+                if vendor is not None:
+                    logger.info("Direct upload %r: vendor %s from the file name.", message.filename, vendor.name)
+                    return vendor.name
+        return _vendor_from_contents(message)
+    except Exception:  # noqa: BLE001 -- a guess must never stop the import
+        logger.exception("Could not work out the vendor of %r.", message.filename)
+        return None
+
+
+def _vendor_from_contents(message: IncomingWhatsAppMessage) -> str | None:
+    """The vendor whose recent stock list is most like this file (shared parts
+    / all parts of both lists) -- only when the match is clear (>= 50 %, and
+    15 points ahead of the next vendor)."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from core.ingestion.column_detector import find_inventory_columns, normalise_part_number
+    from core.models import InventoryImport, Vendor, VendorInventory
+    from core.services.inventory_import_service import _read_file
+    from core.time_utils import now_ist_naive
+
+    client = WhatsAppClient(whatsapp_settings)
+    path = download_document_media(message.media_id, message.filename, client)
+    try:
+        parsed = _read_file(path)
+        part_col, _qty_col = find_inventory_columns(parsed.headers, path.name, parsed.rows)
+        parts = {normalise_part_number(r.get(part_col, "")) for r in parsed.rows}
+        parts.discard("")
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if len(parts) < 5:
+        return None
+    since = now_ist_naive() - timedelta(days=14)
+    scores = []
+    with get_session() as session:
+        recent = session.execute(
+            select(InventoryImport.id, InventoryImport.vendor_id, InventoryImport.created_at).where(
+                InventoryImport.is_active.is_(True), InventoryImport.created_at >= since
+            )
+        ).all()
+        lists: dict[int, set] = {}
+        updated: dict[int, object] = {}
+        for import_id, vendor_id, created_at in recent:
+            theirs = set(
+                session.execute(
+                    select(VendorInventory.normalized_part_number).where(VendorInventory.import_id == import_id)
+                ).scalars()
+            )
+            if theirs:
+                lists[vendor_id] = theirs
+                updated[vendor_id] = created_at
+                # Shared parts over ALL parts of both lists: Jaipur's ~680 parts
+                # are nearly all inside Bijwasan's ~8,500, so 'share of the file'
+                # alone cannot tell them apart; this can (31 Oct 2026).
+                scores.append((len(parts & theirs) / len(parts | theirs), vendor_id))
+        scores.sort(reverse=True)
+        if not scores:
+            return None
+        best, vendor_id = scores[0]
+        # The close runners-up may be DUPLICATE records of the same stock
+        # ("jaipur stokc", made from a typo on 18 Oct, still holds Jaipur's
+        # list). Copies of the leader's own list are not rivals: the most
+        # recently updated of them is the live one and wins.
+        def _same(a: set, b: set) -> bool:
+            return len(a & b) / len(a | b) >= 0.9
+        copies = [vid for score, vid in scores if best - score < 0.15 and _same(lists[vid], lists[vendor_id])]
+        if len(copies) > 1:
+            vendor_id = max(copies, key=lambda vid: updated[vid])
+            best = next(score for score, vid in scores if vid == vendor_id)
+        rivals = [score for score, vid in scores if vid not in copies]
+        runner_up = rivals[0] if rivals else 0.0
+        vendor = session.get(Vendor, vendor_id)
+        logger.info(
+            "Direct upload %r: best content match %s (%.0f%%, next %.0f%%).",
+            message.filename, vendor.name if vendor else vendor_id, best * 100, runner_up * 100,
+        )
+        if vendor is not None and best >= 0.5 and best - runner_up >= 0.15:
+            return vendor.name
+    return None
+
+
+def _caption_names_known_vendor(message: IncomingWhatsAppMessage) -> bool:
+    """True for a file from an admin / purchase-team member whose caption is
+    the name of a vendor we already have. Never creates a vendor, never
+    applies to anyone else (a vendor's own number is handled by the registry
+    above). Best-effort: any doubt -> False, and the usual instruction goes."""
+    caption = (message.caption or "").strip()
+    if not caption or len(caption) > 80:
+        return False
+    try:
+        from backend.app.vendor_onboarding.config import vendor_onboarding_settings
+        from core.services import vendor_service
+
+        staff = daily_stock.is_admin_sender(message.sender) or vendor_onboarding_settings.is_purchase_team(
+            registry.normalize_number(message.sender)
+        )
+        if not staff:
+            return False
+        with get_session() as session:
+            return vendor_service.get_vendor_by_name(caption, session) is not None
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not check the caption %r against vendors.", caption)
+        return False
 
 
 _SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".csv"}
@@ -768,6 +1427,10 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
     the notification mirror as with every import."""
     suffix = Path(message.filename or "").suffix.lower()
     if party.party_type == "vendor":
+        # A vendor PDF used to be an invoice by definition. Vendors also send
+        # stock lists as PDF, so the type is decided after download, from
+        # what the PDF says (`pdf_choice.classify_vendor_pdf`). Until then
+        # it is provisionally an invoice, the old behaviour.
         document_type = (
             IncomingDocumentType.VENDOR_INVOICE
             if suffix == ".pdf"
@@ -823,11 +1486,53 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
         )
         return
 
+    if party.party_type == "vendor" and suffix == ".pdf":
+        kind, why = pdf_choice.classify_vendor_pdf(file_path)
+        logger.info("Vendor PDF '%s' from %s read as %s (%s).", message.filename, party.name, kind, why)
+        if kind == "unclear":
+            with get_session() as session:
+                pdf_choice.hold(
+                    message.sender,
+                    party.party_id,
+                    file_path,
+                    message.filename or file_path.name,
+                    session,
+                    media_id=message.media_id,
+                    message_id=message.message_id,
+                )
+            send_reply_safe(message.sender, pdf_choice.QUESTION)
+            return
+        if kind == "scanned":
+            # No text in it: a scanned page. Read like a photo, page by page,
+            # and confirmed with the vendor before anything is imported.
+            try:
+                from backend.app.ai import vision
+
+                images = vision.pdf_pages_as_images(Path(file_path).read_bytes())
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not render scanned PDF %s.", file_path)
+                images = []
+            if images:
+                _read_photos_and_ask(message.sender, party, images, message.filename)
+                return
+        document_type = (
+            IncomingDocumentType.VENDOR_INVOICE if kind == "invoice" else IncomingDocumentType.VENDOR_INVENTORY
+        )
+
+    _process_registered_file(message.sender, party, file_path, message, document_type)
+
+
+def _process_registered_file(sender: str, party, file_path, message, document_type: IncomingDocumentType) -> None:
+    """Import a registered party's already-downloaded file and reply once."""
     metadata = DocumentMetadata(
-        sender=message.sender,
-        caption=message.caption,  # audit only -- identity comes from the registry
-        external_message_id=message.message_id,
-        original_filename=message.filename,
+        sender=sender,
+        caption=getattr(message, "caption", None),  # audit only -- identity comes from the registry
+        external_message_id=getattr(message, "message_id", None),
+        original_filename=(
+            getattr(message, "filename", None)
+            or getattr(message, "original_filename", None)  # a held PDF
+            or Path(file_path).name
+        ),
         document_type_hint=document_type,
         vendor_id_hint=party.party_id if party.party_type == "vendor" else None,
         customer_id_hint=party.party_id if party.party_type == "customer" else None,
@@ -835,19 +1540,23 @@ def _handle_registered_upload(message: IncomingWhatsAppMessage, party) -> None:
     try:
         # This path sends its own reply below -- never two for one file.
         result = _process_staged_file(
-            file_path, metadata, message.filename, message.media_id, notify_sender=False
+            file_path,
+            metadata,
+            metadata.original_filename,
+            getattr(message, "media_id", None),
+            notify_sender=False,
         )
     except Exception:
         # process_document reports normal failures via the result status; an
         # exception here is infrastructure-level. The admin already got the
         # error toast/mirror -- the sender still deserves a reply.
         send_reply_safe(
-            message.sender,
+            sender,
             "❌ Something went wrong while processing this file. Our team has "
             "been notified -- please try again later.",
         )
         raise
-    send_reply_safe(message.sender, _registered_result_reply(party, result, document_type))
+    send_reply_safe(sender, _registered_result_reply(party, result, document_type))
 
 
 def _registered_result_reply(party, result, document_type: IncomingDocumentType) -> str:
@@ -906,6 +1615,71 @@ def _registered_result_reply(party, result, document_type: IncomingDocumentType)
     )
 
 
+def _is_vendors_own_number(sender: str) -> bool:
+    """True when the sender is a registered VENDOR number. Staff, admins and
+    unknown numbers are not -- their bare files are never grouped."""
+    try:
+        with get_session() as session:
+            party = registry.lookup(sender, session)
+        return party is not None and party.party_type == "vendor"
+    except Exception:  # noqa: BLE001 -- unsure: ask, never guess a vendor
+        logger.exception("Registry lookup failed for %s -- not grouping.", sender)
+        return False
+
+
+def _drop_held_copies(sender: str, file_path) -> None:
+    """Held bare files from this sender with the same bytes as `file_path`."""
+    from core.hashing import sha256_of_file
+
+    try:
+        digest = sha256_of_file(Path(file_path))
+        with get_session() as session:
+            for row in pending_vendor_files.list_for(sender, session):
+                try:
+                    same = sha256_of_file(Path(row.staged_path)) == digest
+                except OSError:
+                    continue
+                if same:
+                    pending_vendor_files.remove(row.id, session)
+                    logger.info(
+                        "Held vendor file '%s' from %s dropped: the same file came again with its vendor name.",
+                        row.original_filename,
+                        sender,
+                    )
+    except Exception:  # noqa: BLE001 -- a held copy left behind is the old behaviour
+        logger.exception("Could not check held copies for %s.", sender)
+
+
+def _imported_recently(sender: str, file_path, minutes: int = 30) -> bool:
+    """This exact file was imported from this number within `minutes`."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from backend.app.documents.models import IncomingDocument
+    from core.hashing import sha256_of_file
+    from core.models import InventoryImport
+    from core.time_utils import now_ist_naive
+
+    try:
+        digest = sha256_of_file(Path(file_path))
+        with get_session() as session:
+            hit = session.execute(
+                select(InventoryImport.id)
+                .join(IncomingDocument, IncomingDocument.inventory_import_id == InventoryImport.id)
+                .where(
+                    IncomingDocument.sender == sender,
+                    InventoryImport.content_hash == digest,
+                    InventoryImport.created_at >= now_ist_naive() - timedelta(minutes=minutes),
+                )
+                .limit(1)
+            ).first()
+        return hit is not None
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not check recent imports for %s.", sender)
+        return False
+
+
 def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCommand) -> None:
     """Download the media and run it through the existing import workflow the
     resolved `command` maps to. Unchanged from the original single-workflow
@@ -947,7 +1721,40 @@ def _download_and_process(message: IncomingWhatsAppMessage, command: WhatsAppCom
     vendor_name = (message.caption or "").strip()
     if command.document_type == IncomingDocumentType.VENDOR_INVENTORY:
         window = whatsapp_settings.grouping_window_minutes
-        if not vendor_name:
+        if vendor_name:
+            # A captioned name that matches no vendor is held, not onboarded
+            # (see `_confirm_vendor_name`). Grouped names below were already
+            # confirmed when they were first supplied.
+            confirmed = _confirm_vendor_name(
+                message.sender, vendor_name, f"'{message.filename}'"
+            )
+            if confirmed is None:
+                with get_session() as session:
+                    pending_vendor_files.add(
+                        message.sender, str(file_path), message.filename, session
+                    )
+                return
+            vendor_name = confirmed
+            # The same file sent again WITH its name (29 Oct, Seema: the Ford
+            # file arrived twice a second apart, the first bare): the bare
+            # copy held for a name is this one -- dropped, or the next name
+            # she typed would have imported it under that vendor too.
+            _drop_held_copies(message.sender, file_path)
+        if not vendor_name and _imported_recently(message.sender, file_path):
+            logger.info(
+                "WhatsApp vendor file '%s' from %s has no caption and is a copy of a file "
+                "imported from this number in the last 30 min -- skipped.",
+                message.filename,
+                message.sender,
+            )
+            send_reply_safe(message.sender, f"ℹ️ '{message.filename}' was already received a moment ago. Nothing changed.")
+            return
+        if not vendor_name and _is_vendors_own_number(message.sender):
+            # GROUPING ONLY FOR A VENDOR'S OWN NUMBER (29 Oct): a vendor sending
+            # several of its own files is one vendor. Staff forward files of
+            # MANY vendors back to back -- Seema's bare Ford file went under
+            # Ark Vehicles, the name she had typed 5 minutes earlier for the
+            # Toyota file. Staff are asked for every bare file.
             with get_session() as session:
                 remembered = vendor_memory.recall(message.sender, window, session)
             if remembered:
@@ -1137,6 +1944,13 @@ def _process_staged_file(
         # DEALER_PORTAL_ENABLED (default false) and DEALER_PORTAL_SHADOW
         # (default true); best-effort in its own session, and never raises.
         dealer_portal.request_push(
+            getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
+        )
+        # A file missing MRP / Part Description: ask the vendor and the
+        # purchase team for our format (once a day; never fails the import).
+        from backend.app.integrations.whatsapp import stock_format
+
+        stock_format.check_and_ask(
             getattr(result, "vendor_id", None), getattr(result, "vendor_name", None)
         )
 

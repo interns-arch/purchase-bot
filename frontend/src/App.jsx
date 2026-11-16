@@ -25,9 +25,21 @@ const IntegrationStatusPage = lazy(() =>
 const DeliveryTrackingPage = lazy(() =>
   import("./pages/DeliveryTrackingPage").then((m) => ({ default: m.DeliveryTrackingPage }))
 );
+const AdvanceOrdersPage = lazy(() =>
+  import("./pages/AdvanceOrdersPage").then((m) => ({ default: m.AdvanceOrdersPage }))
+);
 const VendorInvoicesPage = lazy(() =>
   import("./pages/VendorInvoicesPage").then((m) => ({ default: m.VendorInvoicesPage }))
 );
+const ChatsPage = lazy(() => import("./pages/ChatsPage").then((m) => ({ default: m.ChatsPage })));
+const VendorCreationPage = lazy(() =>
+  import("./pages/VendorCreationPage").then((m) => ({ default: m.VendorCreationPage }))
+);
+const GroupsPage = lazy(() => import("./pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
+const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then((m) => ({ default: m.VendorPriorityPage })));
+const VendorPocPage = lazy(() => import("./pages/VendorPocPage").then((m) => ({ default: m.VendorPocPage })));
+const DealerPortalPage = lazy(() => import("./pages/DealerPortalPage").then((m) => ({ default: m.DealerPortalPage })));
+const TeamPerformancePage = lazy(() => import("./pages/TeamPerformancePage").then((m) => ({ default: m.TeamPerformancePage })));
 const PurchaseOrdersPage = lazy(() =>
   import("./pages/PurchaseOrdersPage").then((m) => ({ default: m.PurchaseOrdersPage }))
 );
@@ -89,46 +101,75 @@ function App() {
                 </ProtectedRoute>
               }
             />
+            <Route path="/delivery-tracking" element={<Navigate to="/command-centre" replace />} />
             <Route
-              path="/delivery-tracking"
+              path="/performance"
               element={
                 <ProtectedRoute>
-                  <DeliveryTrackingPage />
+                  <TeamPerformancePage />
                 </ProtectedRoute>
               }
             />
             <Route
-              path="/vendor-invoices"
+              path="/dealer-portal"
               element={
                 <ProtectedRoute>
-                  <VendorInvoicesPage />
+                  <DealerPortalPage />
                 </ProtectedRoute>
               }
             />
             <Route
-              path="/purchase-orders"
+              path="/vendor-priority"
               element={
                 <ProtectedRoute>
-                  <PurchaseOrdersPage />
+                  <VendorPriorityPage />
                 </ProtectedRoute>
               }
             />
             <Route
-              path="/vendor-performance"
+              path="/vendor-poc"
               element={
                 <ProtectedRoute>
-                  <VendorPerformancePage />
+                  <VendorPocPage />
                 </ProtectedRoute>
               }
             />
             <Route
-              path="/vendor-performance/:vendorId"
+              path="/chats"
               element={
                 <ProtectedRoute>
-                  <VendorPerformanceDetailPage />
+                  <ChatsPage />
                 </ProtectedRoute>
               }
             />
+            <Route
+              path="/vendor-creation"
+              element={
+                <ProtectedRoute>
+                  <VendorCreationPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/groups"
+              element={
+                <ProtectedRoute>
+                  <GroupsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="/vendor-invoices" element={<Navigate to="/command-centre" replace />} />
+            <Route
+              path="/advance-orders"
+              element={
+                <ProtectedRoute>
+                  <AdvanceOrdersPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="/purchase-orders" element={<Navigate to="/command-centre" replace />} />
+            <Route path="/vendor-performance" element={<Navigate to="/performance" replace />} />
+            <Route path="/vendor-performance/:vendorId" element={<Navigate to="/performance" replace />} />
             <Route
               path="/command-centre"
               element={
@@ -145,14 +186,7 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/audit-log"
-              element={
-                <ProtectedRoute>
-                  <AuditLogPage />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/audit-log" element={<Navigate to="/command-centre" replace />} />
             <Route
               path="/file-inbox"
               element={

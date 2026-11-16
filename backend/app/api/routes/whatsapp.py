@@ -18,9 +18,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from backend.app.database.session import get_db
-from backend.app.integrations.whatsapp import status_service
+from backend.app.integrations.whatsapp import chat_log, status_service
 from backend.app.integrations.whatsapp.config import whatsapp_settings
 from backend.app.integrations.whatsapp.parser import (
+    parse_delivery_statuses,
     parse_text_messages,
     parse_webhook_payload,
 )
@@ -68,13 +69,43 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
 
     # Text commands are scheduled before documents so that if a command and a
     # file somehow arrive in the same webhook, the command is stored first.
-    texts = parse_text_messages(payload)
+    # A re-delivered copy of a message already received is dropped here, so
+    # it is never answered twice.
+    texts = [t for t in parse_text_messages(payload) if chat_log.first_delivery(t.message_id)]
     for text_message in texts:
         background_tasks.add_task(handle_incoming_whatsapp_text, text_message)
 
-    documents = parse_webhook_payload(payload)
+    documents = [d for d in parse_webhook_payload(payload) if chat_log.first_delivery(d.message_id)]
     for message in documents:
         background_tasks.add_task(handle_incoming_whatsapp_message, message)
+
+    # Delivery reports for messages WE sent. A failed one (e.g. 131047: the
+    # person has not written in 24 h) for an advance-order question moves the
+    # order on to the next vendor at once.
+    for report in parse_delivery_statuses(payload):
+        if report.status == "failed" and report.message_id:
+            background_tasks.add_task(_handle_delivery_failure, report)
+        if report.message_id:
+            background_tasks.add_task(
+                chat_log.update_status,
+                report.message_id,
+                report.status,
+                f"{report.error_code} {report.error_title}".strip() if report.error_code or report.error_title else None,
+            )
+
+    # The Chats page: every incoming text / file / photo, kept permanently.
+    for text_message in texts:
+        background_tasks.add_task(
+            chat_log.log_incoming, text_message.sender, kind="text",
+            text=text_message.text, wamid=text_message.message_id,
+        )
+    for message in documents:
+        background_tasks.add_task(
+            chat_log.log_incoming, message.sender,
+            kind="image" if getattr(message, "is_photo", False) else "document",
+            text=message.caption, filename=message.filename,
+            media_id=message.media_id, wamid=message.message_id,
+        )
 
     logger.info(
         "WhatsApp webhook received %d text message(s) and %d document attachment(s).",
@@ -84,3 +115,31 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
     return JSONResponse(
         {"status": "received", "text_count": len(texts), "document_count": len(documents)}
     )
+
+
+
+def _handle_delivery_failure(report) -> None:
+    """Never raises: a delivery report must not break the webhook."""
+    try:
+        from backend.app.advance_orders.config import advance_order_settings
+        from core.db import get_session
+
+        logger.warning(
+            "WhatsApp could not deliver %s to %s: %s %s",
+            report.message_id,
+            report.recipient,
+            report.error_code,
+            report.error_title,
+        )
+        from backend.app.advance_orders.config import engine_enabled
+
+        if not engine_enabled():
+            return
+        from backend.app.advance_orders import service as advance_orders
+
+        with get_session() as session:
+            advance_orders.handle_delivery_failure(
+                report.message_id, report.recipient, report.error_code, report.error_title, session
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not handle a WhatsApp delivery report.")

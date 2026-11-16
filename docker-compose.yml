@@ -85,12 +85,30 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-procurehub123}
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      # Bound to localhost only: browsers reach the API through the frontend
+      # container (nginx proxies /api/*), so the backend needs no public port.
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
       # Uploaded files survive a rebuild. Imported DATA lives in Postgres;
       # this keeps the ORIGINAL files (downloadable from the File Inbox).
       - uploads:/app/uploads
       # Only used if you unset DATABASE_URL to fall back to local SQLite.
+      - appdb:/app/database
+    restart: unless-stopped
+
+  # Sends "Purchase Bot is not working" alerts. Separate from the backend and
+  # with no depends_on, so it keeps running when the backend or database stops.
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.scripts.bot_watch"]
+    env_file:
+      - path: backend/.env
+        required: false
+    healthcheck:
+      disable: true
+    volumes:
       - appdb:/app/database
     restart: unless-stopped
 

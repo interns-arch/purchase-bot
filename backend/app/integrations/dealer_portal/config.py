@@ -40,6 +40,19 @@ class DealerPortalSettings:
         "DEALER_PORTAL_BASE_URL", "https://vagmine.vagminetech.com/api/v1"
     ).strip().rstrip("/")
 
+    # CLOUDFLARE ACCESS (29 Oct 2026): the Portal put Cloudflare Access in
+    # front of every path, /auth/login included. A request without this
+    # service token gets a Cloudflare sign-in page instead of the API. It is
+    # sent on EVERY call, beside the dealer's own login JWT -- it does not
+    # replace it. Secrets: backend/.env only, never logged.
+    cf_client_id: str = (os.environ.get("DEALER_PORTAL_CF_CLIENT_ID") or "").strip()
+    cf_client_secret: str = (os.environ.get("DEALER_PORTAL_CF_CLIENT_SECRET") or "").strip()
+
+    def access_headers(self) -> dict[str, str]:
+        if not (self.cf_client_id and self.cf_client_secret):
+            return {}
+        return {"CF-Access-Client-Id": self.cf_client_id, "CF-Access-Client-Secret": self.cf_client_secret}
+
     # Comma-separated list of ACCOUNT KEYS. Each key names one Dealer Portal
     # dealer account and is the prefix for that account's own variables --
     # see `credentials.py` for the full per-account variable set.

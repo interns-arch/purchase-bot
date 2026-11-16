@@ -34,6 +34,7 @@ order must not interleave.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from collections import defaultdict
@@ -49,7 +50,7 @@ from backend.app.integrations.dealer_portal.config import dealer_portal_settings
 from backend.app.integrations.dealer_portal.credentials import DealerPortalAccount
 from core.db import get_session
 from core.logging_setup import get_logger
-from core.models import DealerPortalPush, DealerPortalPushStatus
+from core.models import DealerPortalPush, DealerPortalPushStatus, Vendor
 from core.time_utils import now_ist_naive
 
 logger = get_logger(__name__)
@@ -158,6 +159,8 @@ def push_account(
     *,
     triggering_vendor_id: int | None = None,
     force_full_snapshot: bool = False,
+    prior_attempts: int = 0,
+    is_retry: bool = False,
 ) -> DealerPortalPushStatus:
     """Compute and push one account's delta. Writes exactly one
     `DealerPortalPush` audit row. Returns the status recorded.
@@ -176,6 +179,24 @@ def push_account(
     with get_session() as session:
         if not account.vendor_ids:
             credentials.resolve_account_vendors(account, session)
+        if account.push_stock_after:
+            from datetime import datetime
+
+            from core.models import InventoryImport
+
+            cutoff = datetime.fromisoformat(account.push_stock_after)
+            newest = (
+                session.query(InventoryImport.created_at)
+                .filter(InventoryImport.vendor_id.in_(account.vendor_ids or [-1]), InventoryImport.is_active.is_(True))
+                .order_by(InventoryImport.created_at.desc())
+                .first()
+            )
+            if newest is None or newest[0] < cutoff:
+                logger.info(
+                    "Dealer Portal %s: waiting for stock received after %s -- the stock in the bot is older; nothing sent.",
+                    account.key, account.push_stock_after,
+                )
+                return DealerPortalPushStatus.SUCCESS
         result = delta.build_delta(account, session)
 
         push = DealerPortalPush(
@@ -186,7 +207,13 @@ def push_account(
             import_ids=list(result.import_ids),
             rows_sent=result.rows_sent,
             zeroed_count=result.zeroed_count,
+            skipped_no_price=result.priceless_count,
+            skipped_parts=result.priceless_parts[:12] or None,
             status=DealerPortalPushStatus.PENDING,
+            # A retry continues the failed push's count, so the sweep really
+            # stops after DEALER_PORTAL_RETRY_MAX_ATTEMPTS (it used to restart
+            # at 1 on every retry and loop -- and alert -- forever).
+            attempts=prior_attempts,
         )
         session.add(push)
         session.flush()
@@ -196,7 +223,7 @@ def push_account(
 
     logger.info(
         "Dealer Portal %s: %d row(s) to send (%d zeroed, %d sold-out but withheld, "
-        "%d duplicate(s) collapsed, %d without a known price) across vendor(s) %s.",
+        "%d duplicate(s) collapsed, %d skipped for having no price) across vendor(s) %s.",
         account.key,
         result.rows_sent,
         result.zeroed_count,
@@ -212,6 +239,7 @@ def push_account(
             DealerPortalPushStatus.SUCCESS,
             error=None,
             note="nothing to send",
+            is_retry=is_retry,
         )
 
     # ---- SHADOW MODE: everything above, nothing over the wire. ----------
@@ -224,16 +252,35 @@ def push_account(
             dealer_portal_settings.base_url,
             csv_builder.preview(result.rows, tat_days=account.tat_days),
         )
-        return _finish(push_id, DealerPortalPushStatus.SHADOW, error=None)
+        return _finish(push_id, DealerPortalPushStatus.SHADOW, error=None, is_retry=is_retry)
 
     # ---- LIVE ----------------------------------------------------------
+    # DEALER_PORTAL_<KEY>_RESET_BEFORE_UPLOAD=true: clear the dealer's stock
+    # first, then upload the full list -- same as the Google Sheet tab being
+    # rewritten from the latest file. Only with a full snapshot: a partial
+    # list after a reset would wipe stock the vendor still has.
+    import os
+
+    csv_bytes = csv_builder.build_csv(
+        _in_portal_form(account, result.rows), tat_days=account.tat_days
+    )
+
+    if account.full_snapshot and (
+        account.reset_before_upload
+        or (os.environ.get(f"DEALER_PORTAL_{account.key}_RESET_BEFORE_UPLOAD") or "").strip().lower() == "true"
+    ):
+        try:
+            client.reset_own_stock(account)
+        except client.DealerPortalError as exc:
+            logger.error("Dealer Portal %s: reset failed, upload skipped -- %s", account.key, exc)
+            return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc), is_retry=is_retry)
     try:
         upload = client.upload_csv(
             account, csv_bytes, file_name=f"{account.key.lower()}_stock.csv"
         )
     except client.DealerPortalError as exc:
         logger.error("Dealer Portal %s: push failed -- %s", account.key, exc)
-        return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc))
+        return _finish(push_id, DealerPortalPushStatus.FAILED, error=str(exc), is_retry=is_retry)
 
     status, error = _outcome(upload, rows_sent=result.rows_sent)
 
@@ -261,7 +308,37 @@ def push_account(
         upload.updated_count,
         upload.failed_count,
     )
-    return _finish(push_id, status, error=error, upload=upload)
+    return _finish(push_id, status, error=error, upload=upload, is_retry=is_retry)
+
+
+def _in_portal_form(account: DealerPortalAccount, rows: list) -> list:
+    """Rename a part to DP's own spelling when the vendor's differs only by
+    leading zeros: DP refuses 0928907005 but lists 928907005 for this dealer
+    (Mohan Spares, 28 Oct 2026). Only when DP lacks the exact number, has the
+    bare one, and the file does not already carry the bare one (that would
+    send the part twice). If DP's list can't be read, the rows go unchanged."""
+    try:
+        known = client.product_part_numbers(account)
+    except client.DealerPortalError as exc:
+        logger.warning("Dealer Portal %s: product list unavailable, part numbers sent as-is -- %s", account.key, exc)
+        return rows
+    in_file = {(row.part_no or "").strip().upper() for row in rows}
+    renamed: list[str] = []
+    out = []
+    for row in rows:
+        part = (row.part_no or "").strip().upper()
+        bare = part.lstrip("0")
+        if bare and bare != part and part not in known and bare in known and bare not in in_file:
+            row = dataclasses.replace(row, part_no=bare)
+            renamed.append(part)
+            in_file.add(bare)
+        out.append(row)
+    if renamed:
+        logger.info(
+            "Dealer Portal %s: %d part(s) sent without leading zeros, as DP lists them (%s%s).",
+            account.key, len(renamed), ", ".join(renamed[:5]), "..." if len(renamed) > 5 else "",
+        )
+    return out
 
 
 def _outcome(upload, *, rows_sent: int) -> tuple[DealerPortalPushStatus, str | None]:
@@ -299,6 +376,7 @@ def _finish(
     error: str | None,
     upload=None,
     note: str | None = None,
+    is_retry: bool = False,
 ) -> DealerPortalPushStatus:
     """Close out the audit row. Never raises -- a bookkeeping failure must
     not turn into an import failure."""
@@ -320,7 +398,119 @@ def _finish(
         logger.exception("Could not record Dealer Portal push %s.", push_id)
     if note:
         logger.info("Dealer Portal push %s: %s.", push_id, note)
+    if not is_retry:
+        _tell_team(push_id, status, error, upload)
     return status
+
+
+def _plain_failure(error: str | None) -> str:
+    """The upload error in words the purchase team can act on."""
+    text = error or ""
+    if "upload for" in text and "failed: HTTP 5" in text:
+        return (f"the portal itself crashed ({text}). This is a fault on the portal's side -- ask the portal "
+                "team to fix it. The old stock was already cleared, so this dealer may show 0 stock on the "
+                "portal until an upload goes through.")
+    if "HTTP 401" in text:
+        return ("the portal refused the dealer's password (it has probably been changed). "
+                "Update it on the bot's Dealer Portal page -> Change login.")
+    if "409" in text or "SESSION_ALREADY_ACTIVE" in text:
+        return "the dealer account is logged in somewhere else. Log out of the portal there and it will retry."
+    if "403" in text:
+        return "this dealer account has no permission to upload stock on the portal (ask the portal team)."
+    if "reset" in text.lower():
+        return f"the stock reset on the portal failed ({text}). Nothing was uploaded, so the old stock is still there."
+    if "unreachable" in text.lower() or "request failed" in text.lower():
+        return "the portal could not be reached (network / portal down)."
+    return text or "no reason given"
+
+
+def _alert_numbers() -> list[str]:
+    """DEALER_PORTAL_ALERT_NUMBERS (comma-separated): who gets the upload
+    alerts on WhatsApp ("some parts not uploaded", "stock NOT uploaded").
+    Unset = every admin number."""
+    import os
+
+    from backend.app.integrations.whatsapp.registry import normalize_number
+
+    raw = os.environ.get("DEALER_PORTAL_ALERT_NUMBERS") or ""
+    return [n for n in (normalize_number(x) for x in raw.split(",")) if n]
+
+
+def _tell_team(push_id: int, status: DealerPortalPushStatus, error: str | None, upload) -> None:
+    """After an upload, tell the team what did NOT go up and why (Founder,
+    14 Oct 2026): skipped for no price, refused by the portal, or the whole
+    upload failed. Shown on the web and mirrored to the admin WhatsApp. A
+    clean upload says nothing. Retries of a FAILED push do not repeat the
+    alert, nor does the same failure within 24 h. Never raises."""
+    try:
+        with get_session() as session:
+            push = session.get(DealerPortalPush, push_id)
+            if push is None:
+                return
+            skipped = push.skipped_no_price or 0
+            skipped_parts = list(push.skipped_parts or [])
+            noteworthy = status in (
+                DealerPortalPushStatus.REJECTED, DealerPortalPushStatus.PARTIAL, DealerPortalPushStatus.FAILED
+            ) or skipped
+            if not noteworthy:
+                return
+            if status == DealerPortalPushStatus.FAILED and (push.attempts or 0) > 1:
+                return
+            account = push.account_key
+            names = [
+                v.name for v in (session.get(Vendor, vid) for vid in (push.vendor_ids or [])) if v is not None
+            ]
+            if status == DealerPortalPushStatus.FAILED and error:
+                from datetime import timedelta
+
+                earlier = (
+                    session.query(DealerPortalPush)
+                    .filter(
+                        DealerPortalPush.account_key == account,
+                        DealerPortalPush.id != push_id,
+                        DealerPortalPush.error.like(error[:80] + "%"),
+                        DealerPortalPush.created_at >= now_ist_naive() - timedelta(hours=24),
+                    )
+                    .first()
+                )
+                if earlier is not None:
+                    logger.info("Dealer Portal %s: same failure as push %s -- not alerting again.", account, earlier.id)
+                    return
+        landed = (getattr(upload, "inserted_count", 0) or 0) + (getattr(upload, "updated_count", 0) or 0)
+        refused = getattr(upload, "failed_count", 0) or 0
+        who = ", ".join(names) or account
+
+        if status == DealerPortalPushStatus.FAILED:
+            title = f"Dealer Portal: {who} stock NOT uploaded"
+            detail = f"Reason: {_plain_failure(error)} It will be retried automatically."
+        else:
+            title = f"Dealer Portal: {who} — some parts not uploaded"
+            lines = [f"✅ {landed} part(s) uploaded."]
+            if refused:
+                lines.append(
+                    f"❌ {refused} refused by the Portal — those part numbers are not in the Portal's own "
+                    "parts list (the Portal team has to add them; it does not say which ones)."
+                )
+            if skipped:
+                example = ", ".join(skipped_parts[:6])
+                lines.append(
+                    f"⏭ {skipped} not uploaded — the vendor's file has no price for them (not even MRP), so "
+                    f"they would show at ₹0. e.g. {example}{' …' if skipped > len(skipped_parts[:6]) else ''}. "
+                    "Ask the vendor to send the file with price/MRP."
+                )
+            detail = "\n".join(lines)
+        from backend.app.notifications import broker
+
+        # Portal alerts are for whoever looks after the Portal, not every
+        # admin (24 Oct 2026: Alam sir, not Prateek sir).
+        broker.publish(
+            "error" if status == DealerPortalPushStatus.FAILED else "warning",
+            title,
+            detail,
+            to=_alert_numbers(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not announce Dealer Portal push %s.", push_id)
 
 
 def retry_failed_pushes() -> int:
@@ -341,7 +531,7 @@ def retry_failed_pushes() -> int:
             .order_by(DealerPortalPush.created_at.asc())
             .all()
         )
-        pending = [(row.id, row.account_key, row.vendor_id) for row in failed]
+        pending = [(row.id, row.account_key, row.vendor_id, row.attempts or 0) for row in failed]
 
     if not pending:
         return 0
@@ -349,7 +539,7 @@ def retry_failed_pushes() -> int:
     # One retry per ACCOUNT: a fresh delta covers every failed push for it.
     seen: set[str] = set()
     retried = 0
-    for push_id, account_key, vendor_id in pending:
+    for push_id, account_key, vendor_id, attempts in pending:
         if account_key in seen:
             _mark_superseded(push_id)
             continue
@@ -366,14 +556,18 @@ def retry_failed_pushes() -> int:
                 )
                 continue
             with _lock_for(account.key):
-                status = push_account(account, triggering_vendor_id=vendor_id)
+                status = push_account(
+                    account, triggering_vendor_id=vendor_id, prior_attempts=attempts, is_retry=True
+                )
             if status in (
                 DealerPortalPushStatus.SUCCESS,
                 DealerPortalPushStatus.SHADOW,
             ):
                 _mark_superseded(push_id)
             else:
-                _bump_attempts(push_id)
+                # The retry's own new row now carries the count forward; this
+                # row is finished so the chain cannot fork.
+                _retire(push_id, max_attempts)
             retried += 1
         except Exception:  # noqa: BLE001 -- a background sweep never raises
             logger.exception("Dealer Portal retry failed for account %s.", account_key)
@@ -392,6 +586,16 @@ def _mark_superseded(push_id: int) -> None:
                 push.completed_at = now_ist_naive()
     except Exception:  # noqa: BLE001
         logger.exception("Could not close Dealer Portal push %s.", push_id)
+
+
+def _retire(push_id: int, max_attempts: int) -> None:
+    try:
+        with get_session() as session:
+            push = session.get(DealerPortalPush, push_id)
+            if push is not None:
+                push.attempts = max(push.attempts or 0, max_attempts)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not retire Dealer Portal push %s.", push_id)
 
 
 def _bump_attempts(push_id: int) -> None:

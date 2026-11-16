@@ -175,7 +175,7 @@ export function VendorInventoryPage() {
         <p style={{ color: "var(--color-text-muted)", fontSize: "0.9rem", marginBottom: 12 }}>
           A vendor's first upload can be named with their real company name (e.g. "Arvind Auto
           Parts.xlsx") -- a Vendor Code is generated automatically and shown in the message below.
-          Every upload after that must be prefixed with that code (e.g. "AR_CT_Inventory.xlsx").
+          Every upload after that must be prefixed with that code (e.g. "CT_AR_Inventory.xlsx").
         </p>
 
         <div

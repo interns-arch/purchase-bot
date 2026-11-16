@@ -34,5 +34,139 @@ class AdvanceOrderSettings:
     # How often the scheduler sends queued questions and moves past silent vendors.
     tick_minutes: int = max(1, _int("ADVANCE_ORDER_TICK_MINUTES", 5))
 
+    # --- quote comparison --------------------------------------------------
+    # How many vendors are asked about one brand AT THE SAME TIME. 1 restores
+    # the original first-vendor-wins behaviour exactly. Above 1, the answers
+    # are collected and ranked, which is the only way a discount can be
+    # compared -- you cannot compare what you never asked for.
+    #
+    # Founder, 1 Oct 2026: ask ONE vendor at a time, brand-wise, and the next
+    # only after a refusal -- so the default is 1. With 1 the first vendor who
+    # says yes wins, and vendors are asked in their brand priority order
+    # (best known discount first, from VENDOR BRAND MAPPING.xlsx).
+    quote_fanout: int = max(1, _int("ADVANCE_ORDER_QUOTE_FANOUT", 1))
+    # How long the answers are collected before the best one is taken. A line
+    # is decided as soon as every asked vendor has answered, so this is the
+    # cap, not the wait. Kept below vendor_wait_minutes by default so a
+    # customer is never left waiting on a silent vendor.
+    quote_window_minutes: int = max(5, _int("ADVANCE_ORDER_QUOTE_WINDOW_MINUTES", 60))
+
+    # TAT BANDS, in days, as upper bounds: "1,3,7,15" means same/next day,
+    # 2-3 days, 4-7, 8-15, then everything slower. The Founder's rule is that
+    # a better TAT beats a better discount -- but only across a band, so
+    # "one day sooner, nine percent worse" never wins. Two vendors inside one
+    # band are equal on time and the higher discount decides.
+    tat_bands: list[int] = [
+        int(x) for x in (os.environ.get("ADVANCE_ORDER_TAT_BANDS") or "1,3,7,15").split(",") if x.strip().isdigit()
+    ] or [1, 3, 7, 15]
+
+    # A RATE vendor has no standing percentage, so he is asked for a rate --
+    # in ONE message listing every part, with the reply shape spelled out
+    # ("TT-100 rate 450, 3 din"). A rate written beside a part number is read;
+    # a loose rate while several parts were asked is refused as ambiguous and
+    # goes to the admin (see parser.parse_vendor_reply). One message per part
+    # was tried and rejected: WhatsApp does not say which message a reply
+    # answers, and the first reply closed the question, losing the second.
+
+    # A vendor who has only PART of a line ("sirf 3" of 10): the line becomes
+    # his 3, and a new line for the other 7 goes on to the next vendor. The
+    # total asked for never changes. false = his 3 is the answer, as before.
+    split_partial: bool = (os.environ.get("ADVANCE_ORDER_SPLIT_PARTIAL", "true").strip().lower() == "true")
+
+    # Who is told when NO vendor has a part (Founder, 1 Oct 2026: "send the
+    # query to a human person's WhatsApp"). Comma-separated. Blank = the admin
+    # numbers and purchase team, until the Founder names the person.
+    human_numbers: list[str] = [
+        part.strip() for part in (os.environ.get("ADVANCE_ORDER_HUMAN_NUMBERS") or "").split(",") if part.strip()
+    ]
+
+    # Case 2: how long a dealer-stock order may take, end to end, before what
+    # is still open is reported to a person (Founder: 12 hours).
+    dealer_stock_window_hours: int = max(1, _int("ADVANCE_ORDER_DEALER_STOCK_WINDOW_HOURS", 12))
+    # ADVANCE orders (case 3): if no vendor has answered a part within this
+    # many hours of the FIRST vendor question going out, the part is "not
+    # found" and the sales bot tells the customer so (it polls the order).
+    # Counted from the first question, not the order, so an order that comes
+    # in after vendor hours is not timed out before anyone was asked.
+    # 0 = no limit (the old behaviour). Founder, 9 Oct 2026: 9 hours.
+    advance_deadline_hours: int = max(0, _int("ADVANCE_ORDER_DEADLINE_HOURS", 9))
+    # Parts no vendor could answer (brand not in the mapping, or its vendors
+    # silent) go to these people -- Prateek sir. Blank = the old behaviour
+    # (not found straight away). See escalation.py.
+    escalation_numbers: list[str] = [
+        part.strip() for part in (os.environ.get("ADVANCE_ORDER_ESCALATION_NUMBERS") or "").split(",") if part.strip()
+    ]
+    # How long (vendor hours) he has to answer before the part is not found.
+    escalation_hours: int = max(1, _int("ADVANCE_ORDER_ESCALATION_HOURS", 9))
+    # Founder, 10 Oct 2026: a vendor gets a 2-hour buffer
+    # (ADVANCE_ORDER_VENDOR_WAIT_MINUTES=120) with 2 follow-ups, 15 minutes
+    # apart, and a vendor still silent at the end goes STRAIGHT to Prateek sir
+    # (who names another vendor or says cancel) instead of the next vendor.
+    followup_minutes: int = max(5, _int("ADVANCE_ORDER_FOLLOWUP_MINUTES", 15))
+    followup_count: int = max(0, _int("ADVANCE_ORDER_FOLLOWUP_COUNT", 2))
+    escalate_on_silence: bool = (
+        os.environ.get("ADVANCE_ORDER_ESCALATE_ON_SILENCE", "true").strip().lower() == "true"
+    )
+
+    # --- where a vendor is asked -------------------------------------------
+    # User, 11 Nov 2026: "sab group me" -- a vendor with a WhatsApp group
+    # (Whapi, WHAPI_ACTIVE_GROUPS) is asked about parts IN THAT GROUP, never on
+    # his personal chat. "group_first" (default): no group -> his own number,
+    # as before. "group_only": a vendor without a group is not asked at all.
+    vendor_route: str = (os.environ.get("ADVANCE_ORDER_VENDOR_ROUTE") or "group_first").strip().lower()
+    # User, 13 Nov 2026: every part enquiry asks three things -- MRP, discount
+    # and days -- and the answers go to the Dealer Portal with the PO-MST.
+    # false = the old question (availability + days; rate only for rate vendors).
+    ask_mrp_discount: bool = (os.environ.get("ADVANCE_ORDER_ASK_MRP_DISCOUNT") or "true").strip().lower() == "true"
+    # User, 13 Nov 2026: ask ONE thing at a time -- "Sir ye part hai kya with
+    # pcs?", then MRP, then discount, then days. "steps" (default) or "one"
+    # (everything in one message, as above).
+    ask_mode: str = (os.environ.get("ADVANCE_ORDER_ASK_MODE") or "steps").strip().lower()
+    # Seconds between two posts into vendor groups (one group at a time,
+    # nothing in bulk -- a burst got Rajkumar's number banned, 2 Nov 2026).
+    group_gap_seconds: float = float(os.environ.get("ADVANCE_ORDER_GROUP_GAP_SECONDS") or 20)
+
+    # --- handing the answer back to the sales bot --------------------------
+    # Blank = push disabled and the sales bot polls GET /api/advance-orders/{id},
+    # which keeps working either way. Set it and ProcureHub POSTs the order
+    # (same JSON the GET returns) when a line is first quoted and again when
+    # the order settles. Best-effort: a callback failure is logged and retried,
+    # and can never hold up a vendor conversation.
+    callback_url: str = (os.environ.get("ADVANCE_ORDER_CALLBACK_URL") or "").strip()
+    # Sent as X-Api-Key, and as an X-Signature HMAC of the body when set.
+    callback_secret: str = (os.environ.get("ADVANCE_ORDER_CALLBACK_SECRET") or "").strip()
+    callback_timeout_seconds: float = float(os.environ.get("ADVANCE_ORDER_CALLBACK_TIMEOUT_SECONDS") or 20)
+    callback_max_attempts: int = max(1, _int("ADVANCE_ORDER_CALLBACK_MAX_ATTEMPTS", 4))
+    # SHADOW: compute and log exactly what would be POSTed, send nothing.
+    # Mirrors AI_SHADOW_MODE and DEALER_PORTAL_SHADOW. Default false, because
+    # the callback is inert anyway until callback_url is set.
+    callback_shadow: bool = (
+        os.environ.get("ADVANCE_ORDER_CALLBACK_SHADOW", "false").strip().lower() == "true"
+    )
+
 
 advance_order_settings = AdvanceOrderSettings()
+
+
+def portal_procurement_on() -> bool:
+    """Portal demand (backend/app/portal_procurement) drives this same engine."""
+    from backend.app.portal_procurement.config import settings
+
+    return settings.enabled
+
+
+def engine_enabled() -> bool:
+    """The vendor-question engine runs for sales-bot orders
+    (ADVANCE_ORDERS_ENABLED) or Portal demand (PORTAL_PROCUREMENT_ENABLED)."""
+    return advance_order_settings.enabled or portal_procurement_on()
+
+
+def order_in_scope(order) -> bool:
+    """May the engine work on this order right now? Portal demand needs the
+    Portal switch; anything else needs ADVANCE_ORDERS_ENABLED (user, 11 Nov
+    2026: the sales bot never asks the purchase bot -- that switch is off)."""
+    from backend.app.portal_procurement.config import SOURCE
+
+    if getattr(order, "source", None) == SOURCE:
+        return portal_procurement_on()
+    return advance_order_settings.enabled

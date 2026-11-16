@@ -64,6 +64,24 @@ import re as _re
 _VENDOR_NAME_FILLERS = {"stock", "stocks", "inventory", "stocklist"}
 
 
+# Words that say WHAT the file is, never WHO sent it. A caption made only of
+# these ("STOCK", "closing stock", "stock list") names no vendor -- found live
+# 6 Oct 2026: a Honda file captioned "STOCK" was filed under a junk vendor
+# called "Stock" and the Honda tab kept the previous file.
+_GENERIC_CAPTION_WORDS = _VENDOR_NAME_FILLERS | {
+    "closing", "list", "file", "files", "excel", "sheet", "report", "update", "updated",
+    "new", "latest", "today", "todays", "aaj", "ka", "ki", "ke", "hai", "please", "pls", "plz",
+    "the", "of", "my", "our", "data", "qty", "quantity", "details",
+}
+
+
+def is_generic_vendor_name(name: str | None) -> bool:
+    """True when `name` is only generic file words ("STOCK", "Closing Stock")
+    -- or a date -- and so cannot identify a vendor."""
+    words = [w for w in _re.split(r"[^a-z0-9]+", (name or "").lower()) if w]
+    return all(word in _GENERIC_CAPTION_WORDS or word.isdigit() for word in words)
+
+
 def normalise_vendor_name(name: str) -> str:
     """Identity form of a vendor name: lowercase, alphanumeric words only,
     with generic filler words ('stock' etc.) removed. 'BIJWASHAN STOCK' ->
@@ -199,6 +217,44 @@ def get_vendor_by_name(name: str, session: Session) -> Vendor | None:
             similar.vendor_code,
         )
     return similar
+
+
+def _is_abbreviation(short: str, full: str) -> bool:
+    """'bj' -> 'bijwashan': same first letter and every letter of `short`
+    appears in `full` in order. Used only to RANK suggestions shown to a
+    human -- never to match a vendor automatically."""
+    short, full = short.replace(" ", ""), full.replace(" ", "")
+    if not short or not full or short[0] != full[0]:
+        return False
+    position = 0
+    for char in short:
+        position = full.find(char, position)
+        if position < 0:
+            return False
+        position += 1
+    return True
+
+
+def suggest_vendor_names(name: str, session: Session, *, limit: int = 3) -> list[str]:
+    """Existing vendor names that `name` most plausibly meant, best first --
+    for the "did you mean" question when a typed name matches nothing
+    ('bJ STOCK' -> ['BIJWASHAN STOCK', ...]). Suggestions only; the sender
+    always confirms."""
+    from difflib import SequenceMatcher
+
+    wanted = normalise_vendor_name(name)
+    if not wanted:
+        return []
+    scored: list[tuple[float, str]] = []
+    for vendor in session.execute(select(Vendor)).scalars():
+        candidate = normalise_vendor_name(vendor.name)
+        score = SequenceMatcher(None, wanted, candidate).ratio()
+        if _is_abbreviation(wanted, candidate):
+            score = max(score, 0.6)
+        if score >= 0.4:
+            scored.append((score, vendor.name))
+    scored.sort(key=lambda item: (-item[0], item[1].lower()))
+    return [vendor_name for _score, vendor_name in scored[:limit]]
 
 
 class VendorNameInUseError(ValueError):

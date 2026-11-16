@@ -334,6 +334,60 @@ A separate manual delivery-file upload exists on the Delivery Tracking tab for w
 
 ---
 
+## 7b. Advance Orders — asking vendors about parts not in stock
+
+The sales bot sends ProcureHub the parts it could not find in stock
+(`POST /api/advance-orders`, `X-Api-Key`). ProcureHub asks the vendors who
+carry that brand on WhatsApp, reads their replies, picks the best answer, and
+hands it back. Module: `backend/app/advance_orders/`. Off until
+`ADVANCE_ORDERS_ENABLED=true`.
+
+```
+sales bot ──POST──► part → brand (sales bot / parts.brand / part_brand_hints)
+                    brand → vendors, best known discount asked first
+                    ask up to ADVANCE_ORDER_QUOTE_FANOUT vendors at once
+                      percent vendor: "do you have it, how many days"
+                      rate vendor:    "rate beside each part, how many days"
+                    reply parsed → one AdvanceVendorQuote per vendor per part
+                    all asked have answered, or the quote window closes
+                    rank: faster TAT band first, then bigger discount
+sales bot ◄──────── callback (ADVANCE_ORDER_CALLBACK_URL) and/or GET /{id}
+```
+
+**Ranking (Founder, 29 Sep 2026):** better TAT beats better discount, but only
+across a band (`ADVANCE_ORDER_TAT_BANDS`, default 1,3,7,15 days) — so "one day
+sooner, nine percent worse" never wins. Inside a band the bigger discount wins.
+A vendor who has the part but gave no price still beats one who does not have it.
+
+**Standing terms, not questions.** The discount is loaded once from
+`VENDOR BRAND MAPPING.xlsx` (`import_vendor_brand_mapping.py`). Vendors with a
+fixed percentage are never asked about money; only `rate` / `rate + scheme`
+vendors are asked for a rate. A vendor-brand row with no terms on file keeps the
+original question unchanged.
+
+**Nothing guessed:**
+- A number only becomes a price when labelled (`rate 450`, `450 rs`, `@450`,
+  `Rs.450`, `mrp 600`). An unlabelled number when a rate was asked, or one loose
+  rate while several parts were asked, goes to the admin — never stored.
+- One WhatsApp number listed for several vendors (the mapping has these): a reply
+  while more than one of them is being asked goes to the admin.
+- "samajh nahi aaya" is a question back, not "not available".
+- A date already past keeps the part available but promises no ETA.
+- "Could not reach any vendor" is reported as that, never as "nobody had it".
+
+**Enquiry contacts are not the WhatsApp registry.** Numbers from the mapping go
+to `advance_vendor_contacts`. Registering them would send the 09:30 stock request
+to 104 vendors who never share stock.
+
+**Desk:** web → **Advance Orders** — every quote per part, why the winner won,
+payment terms and pickup beside each quote, manual entry for phone answers or
+refused replies, and the ask order per brand (reordering keeps each vendor's terms).
+
+**Check:** `python -m backend.scripts.check_advance_orders` — throwaway SQLite,
+fake sends; covers the original flow (fan-out 1) and quote comparison.
+
+---
+
 ## 8. WhatsApp Conversation Reference — what to write in the bot
 
 Who is texting matters: the bot behaves differently for the **Founder/admin numbers** (`WHATSAPP_ADMIN_PHONE_NUMBER`), **registered vendor/customer numbers** (the number registry), and **any other number**.

@@ -54,4 +54,8 @@ def recall(whatsapp_number: str, max_age_minutes: float, session: Session) -> st
         return None
     if _utcnow() - row.updated_at > timedelta(minutes=max_age_minutes):
         return None
+    from core.services.vendor_service import is_generic_vendor_name
+
+    if is_generic_vendor_name(row.vendor_name):
+        return None  # "STOCK" never groups the next files under a non-vendor
     return row.vendor_name

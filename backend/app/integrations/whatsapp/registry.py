@@ -38,7 +38,17 @@ _DEFAULT_COUNTRY_CODE = "91"
 def normalize_number(raw: str | int | None) -> str:
     """Digits-only, with country code: '92569 97173' -> '919256997173'.
     Returns '' for blank input (callers treat that as unregistrable)."""
-    digits = _NON_DIGITS.sub("", str(raw or ""))
+    # Excel hands a phone number over as a float -- 9990898746.0 -- and
+    # stripping the "." alone would leave 99908987460: an extra 0 and no
+    # country code, a number WhatsApp cannot deliver to (131026). Found live
+    # 6 Oct 2026 on 16 vendor numbers registered from an Excel on 14 Aug.
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    text_value = str(raw or "").strip()
+    float_like = re.fullmatch(r"(\+?[\d\s-]+)\.0+", text_value)
+    if float_like:
+        text_value = float_like.group(1)
+    digits = _NON_DIGITS.sub("", text_value)
     if not digits:
         return ""
     digits = digits.lstrip("0")
@@ -70,7 +80,7 @@ def lookup(sender: str, session: Session) -> RegisteredParty | None:
         )
     ).scalar_one_or_none()
     if row is None:
-        return None
+        return _poc(number, session)
     if row.vendor_id is not None:
         vendor = session.get(Vendor, row.vendor_id)
         if vendor is None:  # orphaned by a raw delete -- treat as unregistered
@@ -80,6 +90,26 @@ def lookup(sender: str, session: Session) -> RegisteredParty | None:
     if customer is None:
         return None
     return RegisteredParty("customer", customer.id, customer.name)
+
+
+def _poc(number: str, session: Session) -> RegisteredParty | None:
+    """A vendor POC number (Vendors page, POC tab) counts as the vendor.
+    Only when exactly ONE vendor has it -- a shared number is never guessed."""
+    try:
+        from backend.app.advance_orders.models import AdvanceVendorContact
+    except Exception:  # noqa: BLE001
+        return None
+    vendor_ids = set(session.execute(
+        select(AdvanceVendorContact.vendor_id).where(
+            AdvanceVendorContact.whatsapp_number == number,
+            AdvanceVendorContact.active.is_(True),
+            AdvanceVendorContact.treat_as_vendor.is_(True),
+        )
+    ).scalars())
+    if len(vendor_ids) != 1:
+        return None
+    vendor = session.get(Vendor, vendor_ids.pop())
+    return RegisteredParty("vendor", vendor.id, vendor.name) if vendor is not None else None
 
 
 class NumberAlreadyRegisteredError(ValueError):
