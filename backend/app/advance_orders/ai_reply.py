@@ -40,13 +40,14 @@ SYSTEM = (
     "You read an auto-parts vendor's WhatsApp reply to a purchase enquiry from Cartrends. "
     "Vendors write Hinglish, short forms and typos. Reply with JSON only:\n"
     '{"unclear": false, "answers": [{"part": "<an asked part number>", "available": true, '
-    '"quantity": null, "days": null, "date": null, "rate": null, "mrp": null}]}\n'
+    '"quantity": null, "days": null, "date": null, "rate": null, "mrp": null, "discount": null}]}\n'
     "Rules:\n"
     "- Use ONLY what the vendor wrote. Never guess or calculate a number.\n"
     "- quantity: only when he says he has a specific number (sirf 3, 4 piece, 2 set). Otherwise null.\n"
     "- days: delivery time in days if said (kal=1, parso=2, aaj/ready=0, hafta/week=7, 2 hafte=14). Otherwise null.\n"
     "- date: YYYY-MM-DD only if he names a date (20 sep tak). Otherwise null.\n"
     "- rate: price per piece only if he states one. mrp: only if he says MRP.\n"
+    "- discount: percent off MRP only if he states one (10%, 10 off, discount 10). Otherwise null.\n"
     "- If he answers for all parts together (sab mil jayega 5 din), give an answer for every asked part.\n"
     "- Leave out a part he does not mention.\n"
     "- If the message is a question, a greeting, or you cannot tell, set unclear true and answers []."
@@ -155,7 +156,10 @@ def read(text: str, lines: list[tuple[int, str, int]], today: date, want_rate: b
         quantity = traced(answer.get("quantity"))
         rate = traced(answer.get("rate")) if want_rate else None
         mrp = traced(answer.get("mrp"))
-        if quantity is False or rate is False or mrp is False:
+        discount = traced(answer.get("discount"))
+        if isinstance(discount, Decimal) and not (0 <= discount <= 100):
+            discount = False
+        if quantity is False or rate is False or mrp is False or discount is False:
             logger.info("AI reply reader returned a number the vendor never wrote -- not used (%s).", provider)
             return None
 
@@ -187,6 +191,7 @@ def read(text: str, lines: list[tuple[int, str, int]], today: date, want_rate: b
             tat_days=tat,
             quoted_rate=rate,
             mrp=mrp,
+            discount_pct=discount,
         )
     if out:
         logger.info("AI reply reader (%s) read %d line(s) the fixed rules could not.", provider, len(out))

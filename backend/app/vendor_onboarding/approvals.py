@@ -63,25 +63,79 @@ def _publish(level: str, title: str, message: str) -> None:
 # --------------------------------------------------------------------------
 
 
+def _v(answers: dict, key: str) -> str | None:
+    value = answers.get(key)
+    if value in (None, "", []):
+        return None
+    return format_answer(key, value)
+
+
+def _section(title: str, rows: list[tuple[str, str | None]]) -> list[str]:
+    rows = [(label, value) for label, value in rows if value]
+    if not rows:
+        return []
+    return ["", f"*{title}*", *(f"• {label}: {value}" for label, value in rows)]
+
+
 def vendor_summary(request: m.VendorRegistrationRequest) -> str:
-    answers = request.answers or {}
-    lines = [f"New vendor registration {_code(request)}", ""]
-    for question in QUESTIONS:
-        value = answers.get(question.key)
-        if value not in (None, "", []):
-            lines.append(f"{question.label}: {format_answer(question.key, value)}")
+    """Every detail of the vendor, grouped so an approver can check it at a
+    glance on a phone (12 Nov 2026: "well formatted and easy to understand")."""
+    a = request.answers or {}
     gst = request.gst_data or {}
     if gst:
-        lines.append(f"\nGST portal: {gst.get('legal_name') or '-'} — {gst.get('status') or '-'}")
+        gst_line = f"✅ {gst.get('status') or 'checked'} on GST portal"
+        if gst.get("legal_name"):
+            gst_line += f" — {gst['legal_name']}"
         if gst.get("registration_date"):
-            lines.append(f"Registered since {gst['registration_date']}")
+            gst_line += f" (since {gst['registration_date']})"
     else:
-        lines.append("\nGST portal: not verified online (checksum OK)")
-    answers = request.answers or {}
-    if answers.get("_on_behalf"):
-        lines.append(f"Filled by {answers.get('_created_by') or request.whatsapp_number} (purchase team) on behalf of the vendor")
+        gst_line = "⚠️ not verified online (format and check digit OK)"
+    credit = ", ".join(x for x in (
+        f"{a['credit_days']} days" if a.get("credit_days") else None,
+        f"limit ₹{a['credit_limit']}" if a.get("credit_limit") else None,
+    ) if x) or None
+    lines = [f"🆕 *New vendor for approval — {_code(request)}*", f"*{a.get('vendor_name') or request.vendor_name or '-'}*"]
+    lines += _section("🏢 Company", [
+        ("GSTIN", _v(a, "gstin")),
+        ("GST check", gst_line),
+        ("PAN", _v(a, "pan")),
+        ("Vendor type", _v(a, "vendor_type")),
+        ("Address", _v(a, "address")),
+    ])
+    lines += _section("📞 Contact", [
+        ("Person", _v(a, "contact_person")),
+        ("Mobile", _v(a, "mobile")),
+        ("Email", _v(a, "email")),
+    ])
+    lines += _section("🚗 Brands", [
+        ("Supplies", _v(a, "brands_supplied")),
+        ("Discount", _v(a, "brand_discounts")),
+    ])
+    lines += _section("🏦 Bank", [
+        ("Account holder", _v(a, "account_holder")),
+        ("Bank", _v(a, "bank_name")),
+        ("Account no.", _v(a, "account_number")),
+        ("IFSC", _v(a, "ifsc")),
+    ])
+    lines += _section("📋 Terms", [
+        ("Credit", credit),
+        ("Dispatch", _v(a, "dispatch_mode")),
+        ("Freight", _v(a, "freight_terms")),
+        ("Transporter", _v(a, "transporter")),
+        ("Lead time", f"{a['lead_time_days']} days" if a.get("lead_time_days") else None),
+        ("Min. order", f"₹{a['min_order_value']}" if a.get("min_order_value") else None),
+        ("Returns", _v(a, "return_policy")),
+    ])
+    lines += _section("🖥️ Dealer Portal", [
+        ("Also add as customer", _v(a, "also_customer") or "Nahi (not asked)"),
+    ])
+    if a.get("remarks"):
+        lines += _section("📝 Remarks", [("Note", _v(a, "remarks"))])
+    if a.get("_on_behalf"):
+        filled = f"{a.get('_created_by') or request.whatsapp_number} (purchase team) for the vendor"
     else:
-        lines.append(f"Filled by the vendor from WhatsApp {request.whatsapp_number}")
+        filled = f"the vendor itself, from WhatsApp {request.whatsapp_number}"
+    lines += ["", f"👤 Filled by {filled}"]
     return "\n".join(lines)
 
 
@@ -89,24 +143,114 @@ def _code(request: m.VendorRegistrationRequest) -> str:
     return f"VR-{request.id}"
 
 
-def request_vendor_approval(request: m.VendorRegistrationRequest, session: Session) -> None:
-    from core.services import vendor_service
+_BUTTON = re.compile(r"^\s*VRBTN\s+(?P<verb>APPROVE|REJECT)\s+(?P<id>\d+)\s*$", re.IGNORECASE)
+
+
+def _buttons(row_id: int) -> list[tuple[str, str]]:
+    return [(f"VRBTN APPROVE {row_id}", "✅ Approve"), (f"VRBTN REJECT {row_id}", "❌ Reject")]
+
+
+def _reminder_line(request: m.VendorRegistrationRequest) -> str:
+    since = request.submitted_at or request.created_at
+    when = f" since {since:%d %b, %I:%M %p}" if since else ""
+    return f"🔔 *Reminder* — this vendor is still waiting for your approval{when}."
+
+
+def send_approval_card(
+    number: str, request: m.VendorRegistrationRequest, warning: str | None = None, *, reminder: bool = False
+) -> None:
+    """The vendor's details with APPROVE / REJECT buttons. Buttons need the
+    24-hour window (and the Meta number): outside it the approved template
+    reaches him first and the details follow as text with the typed replies,
+    exactly as before. Never raises."""
+    from backend.app.integrations.whatsapp import outbound
 
     code = _code(request)
-    text = vendor_summary(request)
-    similar = vendor_service.get_vendor_by_name(request.vendor_name or "", session)
-    if similar is not None:
-        text += f"\n\n⚠️ A vendor named '{similar.name}' already exists in ProcureHub — check it is not a duplicate."
-    text += f"\n\nReply APPROVE {code} or REJECT {code} <reason>."
-    if not settings.approver_numbers:
-        logger.warning("%s submitted but VENDOR_APPROVER_NUMBERS is empty -- nobody was asked.", code)
+    name = settings.honorific(number)
+    details = vendor_summary(request) + (f"\n\n{warning}" if warning else "")
+    if reminder:
+        details = _reminder_line(request) + "\n\n" + details
+    typed = f"Ya likhiye: APPROVE {code} / REJECT {code}"
+    if outbound.in_service_window(number):
+        body = (f"Namaste {name},\n" if name else "") + details
+        try:
+            client = WhatsAppClient(whatsapp_settings)
+            if len(body) <= 1024:
+                client.send_button_message(number, body, _buttons(request.id), footer=typed)
+            else:  # too long for one card: the details, then a short card
+                send_reply_safe(number, body)
+                client.send_button_message(
+                    number, f"{code} — *{request.vendor_name}*\nApprove karein?", _buttons(request.id), footer=typed
+                )
+            return
+        except Exception:  # noqa: BLE001 -- fall back to text below
+            logger.exception("%s: approval buttons to %s failed -- sending text.", code, number)
     notify(
-        settings.approver_numbers,
-        text,
+        [number],
+        details + f"\n\nReply APPROVE {code} or REJECT {code} <reason>.",
         template=settings.approval_template,
         params=[code, f"{request.vendor_name} ({request.gstin})"],
     )
+
+
+def request_vendor_approval(request: m.VendorRegistrationRequest, session: Session, *, reminder: bool = False) -> None:
+    from core.services import vendor_service
+
+    code = _code(request)
+    similar = vendor_service.get_vendor_by_name(request.vendor_name or "", session)
+    warning = None
+    if similar is not None:
+        warning = f"⚠️ A vendor named '{similar.name}' already exists in ProcureHub — check it is not a duplicate."
+    if not settings.approver_numbers:
+        logger.warning("%s submitted but VENDOR_APPROVER_NUMBERS is empty -- nobody was asked.", code)
+    for number in settings.approver_numbers:
+        send_approval_card(number, request, warning, reminder=reminder)
     _publish("info", f"Vendor registration {code}", f"{request.vendor_name} is waiting for approval.")
+
+
+# Reject tapped -> the approver's NEXT message is the reason (or SKIP).
+# In memory on purpose: lost on a restart, he can still type REJECT VR-n.
+_REASON_WAIT_SECONDS = 15 * 60
+_awaiting_reason: dict[str, tuple[int, float]] = {}
+
+
+def _button_tap(sender: str, verb: str, row_id: int, session: Session) -> list[str]:
+    import time
+
+    if verb == "approve":
+        _awaiting_reason.pop(sender, None)
+        return _decide_vendor(sender, "approve", row_id, "", session)
+    if sender not in settings.approver_numbers:
+        return ["Only the vendor approvers can approve or reject vendor registrations."]
+    request = session.get(m.VendorRegistrationRequest, row_id)
+    if request is None:
+        return [f"There is no vendor registration VR-{row_id}."]
+    if request.status != m.REG_AWAITING_APPROVAL:
+        who = request.decided_by or "someone"
+        return [f"VR-{row_id} ({request.vendor_name}) was already decided by {who}: {request.status.replace('_', ' ')}."]
+    _awaiting_reason[sender] = (row_id, time.monotonic())
+    return [f"❌ VR-{row_id} ({request.vendor_name}) reject karne ka *reason* likhiye — vendor ko bheja jayega.\n"
+            "Bina reason ke reject: *SKIP*\nGalti se dabaya? *CANCEL* likhiye."]
+
+
+def _reason_reply(sender: str, text: str | None, session: Session) -> list[str] | None:
+    import time
+
+    waiting = _awaiting_reason.get(sender)
+    if not waiting:
+        return None
+    row_id, at = waiting
+    _awaiting_reason.pop(sender, None)
+    if time.monotonic() - at > _REASON_WAIT_SECONDS:
+        return None
+    if parse_reply(text) or _BUTTON.match(text or ""):
+        return None  # a fresh decision: handled normally
+    reason = " ".join((text or "").split())
+    if reason.lower() in {"cancel", "galti", "no", "nahi"}:
+        return [f"Theek hai, VR-{row_id} reject nahi kiya. Abhi bhi approval ke liye ruka hai."]
+    if reason.lower() in {"skip", "-", "no reason"}:
+        reason = ""
+    return _decide_vendor(sender, "reject", row_id, reason, session)
 
 
 def _locked(model, row_id: int, session: Session):
@@ -286,6 +430,12 @@ def _bare_decision(sender: str, text: str | None, session: Session) -> list[str]
 
 def handle_reply(sender: str, text: str | None, session: Session) -> list[str] | None:
     """Replies for the sender when `text` is a decision, else None (not ours)."""
+    button = _BUTTON.match(text or "")
+    if button:
+        return _button_tap(sender, button.group("verb").lower(), int(button.group("id")), session)
+    reason = _reason_reply(sender, text, session)
+    if reason is not None:
+        return reason
     parsed = parse_reply(text)
     if parsed is None:
         return _bare_decision(sender, text, session)

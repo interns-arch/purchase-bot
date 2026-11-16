@@ -102,6 +102,14 @@ QUESTIONS: list[Question] = [
         "ifsc", "IFSC code", "IFSC code of the branch?",
         lambda value, _a: v.ifsc(value),
     ),
+    # 12 Nov 2026: the Portal's vendor/create takes also_add_as_customer, and
+    # the user wants it asked every time (Haan -> true, Nahi -> false).
+    Question(
+        "also_customer", "Also add as customer",
+        "Is vendor ko Dealer Portal par customer bhi banana hai? (Also add as a customer?)",
+        lambda value, _a: v.haan_nahi(value),
+        choices=lambda: ["Haan", "Nahi"],
+    ),
     Question(
         "pan", "PAN", "Your PAN number?",
         lambda value, answers: v.pan(value, gstin_value=answers.get("gstin")), optional=True,

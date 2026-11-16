@@ -964,3 +964,43 @@ body { font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI"
 .activity__kind--posted, .activity__kind--posted-file, .activity__kind--acknowledged { color: #15803d; }
 .activity__kind--stock-request, .activity__kind--group-created { color: #1d4ed8; }
 .activity__what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+
+/* Vertical side menu (12 Nov 2026) -- replaces the top menu, which ran off
+   the right edge once it had ten tabs. */
+.app-shell--side { display: block; min-height: 100vh; }
+.sidenav {
+  position: fixed; top: 0; left: 0; bottom: 0; width: 224px; z-index: 30;
+  display: flex; flex-direction: column; gap: 12px; padding: 16px 12px;
+  background: #fff; border-right: 1px solid var(--color-border); overflow-y: auto;
+}
+.sidenav__brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--color-text); text-decoration: none; white-space: nowrap; padding: 0 8px; }
+.sidenav__logo { width: 28px; height: 28px; border-radius: 8px; background: var(--color-primary); color: #fff; display: grid; place-items: center; font-size: 0.9rem; flex: none; }
+.sidenav__brand-sub { font-weight: 500; color: var(--color-text-muted); }
+.sidenav__links { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.sidenav__link {
+  display: block; padding: 9px 12px; border-radius: 8px; color: var(--color-text-muted);
+  font-weight: 500; text-decoration: none; border-left: 3px solid transparent;
+}
+.sidenav__link:hover { background: #f3f4f6; color: var(--color-text); }
+.sidenav__link--active { background: var(--color-info-bg); color: var(--color-primary); font-weight: 600; border-left-color: var(--color-primary); }
+.sidenav__section { margin: 14px 12px 4px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-muted); }
+.sidenav__status { align-self: flex-start; margin-left: 8px; }
+.sidebar-top { display: none; }
+.sidenav__backdrop { display: none; }
+.app-shell--side .app-main { margin-left: 224px; max-width: 1400px; }
+.app-shell--side .app-content { padding: 14px 24px 48px; }
+
+@media (max-width: 900px) {
+  .sidebar-top {
+    display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 20;
+    height: 52px; padding: 0 12px; background: #fff; border-bottom: 1px solid var(--color-border);
+  }
+  .sidebar-top__toggle { border: 1px solid var(--color-border); background: #fff; border-radius: 8px; width: 38px; height: 38px; font-size: 1.1rem; cursor: pointer; }
+  .sidenav { transform: translateX(-100%); transition: transform 0.18s ease; box-shadow: 0 8px 24px rgba(16, 24, 40, 0.18); }
+  .app-shell--menu-open .sidenav { transform: none; }
+  .sidenav__backdrop { display: block; position: fixed; inset: 0; z-index: 25; background: rgba(15, 23, 42, 0.35); }
+  .app-shell--side .app-main { margin-left: 0; }
+  .app-shell--side .app-content { padding: 12px 16px 40px; }
+  .page-head { padding: 16px 16px 0; }
+}

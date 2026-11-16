@@ -80,7 +80,7 @@ def lookup(sender: str, session: Session) -> RegisteredParty | None:
         )
     ).scalar_one_or_none()
     if row is None:
-        return None
+        return _poc(number, session)
     if row.vendor_id is not None:
         vendor = session.get(Vendor, row.vendor_id)
         if vendor is None:  # orphaned by a raw delete -- treat as unregistered
@@ -90,6 +90,26 @@ def lookup(sender: str, session: Session) -> RegisteredParty | None:
     if customer is None:
         return None
     return RegisteredParty("customer", customer.id, customer.name)
+
+
+def _poc(number: str, session: Session) -> RegisteredParty | None:
+    """A vendor POC number (Vendors page, POC tab) counts as the vendor.
+    Only when exactly ONE vendor has it -- a shared number is never guessed."""
+    try:
+        from backend.app.advance_orders.models import AdvanceVendorContact
+    except Exception:  # noqa: BLE001
+        return None
+    vendor_ids = set(session.execute(
+        select(AdvanceVendorContact.vendor_id).where(
+            AdvanceVendorContact.whatsapp_number == number,
+            AdvanceVendorContact.active.is_(True),
+            AdvanceVendorContact.treat_as_vendor.is_(True),
+        )
+    ).scalars())
+    if len(vendor_ids) != 1:
+        return None
+    vendor = session.get(Vendor, vendor_ids.pop())
+    return RegisteredParty("vendor", vendor.id, vendor.name) if vendor is not None else None
 
 
 class NumberAlreadyRegisteredError(ValueError):

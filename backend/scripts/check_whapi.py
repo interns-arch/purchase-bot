@@ -250,14 +250,16 @@ def main() -> int:
     check("both Ess Aay groups are read", {ESS_DELHI, ESS_NOIDA} <= whapi.allowed_groups())
     texts, files = whapi.parse({"messages": [
         msg(VENDOR, "919811111111", "bhai rate kam karo"),
-        msg(VENDOR, "919811111111", doc="closing stock 29.xls"),
+        msg(VENDOR, "919711175797", doc="closing stock 29.xls"),
+        msg(VENDOR, "919811111111", doc="someone else stock.xls"),
         msg(VENDOR, "919811111111", type="image", image={"id": "img-1"}),
         msg(VENDOR, "919289015770", doc="PO for Mohan.xlsx"),
         msg(VENDOR, "919217030408", doc="Alam ka PO.xlsx", from_me=True),
-        msg(ESS_NOIDA, "919822222222", doc="ess aay noida.xlsx"),
+        msg(ESS_NOIDA, "919811000111", doc="ess aay noida.xlsx"),
+        msg(ESS_NOIDA, "919822222222", doc="stranger in ess group.xlsx"),
     ]})
     check("vendor's chat is not answered", not texts)
-    check("only the vendors' own stock files are taken",
+    check("only the vendors' own stock files are taken (saved numbers only, 14 Nov 2026)",
           sorted((f.sender, f.filename) for f in files) == [("919711175797", "closing stock 29.xls"), ("919811000111", "ess aay noida.xlsx")])
     calls.clear()
     client.send_text_message("919711175797", "✅ Stock received successfully. 88 item(s) imported.")
@@ -364,9 +366,10 @@ def main() -> int:
     new_group = vendor_group.create_for_vendor("CT_NEW", "New   Vendor Spares", "9876500000")
     create = created_calls[0][2]
     check("group made with the vendor and the team",
-          create.get("subject") == "CarTrends 🤝 New Vendor Spares" and create.get("participants") == ["919876500000", "919289015770", "919217396458"])
+          create.get("subject") == "New Vendor Spares x CarTrends"
+          and create.get("participants") == ["919876500000", "919810238966", "919217396458", "919289015770", "919999492550"])
     check("saved as CT_NEW's group", whapi.vendor_group_codes().get(new_group) == "CT_NEW")
-    check("welcome posted in it", any(c[1] == "/messages/text" and "swagat" in c[2].get("body", "") for c in created_calls))
+    check("welcome posted in it", any(c[1] == "/messages/text" and "bahut shukriya" in c[2].get("body", "") for c in created_calls))
     check("vendor not added (privacy) -> gets the invite link", invites and "chat.whatsapp.com/AbCd123" in invites[0][1])
     created_calls.clear()
     check("a vendor who already has a group gets no second one", vendor_group.create_for_vendor("CT_NEW", "New Vendor Spares", "9876500000") is None and not created_calls)
@@ -451,6 +454,42 @@ def main() -> int:
     check("the purchase workbook for the team is sent direct, not to the group", direct_seen == [True])
     check("Prateek sir (team group member) -> would go direct inside it",
           (lambda: (lambda t: (whapi.route_for("919999492550"), whapi._direct.reset(t))[0])(whapi._direct.set(True)))() is None)
+
+    print("\n[17] PO-GRP / PO-MST numbers never reach a vendor group")
+    po_text = ("🧾 PO-MST created\nPO-MST: PO-MST-2026-0075\nSource PO-GRP: PO-GRP-2026-1049\n"
+               "Part: 6N2914A132AF x1")
+    calls.clear()
+    whapi._recent.clear()
+    whapi._post(VENDOR, po_text)
+    body = calls[0][2]["body"] if calls else ""
+    check("PO lines cut in a vendor group, the rest kept",
+          "6N2914A132AF" in body and "PO-GRP" not in body and "PO-MST-2026" not in body and "po grp" not in body.lower())
+    calls.clear()
+    whapi._post(VENDOR, "Ref po grp 2026 1049")
+    check("a message that is only a PO number is not sent", not calls)
+    calls.clear()
+    whapi._post(TEAM, po_text)
+    check("the team group still gets the PO numbers", calls and "PO-GRP-2026-1049" in calls[0][2]["body"])
+    calls.clear()
+    whapi._recent.clear()
+    whapi.send_document(VENDOR, b"x", "PO-MST-2026-0075.pdf", "application/pdf", "PO")
+    check("a file named after a PO-MST is not sent to a vendor group", not any(c[2].get("to") == VENDOR for c in calls))
+    calls.clear()
+    whapi._recent.clear()
+    real_quiet = whapi._quiet_vendor_group
+    whapi._quiet_vendor_group = lambda chat_id: False
+    whapi.send_document(VENDOR, b"z", "PO-MST-2026-0075.pdf", "application/pdf", "PO")
+    whapi.send_document(VENDOR, b"w", "list.xlsx", "application/x", "Source PO-GRP: PO-GRP-2026-1049\nAaj ki list")
+    whapi._quiet_vendor_group = real_quiet
+    check("even outside quiet mode: PO file blocked, caption cleaned",
+          len(calls) == 1 and calls[0][2]["filename"] == "list.xlsx" and "PO-GRP" not in (calls[0][2].get("caption") or ""))
+    calls.clear()
+    whapi.send_document(TEAM, b"y", "stock.xlsx", "application/x", "Source PO-GRP: PO-GRP-2026-1049")
+    check("team group document caption keeps the PO number", calls and "PO-GRP-2026-1049" in (calls[0][2].get("caption") or ""))
+    calls.clear()
+    whapi.send_text(VENDOR, "Enquiry for PO-GRP-2026-1049\n1. 6N2914A132AF x1")
+    sent = " ".join(c[2].get("body", "") for c in calls if c[2].get("to") == VENDOR)
+    check("send_text to the vendor group never carries a PO-GRP", "PO-GRP" not in sent)
 
     print("\n[15] every group action lands in the live feed")
     from sqlalchemy import select

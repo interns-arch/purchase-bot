@@ -433,7 +433,15 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                     session, now,
                 )
                 continue
-        candidates = [v for v in _candidates(order, brand, lines, session) if v.id not in asked][:slots]
+        candidates = [v for v in _candidates(order, brand, lines, session) if v.id not in asked]
+        if _is_portal(order):
+            from backend.app.portal_procurement.config import settings as portal
+
+            if not portal.live():
+                # Pilot: only the chosen vendors are asked (none chosen -> nobody).
+                chosen = portal.pilot()["vendors"]
+                candidates = [v for v in candidates if v.id in chosen]
+        candidates = candidates[:slots]
         if not candidates:
             if open_queries:
                 continue  # somebody we already asked may still answer
@@ -592,8 +600,25 @@ def _question_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], want_
             f"Namaste, Cartrends purchase desk se. Order (ref DS-{order.id}):\n{rows}{by}\n\n"
             'Bhej sakte hain? Reply: *ok* (bhej denge, kitne din mein), *nahi*, ya *sirf 3* (agar kam hai).'
         )
+    if cfg.ask_mode == "steps":
+        # One thing at a time (User, 13 Nov 2026): pieces first; MRP, discount
+        # and days follow one by one as he answers (steps.py).
+        from backend.app.advance_orders import steps
+
+        return steps.first_question(lines)
     rows = "\n".join(f"{i + 1}. {line.part_number} x{line.qty}" for i, line in enumerate(lines))
     by = f"\n{_fmt_day(order.needed_by)} tak chahiye." if order.needed_by else ""
+    if cfg.ask_mrp_discount:
+        # Three questions per part (User, 13 Nov 2026); the answers become the
+        # PO-MST's MRP, discount and TAT on the Dealer Portal.
+        first = lines[0].part_number if lines else "PART"
+        if len(lines) > 1:
+            example = f'Har part ke aage likhiye, jaise: "{first} MRP 1200, 10%, 3 din" ya "{first} nahi".'
+        else:
+            example = 'Jaise: "MRP 1200, 10%, 3 din" ya "nahi".'
+        ask = ("Ye parts mil jayenge? Har part ke liye batayiye:\n"
+               "• MRP kitna hai\n• Discount kitna denge (%)\n• Kitne din mein aa jayega")
+        return f"Namaste, Cartrends purchase desk se.\n{ask}\n\n{rows}{by}\n\n{example}"
     if want_rate:
         # No standing discount on file, so the rate is asked for -- beside
         # each part, because a loose rate across several parts cannot be read.
@@ -696,6 +721,10 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         if delivered:
             q.status = m.Q_SENT
             q.sent_at = now
+            if cfg.ask_mode == "steps" and order.kind != m.KIND_DEALER_STOCK:
+                from backend.app.advance_orders import steps
+
+                steps.start(q)
             # Both clocks run in VENDOR HOURS only -- no vendor is timed out
             # overnight while he is asleep.
             q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
@@ -791,6 +820,13 @@ def tick(session: Session, now: datetime | None = None) -> None:
     for q in overdue:
         if not _workable(session.get(m.AdvanceOrder, q.advance_order_id)):
             continue
+        if q.step and q.step not in ("pcs", "done") and q.draft:
+            # He said he has it, then went quiet halfway: what he did say is
+            # kept (the standing discount fills a missing one).
+            _finish_steps(session.get(m.AdvanceOrder, q.advance_order_id), q, session, now)
+            logger.info("Advance order %s: vendor %s stopped at %s -- partial answer kept.",
+                        q.advance_order_id, q.vendor_id, q.step)
+            continue
         q.status = m.Q_TIMEOUT
         logger.info("Advance order %s: vendor %s did not answer in time.", q.advance_order_id, q.vendor_id)
     session.flush()
@@ -843,7 +879,7 @@ def _send_followups(session: Session, now: datetime) -> None:
         group = _vendor_group(q.vendor_id, session)
         if group:
             try:
-                message_id = _send_group(group, _followup_text(order, lines, done + 1))
+                message_id = _send_group(group, _reminder_text(q, order, lines, done + 1))
                 if isinstance(message_id, str) and message_id:
                     ids[message_id] = group
             except Exception:  # noqa: BLE001
@@ -861,7 +897,7 @@ def _send_followups(session: Session, now: datetime) -> None:
                         ],
                     )
                 else:
-                    message_id = _send_text(number, _followup_text(order, lines, done + 1))
+                    message_id = _send_text(number, _reminder_text(q, order, lines, done + 1))
                 if isinstance(message_id, str) and message_id:
                     ids[message_id] = number
             except Exception:  # noqa: BLE001 -- the next number is tried
@@ -1189,6 +1225,95 @@ def _vendor_redirect(
     return True
 
 
+def _reminder_text(q: m.AdvanceVendorQuery, order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], n: int) -> str:
+    if not q.step or q.step == "done":
+        return _followup_text(order, lines, n)
+    from backend.app.advance_orders import steps
+
+    draft = q.draft or {}
+    have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")] or lines
+    return steps.reminder(q.step, lines if q.step == "pcs" else have)
+
+
+def _ask_vendor(q: m.AdvanceVendorQuery, number: str, body: str, session: Session) -> None:
+    """The next step's question, where the first one went: his group, or his chat."""
+    group = _vendor_group(q.vendor_id, session)
+    via_group = bool(group) and any(str(v).endswith("@g.us") for v in (q.message_ids or {}).values())
+    try:
+        message_id = _send_group(group, body) if via_group else _send_text(number, body)
+    except Exception:  # noqa: BLE001 -- the desk sees the open question
+        logger.exception("Advance order: could not ask vendor %s the next step.", q.vendor_id)
+        return
+    if isinstance(message_id, str) and message_id:
+        ids = dict(q.message_ids or {})
+        ids[message_id] = group if via_group else number
+        q.message_ids = ids
+
+
+def _finish_steps(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, session: Session, now: datetime,
+                  text: str | None = None) -> None:
+    """Every step answered (or his time ran out): record the quotes, decide."""
+    from backend.app.advance_orders import steps
+
+    terms = quotes.brand_terms(q.vendor_id, q.brand, session)
+    draft = q.draft or {}
+    q.status = m.Q_REPLIED
+    q.step = "done"
+    q.replied_at = q.replied_at or now
+    if text:
+        q.reply_text = text[:1000]
+    for line in order.lines:
+        entry = draft.get(str(line.id))
+        if not isinstance(entry, dict) or line.status != m.LINE_ASKING:
+            continue
+        quotes.record(
+            order_id=order.id, line=line, vendor_id=q.vendor_id, answer=steps.answer_for(entry, now.date()),
+            terms=terms, session=session, query_id=q.id, raw_reply=f"steps: {entry}",
+        )
+    session.flush()
+    before = _snapshot(order)
+    _advance(order, session, now)
+    _notify_if_changed(order, before, session)
+
+
+def _handle_step(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.AdvanceOrderLine], number: str,
+                 text: str, terms, session: Session, now: datetime) -> bool:
+    from backend.app.advance_orders import steps
+
+    step = q.step
+    if not steps.advance_draft(q, text, lines, now.date()):
+        draft = dict(q.draft or {})
+        if draft.get("_again") != step:
+            # Asked ONE thing; say once more what we need.
+            draft["_again"] = step
+            q.draft = draft
+            have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")] or lines
+            body = steps.first_question(lines) if step == "pcs" else steps.question(step, have)
+            _ask_vendor(q, number, "Sir, samajh nahi aaya. " + body[0].lower() + body[1:], session)
+        else:
+            vendor = session.get(Vendor, q.vendor_id)
+            _tell_internal(
+                session,
+                f"Advance order #{order.id}: {vendor.name if vendor else 'vendor'} ka jawab ({step}) samajh nahi aaya:\n"
+                f"\"{text[:300]}\"\nParts: {', '.join(line.part_number + ' x' + str(line.qty) for line in lines)}",
+            )
+        return True
+    q.replied_at = now
+    nxt = steps.next_step(q.draft, lines)
+    if nxt == "done":
+        _finish_steps(order, q, session, now, text)
+        return True
+    q.step = nxt
+    # His clock restarts for the new question; reminders count afresh.
+    q.sent_at = now
+    q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
+    q.followups_sent = 0
+    have = [line for line in lines if (q.draft.get(str(line.id)) or {}).get("available")]
+    _ask_vendor(q, number, steps.question(nxt, have), session)
+    session.flush()
+    return True
+
+
 def handle_vendor_text(sender: str, text: str, session: Session, now: datetime | None = None) -> bool:
     """True when this text was a reply to an open advance-order question (and
     so must not be handled as anything else)."""
@@ -1269,9 +1394,12 @@ def handle_vendor_text(sender: str, text: str, session: Session, now: datetime |
     if _vendor_redirect(order, q, lines, number, text, session, now):
         return True
     terms = quotes.brand_terms(q.vendor_id, q.brand, session)
+    if q.step and q.step != "done":
+        return _handle_step(order, q, lines, number, text, terms, session, now)
     want_rate = quotes.wants_rate(terms)
     answers = parse_vendor_reply(
-        text, [(line.id, line.part_number, line.qty) for line in lines], now.date(), want_rate
+        text, [(line.id, line.part_number, line.qty) for line in lines], now.date(), want_rate,
+        want_money=cfg.ask_mrp_discount,
     )
     # The fixed rules could not read it all -- ask the AI, whose answer is
     # kept only where every number is in the vendor's own words (ai_reply).

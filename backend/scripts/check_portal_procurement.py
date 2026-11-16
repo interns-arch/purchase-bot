@@ -25,6 +25,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'check.db').as_posix()}"
 os.environ["ADVANCE_ORDERS_ENABLED"] = "false"
 os.environ["PURCHASE_APPROVAL_MODE"] = "true"  # as on the server: must not hold Portal demand
 os.environ["PORTAL_PROCUREMENT_ENABLED"] = "true"
+os.environ["PORTAL_PROCUREMENT_MODE"] = "live"  # the pilot is checked on its own in [14]
 os.environ["PORTAL_PROCUREMENT_USERNAME"] = "svc-test"
 os.environ["PORTAL_PROCUREMENT_PASSWORD"] = "pw-test"
 os.environ["PORTAL_PROCUREMENT_NOTIFY_NUMBERS"] = "919000000099"
@@ -80,6 +81,7 @@ class FakePortal:
         self.push_mode = "ok"
         self.pdf_mode = "ok"
         self.unauthorized = 0  # answer this many requests with 401
+        self.login_refused = False
         self.headers_seen: list[dict] = []
         self.next_po = 70
 
@@ -87,7 +89,7 @@ class FakePortal:
         self.rows[sol] = {
             "row_type": "source", "source_order_line_id": sol, "source_po_group_id": po_grp or f"PO-GRP-{sol}",
             "part_no": part, "brand": brand, "planned_quantity": qty, "procurement_stage": "pending",
-            "order_date": "2026-11-10", "buyer_dealer_id": 4587,
+            "order_date": "2026-11-10", "buyer_dealer_id": 4587, "editable": True, "is_closed": False,
         }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -98,18 +100,22 @@ class FakePortal:
         self.headers_seen.append(dict(request.headers))
         body = json.loads(request.content or b"{}") if request.method == "POST" else {}
         if path == "/auth/login":
+            if self.login_refused:
+                return httpx.Response(401, json={"detail": "INVALID_CREDENTIALS"})
             return httpx.Response(200, json={"access_token": "jwt-1", "expires_in": 28800})
         if self.unauthorized > 0:
             self.unauthorized -= 1
             return httpx.Response(401, json={"detail": "expired"})
         if path == "/procurement/active" and request.method == "GET":
-            if q.get("include_po_mst") == "true":
-                items = [{"row_type": "po_mst", "po_mst": a["po_mst"], "quote_reference": a["quote_reference"],
-                          "supplier_dealer_id": a["dealer"], "planned_quantity": a["qty"]} for a in self.allocs]
-                return httpx.Response(200, json={"items": items, "total": len(items)})
             items = [r for r in self.rows.values()
                      if (not q.get("part_no") or r["part_no"] == q["part_no"])
                      and (not q.get("po_group_id") or r["source_po_group_id"] == q["po_group_id"])]
+            if q.get("include_po_mst") == "true":
+                items = items + [{"row_type": "master", "po_mst": a["po_mst"], "po_group_id": a["po_mst"],
+                                  "quote_reference": a["quote_reference"], "source_order_line_id": a["sol"],
+                                  "allocation_id": a["allocation_id"], "editable": a.get("editable", False),
+                                  "supplier_dealer_id": a["dealer"], "planned_quantity": a["qty"]}
+                                 for a in self.allocs]
             off, lim = int(q.get("offset", 0)), int(q.get("limit", 500))
             return httpx.Response(200, json={"items": items[off:off + lim], "total": len(items)})
         if path.startswith("/procurement/active/") and path.endswith("/vendors"):
@@ -126,7 +132,8 @@ class FakePortal:
             if row["planned_quantity"] <= 0:
                 row["procurement_stage"] = "allocated"
             self.allocs.append({"po_mst": po, "dealer": body["supplier_dealer_id"], "qty": body["planned_quantity"],
-                                "quote_reference": body.get("quote_reference")})
+                                "quote_reference": body.get("quote_reference"),
+                                "sol": body["source_order_line_id"], "allocation_id": 800 + len(self.allocs)})
             self.parts_by_po[po] = [row["part_no"]]
             if self.allocate_mode == "timeout":
                 raise httpx.ReadTimeout("lost", request=request)
@@ -146,7 +153,9 @@ class FakePortal:
             po = path.rsplit("/", 1)[1]
             if po not in self.approval:
                 return httpx.Response(404, json={"detail": "none"})
-            return httpx.Response(200, json={"status": self.approval[po], "reason": "stock already in transit"})
+            # Live shape (16 Nov 2026): the status sits under "approval".
+            return httpx.Response(200, json={"approval": {"status": self.approval[po],
+                                                          "reason": "stock already in transit"}})
         if path == "/purchase-orders/push-to-odoo":
             if self.push_mode == "409":
                 return httpx.Response(409, json={"detail": "missing Odoo partner"})
@@ -208,6 +217,7 @@ def main() -> int:
     cfg.quote_fanout = 50
     cfg.callback_url = ""
     cfg.followup_count = 0
+    cfg.ask_mode = "one"  # sections [1]-[16]: one message; [17] checks step-by-step
 
     portal = FakePortal()
     client = PortalClient(transport=httpx.MockTransport(portal.handler), sleep=lambda s: None,
@@ -320,7 +330,7 @@ def main() -> int:
     created = [b for to, b in sent if to == NOTIFY and "PO-MST created" in b]
     check("purchase user told the PO-MST was created, once, with its details",
           len(created) == 1 and first_po in created[0] and "86511C9000 x2" in created[0]
-          and "PO-GRP-12470" in created[0])
+          and "PO-GRP" not in created[0])
     check("...and nobody else got that message",
           not any("PO-MST created" in b for to, b in sent if to != NOTIFY))
     check("demand completed", demand(12470).state == m.COMPLETED)
@@ -360,7 +370,7 @@ def main() -> int:
     a = allocs(12472)
     check("Gamma won and is waiting for onboarding", len(a) == 1 and a[0].state == m.VENDOR_ONBOARDING_REQUIRED)
     check("no allocation was posted", len(portal.payloads) == calls_before)
-    check("purchase team alerted about onboarding", any(to == ALERT and "not set up on the Dealer Portal" in b
+    check("purchase team alerted about onboarding", any(to == ALERT and "onboarding needed" in b
                                                          for to, b in sent))
     portal.options[12472].append({"dealer_id": 31, "gstin": "07ABCDE1234F1Z5"})
     with get_session() as s:
@@ -488,22 +498,38 @@ def main() -> int:
           pdfs.count((NOTIFY, the_po)) == 1 and po(the_po).state == m.COMPLETED)
 
     # ------------------------------------------------------------------ 9
-    print("\n[9] 401: refreshed once; a second 401 stops the run")
+    print("\n[9] 401/403 are never retried; a refused login blocks all Portal calls")
+    from backend.app.portal_procurement import client as portal_client
+
     portal.unauthorized = 1
-    try:
-        client.get("/procurement/active", {"date_from": "2026-11-05", "date_to": "2026-11-11"})
-        check("one 401 -> re-login -> success", True)
-    except Exception:  # noqa: BLE001
-        check("one 401 -> re-login -> success", False)
-    portal.unauthorized = 5
+    gets = portal.calls[("GET", "/procurement/active")]
     logins = portal.calls[("POST", "/auth/login")]
     try:
-        client.get("/procurement/active", {})
-        check("two 401s -> AuthStopped", False)
+        client.get("/procurement/active", {"date_from": "2026-11-05", "date_to": "2026-11-11"})
+        check("401 -> AuthStopped", False)
     except AuthStopped:
-        check("two 401s -> AuthStopped", True)
-    check("no login loop (one extra login only)", portal.calls[("POST", "/auth/login")] == logins + 1)
+        check("401 -> AuthStopped", True)
+    check("...the request was NOT retried", portal.calls[("GET", "/procurement/active")] == gets + 1)
+    check("...and no re-login was attempted", portal.calls[("POST", "/auth/login")] == logins)
+    client.get("/procurement/active", {"date_from": "2026-11-05", "date_to": "2026-11-11"})
+    check("next run logs in fresh and works", portal.calls[("POST", "/auth/login")] == logins + 1)
+    portal.login_refused = True
+    portal.unauthorized = 1
+    for _ in range(2):
+        try:
+            client.get("/procurement/active", {})
+        except AuthStopped:
+            pass
+    logins = portal.calls[("POST", "/auth/login")]
+    check("refused login -> Portal calls blocked", bool(portal_client.blocked()))
+    try:
+        client.get("/procurement/active", {})
+    except AuthStopped:
+        pass
+    check("blocked: no further login attempts", portal.calls[("POST", "/auth/login")] == logins)
+    portal.login_refused = False
     portal.unauthorized = 0
+    portal_client._blocked = None
 
     # ------------------------------------------------------------------ 10
     print("\n[10] scope + secrets")
@@ -560,6 +586,186 @@ def main() -> int:
     check("group_only: vendor without a group is not asked", asked("919100000002") == before_beta)
     cfg.vendor_route = "group_first"
 
+    # ------------------------------------------------------------------ 13
+    print("\n[13] vendor-link import: ids not names, existing links win, dry run, idempotent")
+    from openpyxl import Workbook
+
+    from backend.app.portal_procurement import links
+
+    with get_session() as s:
+        new = {}
+        for key, name in (("D", "Delta Parts"), ("E", "Echo Auto"), ("F", "Foxtrot Motors"), ("G", "Golf Spares"),
+                          ("H", "Ark Vehicles Private Limited"), ("I", "India Parts"), ("J", "Juliet Auto"),
+                          ("K", "Kilo Motors"), ("L", "Lima Spares")):
+            v = Vendor(name=name, vendor_code=f"CT_{key}{key}")
+            s.add(v)
+            s.flush()
+            new[key] = v.id
+        s.add(am.VendorBrand(brand="HYUNDAI", vendor_id=new["D"], priority=1, discount_type=am.DISC_PERCENT,
+                             discount_pct=10))
+        s.add(am.AdvanceVendorContact(vendor_id=new["D"], whatsapp_number="919100000004"))
+        s.add(DealerPortalVendorMap(vendor_id=new["H"], vendor_name="Ark Vehicles Private Limited", dp_dealer_id=1709,
+                                    status=DealerPortalVendorMapStatus.CONFIRMED))
+        links.refresh_dealers(s, [
+            {"dealer_id": 40, "dealer_name": "Delta Parts"}, {"dealer_id": 41, "dealer_name": "Echo Auto Pvt"},
+            {"dealer_id": 42, "dealer_name": "Foxtrot Motors"}, {"dealer_id": 43, "dealer_name": "FOXTROT MOTORS"},
+            {"dealer_id": 44, "dealer_name": "Kilo Motors"}, {"dealer_id": 14, "dealer_name": "Ark Automotive"},
+            {"dealer_id": 1709, "dealer_name": "Ark Vehicles Private Limited"}, {"dealer_id": 27, "dealer_name": "Alpha"},
+            {"dealer_id": 28, "dealer_name": "Beta"}], "HYUNDAI")
+        map_before = sorted((x.vendor_id, x.dp_dealer_id, x.status.value)
+                            for x in s.execute(select(DealerPortalVendorMap)).scalars())
+
+    # A Portal line whose fastest vendor (Delta) is NOT linked yet -> onboarding needed.
+    portal.add_row(12481, "86522C9000", 1)
+    portal.options[12481] = [{"dealer_id": 27}, {"dealer_id": 40, "dealer_name": "Delta Parts"}]
+    run_poll()
+    reply("919100000004", "haan aaj")
+    reply("919100000001", "86522C9000 hai 5 din")  # Alpha has another open question too
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    run_steps(2)
+    a = allocs(12481)
+    check("unlinked winner -> onboarding needed, quote saved", len(a) == 1 and a[0].vendor_id == new["D"]
+          and a[0].state == m.VENDOR_ONBOARDING_REQUIRED and a[0].quoted_tat_days == 0)
+    check("...not given to the linked runner-up", not any(p["source_order_line_id"] == 12481 for p in portal.payloads))
+
+    sheet = _TMP / "links.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Vendor ID", "Code", "Bot vendor", "Suggested dealer ID", "Bot verdict",
+               "YOUR ANSWER (Y = suggested is right / dealer ID / N = not on Portal)"])
+    rows = [
+        (vendors["A"], "Alpha Motors", 99, "LIKELY", "Y"),        # linked (27): suggestion ignored
+        (new["H"], "Ark Vehicles Private Limited", 14, "ALREADY LINKED", "Y"),  # stays 1709
+        (new["D"], "Delta Parts", 40, "LIKELY", "Y"),             # new link by Y
+        (new["E"], "Echo Auto", 41, "LIKELY", ""),                # names differ -> not auto
+        (new["F"], "Foxtrot Motors", 42, "LIKELY", ""),           # twin Portal name -> not auto
+        (new["G"], "Golf Spares", 777, "NO MATCH", "777"),        # unknown dealer id -> rejected
+        (new["L"], "Lima Spares", 41, "CHECK", "41"),             # typed id -> link
+        (new["I"], "India Parts", 1, "NO MATCH", "N"),            # onboarding
+        (vendors["B"], "Beta Spares", 1, "LIKELY", "N"),          # N never deletes a link
+        (new["J"], "Juliet Auto", 44, "CHECK", ""),               # CHECK never auto-accepted
+        (new["K"], "Kilo Motors", 44, "LIKELY", ""),              # exact name -> auto with --accept-exact
+    ]
+    for vid, name, sug, verdict, ans in rows:
+        ws.append([vid, "", "RENAMED IN SHEET " + name, sug, verdict, ans])  # names in the sheet are ignored
+    wb.save(sheet)
+
+    with get_session() as s:
+        steps = {x.vendor_id: x for x in links.plan(links.read_sheet(str(sheet)), s, accept_exact=True)}
+        s.rollback()
+    act = lambda key: steps[vendors[key] if key in vendors else new[key]].action  # noqa: E731
+    check("linked vendor: Y suggestion ignored, existing kept", act("A") == links.KEEP)
+    check("vendor like 56: stays on 1709, never 14", act("H") == links.KEEP and steps[new["H"]].old_dealer == 1709)
+    check("Y links an unlinked vendor", act("D") == links.LINK and steps[new["D"]].proposed == 40)
+    check("names differ -> not auto-accepted", act("E") == links.REJECT)
+    check("two Portal dealers with that name -> not auto-accepted", act("F") == links.REJECT)
+    check("typed dealer id not in the Portal table -> rejected", act("G") == links.REJECT)
+    check("typed dealer id that exists -> linked", act("L") == links.LINK and steps[new["L"]].proposed == 41)
+    check("N -> onboarding required", act("I") == links.ONBOARD)
+    check("N on a linked vendor keeps the link", act("B") == links.KEEP)
+    check("CHECK row blank -> no change", act("J") == links.NOCHANGE)
+    check("exact-name LIKELY row auto-accepted", act("K") == links.LINK and steps[new["K"]].proposed == 44)
+    with get_session() as s:
+        check("dry run saved nothing", not s.execute(select(m.PortalVendorLink)).first())
+
+    with get_session() as s:
+        done = links.apply(links.plan(links.read_sheet(str(sheet)), s, accept_exact=True), s,
+                           source="links.xlsx", decided_by="check")
+    check("commit: 3 linked, 1 onboarding", done == {links.LINK: 3, links.ONBOARD: 1})
+    with get_session() as s:
+        again = links.plan(links.read_sheet(str(sheet)), s, accept_exact=True)
+        done2 = links.apply(again, s, source="links.xlsx", decided_by="check")
+        map_after = sorted((x.vendor_id, x.dp_dealer_id, x.status.value)
+                           for x in s.execute(select(DealerPortalVendorMap)).scalars())
+        check("idempotent: second import changes nothing", done2 == {links.LINK: 0, links.ONBOARD: 0})
+        check("stock-upload map untouched", map_before == map_after)
+        check("resolve(56-like) == 1709", links.resolve(new["H"], s) == 1709)
+
+    run_steps(2)
+    a = allocs(12481)
+    check("after linking, the saved quote becomes a PO-MST by itself",
+          a[0].state == m.PO_MST_CREATED and a[0].supplier_dealer_id == 40)
+
+    # ------------------------------------------------------------------ 14
+    print("\n[14] pilot mode: only the chosen line, only the chosen vendor")
+    from backend.app.portal_procurement.config import settings as portal_settings
+
+    portal_settings.mode = "pilot"
+    portal_settings.pilot_file = str(_TMP / "pilot.json")
+    portal_settings.pilot_lines = set()
+    portal.add_row(12482, "86523C9000", 1)
+    portal.add_row(12483, "86524C9000", 1)
+    portal.options[12482] = [{"dealer_id": 27}]
+    before = (len(sent), len(group_posts))
+    run_poll()
+    check("pilot with no lines chosen: nobody asked", (len(sent), len(group_posts)) == before)
+    (_TMP / "pilot.json").write_text(json.dumps({"parts": ["86523-C9000"], "vendors": [vendors["B"]]}))
+    run_poll()
+    check("only the pilot line is enquired", demand(12482).state == m.ENQUIRY_SCHEDULED
+          and demand(12483).state == m.DISCOVERED)
+    check("only the pilot vendor is asked", any(to == "919100000002" and "86523C9000" in b for to, b in sent)
+          and not any("86523C9000" in b for to, b in sent if to != "919100000002")
+          and not any("86523C9000" in b for _, b in group_posts))
+    check("pilot picked the line by PART NUMBER (a fresh advance order)", demand(12482).advance_order_id is not None)
+    portal_settings.mode = "live"
+
+    # ------------------------------------------------------------------ 15
+    print("\n[15] po_confirmed source lines are workable; a live PO-MST allocation is superseded")
+
+    def payload_for(sol):
+        return next((p for p in reversed(portal.payloads) if p.get("source_order_line_id") == sol), None)
+
+    def win_with_alpha(sol):
+        run_poll()
+        reply("919100000001", "haan 1 din")
+        reply("919100000002", "nahi")
+        reply("919100000003", "nahi")
+        run_steps(3)
+
+    portal.add_row(12490, "86530C9000", 1)
+    portal.rows[12490].update(procurement_stage="po_confirmed", supplier_dealer_id=21)
+    portal.add_row(12491, "86531C9000", 1)
+    portal.rows[12491].update(procurement_stage="po_confirmed", editable=False)
+    portal.add_row(12493, "86533C9000", 1)
+    portal.rows[12493].update(procurement_stage="received")
+    for sol in (12490, 12491, 12492, 12493):
+        portal.options[sol] = [{"dealer_id": 27}, {"dealer_id": 28}]
+    win_with_alpha(12490)
+    with get_session() as s:
+        known = {d.source_order_line_id for d in s.execute(select(m.PortalDemandLine)).scalars()}
+    check("po_confirmed + editable line is picked up", 12490 in known)
+    check("editable=false line is ignored", 12491 not in known)
+    check("other stages are ignored", 12493 not in known)
+    p = payload_for(12490) or {}
+    check("no live PO-MST allocation -> allocate WITHOUT allocation_id",
+          bool(p) and "allocation_id" not in p and p.get("supplier_dealer_id") == 27)
+    check("...and a PO-MST was created", allocs(12490)[0].state in (m.PO_MST_CREATED, m.COMPLETED,
+                                                                   m.KNOCKOFF_PREVIEWED, m.SAFE_KNOCKOFF_COMMITTED)
+          or demand(12490).state == m.COMPLETED)
+
+    portal.add_row(12492, "86532C9000", 1)
+    portal.rows[12492].update(procurement_stage="po_confirmed", supplier_dealer_id=21)
+    portal.allocs.append({"po_mst": "PO-MST-2026-0876", "dealer": 21, "qty": 1, "quote_reference": "OLD",
+                          "sol": 12492, "allocation_id": 876, "editable": True})
+    win_with_alpha(12492)
+    p = payload_for(12492) or {}
+    check("live editable PO-MST allocation -> allocate WITH its allocation_id (supersede)",
+          p.get("allocation_id") == 876 and p.get("supplier_dealer_id") == 27)
+
+    # re-fetch guard: the part changed on the Portal between the quote and the write
+    portal.add_row(12494, "86534C9000", 1)
+    portal.options[12494] = [{"dealer_id": 27}]
+    run_poll()
+    reply("919100000001", "haan 1 din")
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    portal.rows[12494]["part_no"] = "99999X0000"
+    n_before = len(portal.payloads)
+    run_steps(3)
+    check("part changed before the write -> nothing allocated", len(portal.payloads) == n_before
+          and allocs(12494) and allocs(12494)[0].state == m.ALLOCATION_CANCELLED)
+
     # ------------------------------------------------------------------ 12
     print("\n[12] prices: MRP includes GST, discount on MRP, ex-GST = net / 1.18")
     from decimal import Decimal
@@ -586,6 +792,151 @@ def main() -> int:
              SimpleNamespace(quoted_rate=Decimal("1180"))) == 1000.00)
     check("no price known -> no rate sent",
           ex(SimpleNamespace(mrp=None, discount_pct=Decimal("20"), net_price=None, **base)) is None)
+
+    # ------------------------------------------------------------------ 16
+    print("\n[16] enquiry asks MRP, discount and days; the answers reach the Portal")
+    portal.add_row(12495, "86535C9000", 1)
+    portal.options[12495] = [{"dealer_id": 27}, {"dealer_id": 28}]
+    n_sent = len(sent)
+    run_poll()
+    run_steps(1)
+    question = next((b for _to, b in sent[n_sent:] + group_posts if "86535C9000" in b), "")
+    check("the question asks MRP, discount and days",
+          "MRP" in question and "Discount" in question and "Kitne din" in question)
+    reply("919100000001", "MRP 1180, 25%, 1 din")
+    reply("919100000002", "haan mrp 1180 discount 10, 1 din")
+    reply("919100000003", "1180 30 1")  # bare numbers: never guessed
+    run_steps(3)
+    p = payload_for(12495) or {}
+    check("same speed -> the bigger stated discount (25% beats 10% and the standing 20%) wins",
+          p.get("supplier_dealer_id") == 27)
+    check("Portal gets the vendor's MRP", float(p.get("quoted_mrp_incl_gst") or 0) == 1180.0)
+    check("Portal gets the vendor's stated discount, not the standing one", float(p.get("quoted_discount_percent") or 0) == 25.0)
+    check("Portal gets the days", p.get("quoted_tat_days") == 1)
+    check("rate = MRP 1180 x 75% / 1.18 = 750 ex-GST", round(float(p.get("quoted_rate_ex_gst") or 0), 2) == 750.00)
+    with get_session() as s:
+        gamma_quote = s.execute(select(am.AdvanceVendorQuote).where(
+            am.AdvanceVendorQuote.vendor_id == vendors["C"],
+            am.AdvanceVendorQuote.mrp == Decimal("1180"))).first()
+    check("bare numbers '1180 30 1' are not read as MRP/discount", gamma_quote is None)
+
+    # ------------------------------------------------------------------ 17
+    print("\n[17] step by step: pcs, then MRP, then discount, then days")
+    cfg.ask_mode = "steps"
+    portal.add_row(12496, "86536C9000", 2)
+    portal.options[12496] = [{"dealer_id": 27}, {"dealer_id": 28}]
+    mark = len(sent) + len(group_posts)
+
+    def said_since():
+        return [b for _t, b in (sent + group_posts)[mark:]]
+
+    run_poll()
+    run_steps(1)
+    first = [b for b in said_since() if "86536C9000" in b]
+    check("first question is only 'Sir ye part hai kya with pcs?'",
+          bool(first) and first[0].startswith("Sir ye part hai kya with pcs?") and "MRP" not in first[0])
+    mark = len(sent) + len(group_posts)
+    reply("919100000001", "haan 2 pcs")
+    check("after pcs -> asks MRP", any("MRP kitna hai" in b for b in said_since()))
+    reply("919100000002", "nahi")  # Beta: not available -> no more questions to him
+    reply("919100000003", "nahi")
+    mark = len(sent) + len(group_posts)
+    reply("919100000001", "3589")
+    check("after MRP -> asks discount", any("discount kitna denge" in b for b in said_since()))
+    mark = len(sent) + len(group_posts)
+    reply("919100000001", "kya?")
+    check("unclear answer -> the same question once more", any("samajh nahi aaya" in b and "discount" in b
+                                                               for b in said_since()))
+    mark = len(sent) + len(group_posts)
+    reply("919100000001", "10")
+    check("after discount -> asks days", any("kitne din" in b for b in said_since()))
+    check("nothing allocated before the last answer", payload_for(12496) is None)
+    reply("919100000001", "3 din")
+    run_steps(3)
+    p = payload_for(12496) or {}
+    check("after days -> PO-MST with Alpha", p.get("supplier_dealer_id") == 27)
+    check("Portal gets MRP 3589, 10%, 3 days",
+          float(p.get("quoted_mrp_incl_gst") or 0) == 3589.0 and float(p.get("quoted_discount_percent") or 0) == 10.0
+          and p.get("quoted_tat_days") == 3)
+    check("rate = 3589 x 90% / 1.18 = 2737.37", round(float(p.get("quoted_rate_ex_gst") or 0), 2) == 2737.37)
+
+    # all at once at the first step: no further questions
+    portal.add_row(12497, "86537C9000", 1)
+    portal.options[12497] = [{"dealer_id": 27}]
+    run_poll()
+    run_steps(1)
+    mark = len(sent) + len(group_posts)
+    reply("919100000001", "haan 1 pcs, MRP 900, 12%, 2 din")
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    check("everything in one answer -> no more questions", not any("Sir," in b for b in said_since()))
+    run_steps(3)
+    p = payload_for(12497) or {}
+    check("...and the Portal gets MRP 900, 12%, 2 days",
+          float(p.get("quoted_mrp_incl_gst") or 0) == 900.0 and float(p.get("quoted_discount_percent") or 0) == 12.0
+          and p.get("quoted_tat_days") == 2)
+
+    # vendor stops after MRP: his time runs out -> partial answer kept
+    portal.add_row(12498, "86538C9000", 1)
+    portal.options[12498] = [{"dealer_id": 27}]
+    run_poll()
+    run_steps(1)
+    reply("919100000001", "haan")
+    reply("919100000001", "mrp 500")
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    run_steps(8)
+    p = payload_for(12498) or {}
+    check("went quiet after MRP -> still allocated with MRP 500 and the standing 20%",
+          p.get("supplier_dealer_id") == 27 and float(p.get("quoted_mrp_incl_gst") or 0) == 500.0
+          and float(p.get("quoted_discount_percent") or 0) == 20.0)
+
+    # ------------------------------------------------------------------ 18
+    print("\n[18] minimum margin 2% of MRP over what the customer pays")
+    cfg.ask_mode = "one"
+    portal_settings.min_margin_percent = 2
+    portal.add_row(12501, "86541C9000", 1)
+    portal.rows[12501].update(mrp="1000.00", customer_discount_percent="15.00", price="850.00")
+    portal.options[12501] = [{"dealer_id": 27}, {"dealer_id": 28}]
+    run_poll()
+    run_steps(1)
+    reply("919100000001", "haan 1 din, 16%")   # fastest, but keeps only 1%
+    reply("919100000002", "haan 2 din, 20%")   # slower, keeps 5%
+    reply("919100000003", "nahi")
+    run_steps(3)
+    p = payload_for(12501) or {}
+    with get_session() as s:
+        d = s.execute(select(m.PortalDemandLine).where(m.PortalDemandLine.source_order_line_id == 12501)).scalar_one()
+        stored = (d.portal_mrp, d.customer_discount_pct, d.sale_price)
+    check("customer MRP, discount and price are stored from the Portal row",
+          stored == (Decimal("1000"), Decimal("15"), Decimal("850")))
+    check("fastest vendor below the margin loses; the next one that keeps it wins",
+          p.get("supplier_dealer_id") == 28 and float(p.get("quoted_discount_percent") or 0) == 20.0)
+
+    portal.add_row(12502, "86542C9000", 1)
+    portal.rows[12502].update(mrp="1000.00", customer_discount_percent="19.00", price="810.00")
+    portal.options[12502] = [{"dealer_id": 27}, {"dealer_id": 28}]
+    run_poll()
+    run_steps(1)
+    reply("919100000001", "haan 1 din, 20%")   # keeps only 1%
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    run_steps(3)
+    check("nobody keeps the margin -> no PO-MST", payload_for(12502) is None)
+    check("...and the line is held for the team", demand(12502).state == m.MARGIN_HOLD
+          and "margin below 2" in (demand(12502).note or ""))
+
+    portal_settings.min_margin_percent = 0
+    portal.add_row(12503, "86543C9000", 1)
+    portal.rows[12503].update(mrp="1000.00", customer_discount_percent="19.00", price="810.00")
+    portal.options[12503] = [{"dealer_id": 27}]
+    run_poll()
+    run_steps(1)
+    reply("919100000001", "haan 1 din, 20%")
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    run_steps(3)
+    check("margin 0 = rule off: the same quote goes through", (payload_for(12503) or {}).get("supplier_dealer_id") == 27)
 
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0

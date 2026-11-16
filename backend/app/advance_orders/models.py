@@ -185,6 +185,11 @@ class AdvanceVendorQuery(Base):
     # Reminders already sent to this silent vendor (cfg.followup_count max).
     followups_sent: Mapped[int | None] = mapped_column(default=0)
     reply_text: Mapped[str | None] = mapped_column(default=None)
+    # Step-by-step questions (User, 13 Nov 2026): "pcs" -> "mrp" -> "discount"
+    # -> "eta" -> "done". None = the one-message question. `draft` holds what
+    # the vendor has said so far, {line_id: {available, qty, mrp, disc, tat, eta}}.
+    step: Mapped[str | None] = mapped_column(default=None)
+    draft: Mapped[dict | None] = mapped_column(JSON, default=None)
 
 
 class AdvanceVendorQuote(Base):
@@ -271,6 +276,11 @@ class AdvanceVendorContact(Base):
     source: Mapped[str | None] = mapped_column(default=None)
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # POC tab (User, 14 Nov 2026): the person's name, and whether this number
+    # IS the vendor -- in his group and one to one (`registry.lookup`), the
+    # same as a registered number but without the 09:30 stock request.
+    name: Mapped[str | None] = mapped_column(default=None)
+    treat_as_vendor: Mapped[bool | None] = mapped_column(default=False)
 
 
 class PartBrandHint(Base):

@@ -5,9 +5,14 @@ Retry rules, exactly as the brief sets them:
             exponential backoff + jitter, honouring Retry-After, bounded.
   * POST -- sent ONCE. A timeout or lost response raises `UnknownOutcome`;
             the caller must reconcile with a GET before trying again.
-  * 400/401/403/404/409/422 -- never blind-retried. 401 refreshes the token
-            once (refresh endpoint, else one fresh login); a second 401
-            stops the run.
+  * 400/401/403/404/409/422 -- never retried. The Portal team's rule
+            (Cloudflare access note, Nov 2026): "Do not retry 401 or 403
+            responses automatically." A 401/403 -- or a refused login --
+            stops the run, alerts operations, and blocks every further Portal
+            call until the backend is restarted (new credentials need a
+            restart anyway), so a wrong password is never tried in a loop.
+            The JWT is renewed BEFORE it expires, so a valid run never sees
+            a 401.
 
 Every call carries the Cloudflare Access service headers AND the service
 account JWT. Neither, nor the password, is ever logged or put in an error
@@ -47,6 +52,20 @@ class PortalError(Exception):
 
 class AuthStopped(PortalError):
     """Login refused, or a 401 survived one refresh. Stop the run, alert ops."""
+
+
+# Set when the Portal refused our credentials; nothing is sent until restart.
+_blocked: str | None = None
+
+
+def blocked() -> str | None:
+    return _blocked
+
+
+def _block(reason: str) -> None:
+    global _blocked
+    _blocked = reason
+    logger.error("Portal procurement: Portal calls stopped until restart -- %s", reason)
 
 
 class UnknownOutcome(PortalError):
@@ -126,6 +145,8 @@ class PortalClient:
                       time.time() + max(60.0, expires_in - 300))
 
     def _login(self) -> _Token:
+        if _blocked:
+            raise AuthStopped(f"Portal calls are stopped: {_blocked}")
         user, password = settings.credentials()
         if not (user and password):
             raise AuthStopped("Portal procurement service account is not configured "
@@ -143,7 +164,9 @@ class PortalClient:
             raise AuthStopped("Cloudflare Access refused the service token (DEALER_PORTAL_CF_CLIENT_ID/_SECRET).",
                               status=response.status_code)
         if response.status_code != 200:
-            # Invalid credentials are never retried in a loop.
+            # Invalid credentials are never retried: blocked until restart.
+            if response.status_code in (401, 403):
+                _block(f"login refused (HTTP {response.status_code}) -- check the service account")
             raise AuthStopped(f"Portal login refused: HTTP {response.status_code}",
                               status=response.status_code, detail=_detail(response))
         try:
@@ -194,7 +217,6 @@ class PortalClient:
         url = f"{self._base}{path}"
         is_get = method == "GET"
         attempts = settings.get_attempts if is_get else 1
-        refreshed = False
         attempt = 0
         while True:
             attempt += 1
@@ -210,15 +232,16 @@ class PortalClient:
                 continue
 
             if _cloudflare_page(response):
+                _block("Cloudflare Access refused the service token (CF-Access-Client-Id/Secret)")
                 raise AuthStopped(f"{method} {path}: Cloudflare Access refused the service token.",
                                   status=response.status_code)
-            if response.status_code == 401:
-                if refreshed:
-                    raise AuthStopped(f"{method} {path}: 401 after a token refresh -- run stopped.", status=401)
-                refreshed = True
-                self._access(force=True)
-                attempt -= 1  # the refresh retry is not a transient-error retry
-                continue
+            if response.status_code in (401, 403):
+                # Never retried (Portal team rule). The token is dropped so the
+                # next run logs in fresh -- unless the login itself is refused.
+                self._token = None
+                raise AuthStopped(f"{method} {path}: HTTP {response.status_code} -- run stopped, not retried.",
+                                  status=response.status_code, detail=_detail(response),
+                                  request_id=_request_id(response))
             if is_get and response.status_code in RETRYABLE_STATUS and attempt < attempts:
                 self._backoff(attempt, response.headers.get("retry-after"))
                 continue
@@ -265,7 +288,9 @@ class PortalClient:
     def active(self, date_from: str, date_to: str, offset: int, limit: int, **filters) -> dict:
         params = {
             "date_from": date_from, "date_to": date_to,
-            "include_po_mst": "false", "include_received": "false",
+            # PO-MST master rows come back too: a source line's live allocation
+            # (allocation_id) is superseded, never duplicated (Portal team, 13 Nov).
+            "include_po_mst": "true", "include_received": "false",
             "include_interbranch": "true" if settings.include_interbranch else "false",
             "limit": limit, "offset": offset, "sort_by": "order_date", "sort_dir": "asc",
         }

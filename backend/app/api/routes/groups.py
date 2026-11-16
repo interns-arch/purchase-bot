@@ -1,8 +1,8 @@
 """Groups page: the WhatsApp groups the purchase bot sits in (Whapi), read
 live from Whapi -- every message, the team's own chat included.
 
-Only the bot's groups (team group, vendor groups, WHAPI_GROUPS) can be
-opened: the linked phone is a person's own WhatsApp, and none of their other
+Only the bot's groups (team group, vendor groups -- active or not, since
+12 Nov 2026 -- and WHAPI_GROUPS) can be opened: the linked phone is a person's own WhatsApp, and none of their other
 groups or personal chats is ever shown here."""
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _require() -> None:
 def _role(group_id: str) -> str:
     if group_id == whapi.team_group():
         return "team"
-    code = whapi.vendor_group_codes().get(group_id)
+    code = whapi.vendor_group_codes().get(group_id) or _all_vendor_groups().get(group_id)
     return f"vendor {code}" if code else "group"
 
 
@@ -59,6 +59,26 @@ def _all_names() -> dict[str, str]:
     with _lock:
         _names_cache = (now, names)
     return names
+
+
+def _all_vendor_groups() -> dict[str, str]:
+    """{group id: vendor code} for EVERY vendor group ProcureHub knows -- the
+    table plus WHAPI_VENDOR_GROUPS -- including the ones WHAPI_ACTIVE_GROUPS
+    leaves out (12 Nov 2026: "show all 45 groups")."""
+    out = dict(whapi._db_vendor_groups())  # noqa: SLF001 -- same integration
+    for item in (os.environ.get("WHAPI_VENDOR_GROUPS") or "").split(","):
+        if "=" in item:
+            code, groups = item.split("=", 1)
+            for group in groups.split("|"):
+                if code.strip() and group.strip():
+                    out[whapi._group_id(group)] = code.strip().upper()  # noqa: SLF001
+    return out
+
+
+def _viewable() -> set[str]:
+    """What the page may SHOW: the bot's active groups plus every other vendor
+    group. Only for reading -- the bot still acts only in allowed_groups()."""
+    return whapi.allowed_groups() | set(_all_vendor_groups())
 
 
 def _name(group_id: str) -> str:
@@ -139,8 +159,9 @@ def list_groups(db: Session = Depends(get_db)) -> list[dict]:
         for row in db.execute(select(WhapiActivity).join(newest, WhapiActivity.id == newest.c.mid)).scalars()
     }
     owner = os.environ.get("WHAPI_OWNER_NUMBER", "").strip()
+    active = whapi.allowed_groups()
     out = []
-    for group_id in whapi.allowed_groups():
+    for group_id in _viewable():
         last = latest.get(group_id)
         who = _who({"from": last.who, "from_me": last.who == owner})["name"] if last and last.who else None
         out.append({
@@ -148,13 +169,18 @@ def list_groups(db: Session = Depends(get_db)) -> list[dict]:
             "name": names.get(group_id) or db_names.get(group_id) or group_id,
             "role": _role(group_id),
             "member": group_id in names if names else True,
+            # False = shown for reading only: the bot does not reply or take
+            # stock there (not in WHAPI_ACTIVE_GROUPS).
+            "active": group_id in active,
             "last_at": ist_isoformat(last.created_at) if last else None,
             "preview": ((f"{who}: " if who else "") + (last.text or ""))[:120] if last else "",
         })
-    # Team group first, then the most recently active.
-    return [g for g in out if g["role"] == "team"] + sorted(
-        [g for g in out if g["role"] != "team"], key=lambda g: (g["last_at"] or "", g["name"]), reverse=True
-    )
+    # Team group first, then the bot's active groups, then the rest -- each
+    # part most recently active first.
+    rest = [g for g in out if g["role"] != "team"]
+    rest.sort(key=lambda g: (g["last_at"] or "", g["name"]), reverse=True)
+    rest.sort(key=lambda g: not g["active"])
+    return [g for g in out if g["role"] == "team"] + rest
 
 
 def _group_label(group_id: str, names: dict[str, str]) -> str:
@@ -198,13 +224,16 @@ def activity(after: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=300), 
 @router.get("/{group_id}")
 def get_group(group_id: str, count: int = Query(150, ge=1, le=500)) -> dict:
     _require()
-    if group_id not in whapi.allowed_groups():
+    if group_id not in _viewable():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not one of the bot's groups.")
     try:
         messages = _messages(group_id, count)
     except whapi.WhapiError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Whapi did not answer: {exc}") from exc
-    return {"id": group_id, "name": _name(group_id), "role": _role(group_id), "messages": messages}
+    return {
+        "id": group_id, "name": _name(group_id), "role": _role(group_id),
+        "active": group_id in whapi.allowed_groups(), "messages": messages,
+    }
 
 
 @router.get("/media/{media_id}")

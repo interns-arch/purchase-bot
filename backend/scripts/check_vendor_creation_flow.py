@@ -79,6 +79,7 @@ def main() -> int:
         ("HDFC Bank", "bank"),
         ("50100123456789", "account no."),
         ("HDFC0001234", "IFSC"),
+        ("haan", "also add as customer (Haan)"),
     ]
     for text, what in flow:
         replies = say(VENDOR, text)
@@ -154,8 +155,76 @@ def main() -> int:
     check("a vendor who just wrote gets the normal message", not templates and sent == [("919899104445", "Congratulations!")])
     WhatsAppClient.send_template_message, outbound.in_service_window = real_template, real_window
 
+    print("\n[4] Dealer Portal vendor/create API (admin login), HTTP faked")
+    _check_portal_api()
+
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0
+
+
+class _Resp:
+    def __init__(self, status, body):
+        self.status_code, self._body = status, body
+        self.text = str(body)
+
+    def json(self):
+        return self._body
+
+
+def _check_portal_api() -> None:
+    from backend.app.vendor_onboarding import dealer_portal_vendor as dpv
+    from backend.app.vendor_onboarding import portal_vendor_api as api
+    from backend.app.vendor_onboarding import validators as v
+
+    check("haan/nahi: 'nhi' -> Nahi, '1' -> Haan, 'maybe' refused",
+          v.haan_nahi("nhi")[0] == "Nahi" and v.haan_nahi("1")[0] == "Haan" and v.haan_nahi("maybe")[0] is None)
+    api.settings.username, api.settings.password = "admin_test", "secret"
+    calls: list[tuple[str, str, dict | None]] = []
+    portal = {"dealers": [{"dealer_id": 5, "dealer_name": "Old Motors", "gst_no": "07AAAAA0000A1Z5", "phone": "9000000001"}],
+              "users": [{"user_id": 9, "username": "test_auto_spares", "phone": "9000000002"}]}
+
+    def post(url, json=None, headers=None, timeout=None):
+        calls.append(("POST", url, json))
+        if url.endswith("/auth/login"):
+            return _Resp(200, {"access_token": "tok"})
+        if url.endswith("/users/vendor/create"):
+            return _Resp(200, {"message": "ok", "account_id": 8700})
+        return _Resp(200, {})
+
+    def get(url, headers=None, timeout=None, follow_redirects=None):
+        calls.append(("GET", url, None))
+        return _Resp(200, portal["dealers"] if "/dealers/" in url else portal["users"])
+
+    api.httpx.post, api.httpx.get = post, get
+    answers = {"vendor_name": "Test Auto Spares", "gstin": "27AAPFU0939F1ZV", "mobile": "9812345678",
+               "also_customer": "Haan", "credit_days": "30", "address": "12 Ring Road, Lajpat Nagar, Delhi"}
+    result = dpv.create_vendor(answers, vendor_code="CT_TAS", gst=None)
+    create = next((c[2] for c in calls if c[1].endswith("/users/vendor/create")), None)
+    check("new vendor -> vendor/create called, ref DP-8700", result.ok and result.reference == "DP-8700" and create is not None)
+    check("also_add_as_customer true for Haan", create and create["also_add_as_customer"] is True)
+    check("taken username skipped (test_auto_spares is a login already)", create and create["username"] != "test_auto_spares")
+    check("phone 10 digits, gst_no, credit_days int", create and create["phone"] == "9812345678"
+          and create["gst_no"] == "27AAPFU0939F1ZV" and create["credit_days"] == 30)
+    check("logged out after", calls[-1][1].endswith("/auth/logout"))
+
+    calls.clear()
+    result = dpv.create_vendor({**answers, "gstin": "07AAAAA0000A1Z5", "also_customer": "Nahi"}, vendor_code="X", gst=None)
+    check("same GSTIN on the Portal -> NOT created, existing reported",
+          result.ok and result.reference == "DP-EXISTS-5" and not any(c[1].endswith("/vendor/create") for c in calls))
+    calls.clear()
+    result = dpv.create_vendor({**answers, "mobile": "9000000002"}, vendor_code="X", gst=None)
+    check("same mobile on the Portal -> NOT created",
+          result.ok and result.reference == "DP-EXISTS-9" and not any(c[1].endswith("/vendor/create") for c in calls))
+
+    def get_down(url, **_k):
+        raise RuntimeError("timeout")
+
+    api.httpx.get = get_down
+    calls.clear()
+    result = dpv.create_vendor(answers, vendor_code="X", gst=None)
+    check("Portal lists unreadable -> not created, request fails for a retry",
+          not result.ok and not any(c[1].endswith("/vendor/create") for c in calls))
+    api.settings.username = api.settings.password = ""
 
 
 if __name__ == "__main__":

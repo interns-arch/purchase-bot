@@ -156,6 +156,26 @@ def parse_text_messages(payload: dict) -> list[IncomingWhatsAppText]:
                             )
                         )
                     continue
+                # A tapped REPLY BUTTON (interactive) or template quick-reply
+                # (button): its id/payload goes on as the text, so the usual
+                # text handlers decide on it ("VRBTN APPROVE 19", 12 Nov 2026).
+                if raw_message.get("type") in ("interactive", "button") and raw_message.get("from"):
+                    tapped = None
+                    if raw_message["type"] == "interactive":
+                        reply = (raw_message.get("interactive") or {}).get("button_reply") or {}
+                        tapped = reply.get("id") or reply.get("title")
+                    else:
+                        button = raw_message.get("button") or {}
+                        tapped = button.get("payload") or button.get("text")
+                    if tapped:
+                        texts.append(
+                            IncomingWhatsAppText(
+                                sender=raw_message["from"],
+                                message_id=raw_message.get("id", ""),
+                                text=str(tapped),
+                            )
+                        )
+                    continue
                 if raw_message.get("type") != _TEXT_MESSAGE_TYPE:
                     continue
 

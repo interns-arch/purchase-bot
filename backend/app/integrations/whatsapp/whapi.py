@@ -95,6 +95,28 @@ _HUMAN = [
     (re.compile(r"\s*\b[Pp]urchase [Bb]ot\b"), ""),
 ]
 
+# Portal PO numbers (PO-GRP-2026-1049, PO-MST-2026-0075) are internal: vendors
+# are never told about the Portal (user, 13 Nov 2026). Every line naming one is
+# cut from anything posted outside the team group.
+_PO_REF = re.compile(r"\bPO[\s_-]*(GRP|MST)\b", re.IGNORECASE)
+
+
+def strip_po_refs(text: str | None) -> str | None:
+    """`text` without the lines that name a PO-GRP / PO-MST number."""
+    if not text or not _PO_REF.search(text):
+        return text
+    return "\n".join(line for line in text.splitlines() if not _PO_REF.search(line)).strip()
+
+
+def _for_vendors(chat_id: str, text: str | None) -> str | None:
+    if not text or chat_id == team_group():
+        return text
+    clean = strip_po_refs(text)
+    if clean != text:
+        logger.info("Whapi: PO-GRP/PO-MST number cut from a message to %s.", chat_id)
+    return clean
+
+
 _lock = threading.Lock()
 _routes: dict[str, tuple[str, float]] = {}           # number -> (group, last seen)
 _recent: dict[tuple[str, str], tuple[str | None, float]] = {}
@@ -173,13 +195,24 @@ def _db_vendor_groups() -> dict[str, str]:
         from backend.app.integrations.whatsapp.models import WhapiVendorGroup
         from core.db import get_session
 
+        global _bot_made_groups
         with get_session() as session:
-            rows = {g: (c or "").upper() for g, c in session.execute(select(WhapiVendorGroup.group_id, WhapiVendorGroup.vendor_code))}
+            found = session.execute(
+                select(WhapiVendorGroup.group_id, WhapiVendorGroup.vendor_code, WhapiVendorGroup.created_by_bot)
+            ).all()
+        rows = {g: (c or "").upper() for g, c, _made in found}
+        _bot_made_groups = {g for g, _c, made in found if made}
     except Exception:  # noqa: BLE001
         logger.exception("Whapi: could not read the vendor groups table.")
         rows = _db_groups_cache[1] if _db_groups_cache else {}
     _db_groups_cache = (now, rows)
     return rows
+
+
+# Groups the bot itself made for a NEW vendor (vendor_group.py). They count as
+# active even when WHAPI_ACTIVE_GROUPS lists only the founder's 8 groups --
+# otherwise the bot would make a group and then ignore the stock posted in it.
+_bot_made_groups: set[str] = set()
 
 
 def forget_cached_groups() -> None:
@@ -201,7 +234,7 @@ def vendor_group_codes() -> dict[str, str]:
     # WHAPI_ACTIVE_GROUPS: move group by group (Founder, 3 Nov 2026). When set,
     # only these vendor groups exist for the bot; every other one is ignored.
     active = {_group_id(g) for g in _env("WHAPI_ACTIVE_GROUPS").split(",") if g.strip()}
-    return {g: c for g, c in out.items() if g in active} if active else out
+    return {g: c for g, c in out.items() if g in active or g in _bot_made_groups} if active else out
 
 
 def vendor_groups() -> dict[str, str]:
@@ -328,6 +361,10 @@ def _acknowledge(chat_id: str) -> str | None:
 
 
 def _post(chat_id: str, body: str, kind: str = "posted") -> str | None:
+    body = _for_vendors(chat_id, body)
+    if not body:
+        logger.info("Whapi: nothing left to send to %s after cutting PO numbers.", chat_id)
+        return None
     message_id = _sent_id(_request("POST", "/messages/text", json={"to": chat_id, "body": body}))
     record(chat_id, kind, None, body)
     return message_id
@@ -364,6 +401,10 @@ def send_document(chat_id: str, content: bytes, filename: str, mime_type: str, c
     key = f"doc:{filename}:{hashlib.sha1(content).hexdigest()}"
     media = f"data:{mime_type};name={filename};base64,{base64.b64encode(content).decode()}"
     payload = {"to": chat_id, "media": media, "filename": filename}
+    caption = _for_vendors(chat_id, caption)
+    if _PO_REF.search(filename) and chat_id != team_group():
+        logger.info("Whapi: file %s names a PO number; not sent to %s.", filename, chat_id)
+        return None
     if _labelled(caption):
         payload["caption"] = _labelled(caption)
 
@@ -575,7 +616,15 @@ def parse(payload: dict) -> tuple[list, list]:
             team_member = msg.get("from_me") or (bool(sender) and _is_internal(sender))
             if team_member and (quiet or msg.get("type") == "text"):
                 continue  # our people talking to the vendor (or sending him a PO) -- not for the bot
-            if quiet and msg.get("type") != "document" and not (vendor_same() and _vendor_own_number(chat_id, sender)):
+            if quiet and not _vendor_own_number(chat_id, sender):
+                # User, 14 Nov 2026: stock counts only from the vendor's SAVED
+                # numbers -- files too. Anyone else in the group is not him.
+                if msg.get("type") in ("document", "image"):
+                    logger.info("Whapi: file in vendor group %s from unsaved number %s -- not taken as stock.",
+                                chat_id, sender)
+                    record(chat_id, "ignored file", sender, "not a saved number of this vendor")
+                continue
+            if quiet and msg.get("type") != "document" and not vendor_same():
                 continue  # quiet: only the vendor's stock FILES, never his chat or photos
             sender = group_main.get(chat_id)  # the group speaks as the vendor
         if not sender:

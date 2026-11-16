@@ -39,13 +39,51 @@ class PortalProcurementSettings:
     device_id: str = (os.environ.get("PORTAL_PROCUREMENT_DEVICE_ID") or "procurehub-vendor-bot-prod").strip()
     device_info: str = "ProcureHub AWS vendor bot"
 
+    # PILOT (default) vs LIVE (user, 12 Nov 2026: "do not start the full live
+    # campaign yet"). In pilot the Portal is read and stored, but ONLY the
+    # source lines in PORTAL_PROCUREMENT_PILOT_LINES go to vendors, and ONLY
+    # the bot vendors in PORTAL_PROCUREMENT_PILOT_VENDORS are asked. No pilot
+    # lines = nobody is asked at all. PORTAL_PROCUREMENT_MODE=live lifts both.
+    mode: str = (os.environ.get("PORTAL_PROCUREMENT_MODE") or "pilot").strip().lower()
+    pilot_lines: set[int] = {
+        int(x) for x in (os.environ.get("PORTAL_PROCUREMENT_PILOT_LINES") or "").replace(" ", "").split(",")
+        if x.isdigit()
+    }
+    pilot_vendors: set[int] = {
+        int(x) for x in (os.environ.get("PORTAL_PROCUREMENT_PILOT_VENDORS") or "").replace(" ", "").split(",")
+        if x.isdigit()
+    }
+
+    # The pilot can also be set WITHOUT a restart, in a small JSON file
+    # (re-read on every run): {"lines": [13998], "parts": ["6N2914A132AF"],
+    # "vendors": [59]}. A Portal line is a pilot line when its id OR its part
+    # number is listed -- so a fresh advance order for a known part number is
+    # picked up as soon as the Portal shows it. The file wins over the env.
+    pilot_file: str = (os.environ.get("PORTAL_PROCUREMENT_PILOT_FILE") or "uploads/portal_pilot.json").strip()
+
+    def live(self) -> bool:
+        return self.mode == "live"
+
+    def pilot(self) -> dict:
+        """{"lines": set[int], "parts": set[str], "vendors": set[int]} for this run."""
+        lines, parts, vendors = set(self.pilot_lines), set(), set(self.pilot_vendors)
+        try:
+            with open(self.pilot_file, encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+            lines = {int(x) for x in data.get("lines") or [] if str(x).strip().isdigit()}
+            parts = {"".join(ch for ch in str(x).upper() if ch.isalnum()) for x in data.get("parts") or [] if x}
+            vendors = {int(x) for x in data.get("vendors") or [] if str(x).strip().isdigit()}
+        except (OSError, ValueError):
+            pass
+        return {"lines": lines, "parts": parts, "vendors": vendors}
+
     # How often the Active Procurement list is read, and how often the
     # allocation steps (allocate, knockoff, approval, Odoo, PDF) move on.
     poll_minutes: int = max(5, _int("PORTAL_PROCUREMENT_POLL_MINUTES", 30))
     step_minutes: int = max(1, _int("PORTAL_PROCUREMENT_STEP_MINUTES", 5))
     # Brief: the last seven calendar days (today minus six, IST).
     days: int = max(1, _int("PORTAL_PROCUREMENT_DAYS", 7))
-    page_size: int = max(1, min(500, _int("PORTAL_PROCUREMENT_PAGE_SIZE", 500)))
+    page_size: int = max(1, min(5000, _int("PORTAL_PROCUREMENT_PAGE_SIZE", 5000)))
     include_interbranch: bool = _flag("PORTAL_PROCUREMENT_INCLUDE_INTERBRANCH")
 
     # Vendor safety: at most this many NEW demand lines go to vendors per poll,
@@ -54,6 +92,11 @@ class PortalProcurementSettings:
     # Rajkumar's number banned, 2 Nov 2026).
     max_new_lines_per_poll: int = max(1, _int("PORTAL_PROCUREMENT_MAX_NEW_LINES", 25))
     max_lines_per_enquiry: int = max(1, _int("PORTAL_PROCUREMENT_LINES_PER_ENQUIRY", 10))
+
+    # User, 14 Nov 2026: keep at least this margin, in % of MRP, over what the
+    # customer pays. A vendor below it cannot win; none above it -> the line
+    # is held and the team decides. 0 = off.
+    min_margin_percent: float = float(os.environ.get("PORTAL_PROCUREMENT_MIN_MARGIN_PERCENT") or 2)
 
     # Who gets the PO PDF + summary. Blank = the admin numbers and purchase team.
     notify_numbers: list[str] = [

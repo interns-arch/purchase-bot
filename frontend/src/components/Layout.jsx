@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
-// One short top menu, like the sales bot's dashboard (Founder, 15 Oct 2026:
+// One short menu, like the sales bot's dashboard (Founder, 15 Oct 2026:
 // "make it simple, remove duplicates and unused things"). Eight everyday
 // pages; the rarely used ones sit under "More". Pages with no use in 30 days
 // (Purchase Orders, Vendor Invoices, Delivery Tracking, Audit Log) and the
@@ -12,6 +12,8 @@ const NAV = [
   { to: "/customer-orders", label: "Orders" },
   { to: "/vendor-inventory", label: "Vendor stock" },
   { to: "/vendor-priority", label: "Vendors" },
+  { to: "/vendor-poc", label: "POC" },
+  { to: "/vendor-creation", label: "Vendor creation" },
   { to: "/dealer-portal", label: "Dealer Portal" },
   { to: "/performance", label: "Performance" },
   { to: "/chats", label: "Chats" },
@@ -37,6 +39,8 @@ const PAGE_PURPOSE = {
   "/settings": "Account, integrations and system status.",
   "/vendor-priority": "Brand-wise vendor lists: every vendor of the brand is asked for a part at once. Add vendors, reorder, see who replies best.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
+  "/vendor-creation": "Every vendor registered on WhatsApp — its full details, whether Prateek sir / NK Jain sir approved it, and its Dealer Portal account.",
+  "/vendor-poc": "A vendor's people: every number here counts as the vendor, one to one and in his WhatsApp group.",
   "/groups": "The WhatsApp groups the bot is in — every message, live.",
   "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",
 };
@@ -48,76 +52,76 @@ const TODAY = new Intl.DateTimeFormat("en-IN", {
   month: "short",
 });
 
-function MoreMenu() {
-  const [open, setOpen] = useState(false);
-  const location = useLocation();
-  const box = useRef(null);
-  const active = MORE.some((item) => location.pathname.startsWith(item.to));
-
-  useEffect(() => setOpen(false), [location.pathname]);
-  useEffect(() => {
-    function close(event) {
-      if (box.current && !box.current.contains(event.target)) setOpen(false);
-    }
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, []);
-
+function SideLink({ item }) {
   return (
-    <div className="topnav__more" ref={box}>
-      <button
-        type="button"
-        className={"topnav__link" + (active ? " topnav__link--active" : "")}
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-      >
-        More ▾
-      </button>
-      {open ? (
-        <div className="topnav__menu">
-          {MORE.map((item) => (
-            <NavLink key={item.to} to={item.to} className="topnav__menu-item">
-              {item.label}
-            </NavLink>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <NavLink
+      to={item.to}
+      className={({ isActive }) => "sidenav__link" + (isActive ? " sidenav__link--active" : "")}
+    >
+      {item.label}
+    </NavLink>
   );
 }
 
+// A vertical menu on the left (12 Nov 2026: the top menu had grown past the
+// screen width, so tabs such as "Vendor creation" were hidden off the edge).
+// Every page is listed; on a phone the menu opens from the ☰ button.
 export function Layout({ children, title, subtitle }) {
   const location = useLocation();
   const purpose = subtitle ?? PAGE_PURPOSE[location.pathname];
+  const [open, setOpen] = useState(false);
+  const panel = useRef(null);
+
+  useEffect(() => setOpen(false), [location.pathname]);
+  useEffect(() => {
+    if (!open) return undefined;
+    function onKey(event) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
 
   return (
-    <div className="app-shell app-shell--top">
-      <header className="topnav">
-        <div className="topnav__inner">
-          <NavLink to="/command-centre" className="topnav__brand">
-            <span className="topnav__logo">C</span>
-            <span>
-              Cartrends <span className="topnav__brand-sub">Purchase Bot</span>
-            </span>
-          </NavLink>
-          <nav className="topnav__links">
-            {NAV.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                className={({ isActive }) => "topnav__link" + (isActive ? " topnav__link--active" : "")}
-              >
-                {item.label}
-              </NavLink>
-            ))}
-            <MoreMenu />
-          </nav>
-          <span className="bot-status" title="WhatsApp bot +91 92170 30414">
-            <span className="bot-status__dot" />
-            Bot live
-          </span>
-        </div>
+    <div className={"app-shell app-shell--side" + (open ? " app-shell--menu-open" : "")}>
+      <header className="sidebar-top">
+        <button
+          type="button"
+          className="sidebar-top__toggle"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          aria-controls="sidenav"
+          aria-label="Menu"
+        >
+          ☰
+        </button>
+        <NavLink to="/command-centre" className="sidenav__brand">
+          <span className="sidenav__logo">C</span>
+          <span>Cartrends</span>
+        </NavLink>
       </header>
+      {open ? <div className="sidenav__backdrop" onClick={() => setOpen(false)} /> : null}
+      <aside className="sidenav" id="sidenav" ref={panel}>
+        <NavLink to="/command-centre" className="sidenav__brand sidenav__brand--full">
+          <span className="sidenav__logo">C</span>
+          <span>
+            Cartrends <span className="sidenav__brand-sub">Purchase Bot</span>
+          </span>
+        </NavLink>
+        <nav className="sidenav__links" aria-label="Main">
+          {NAV.map((item) => (
+            <SideLink key={item.to} item={item} />
+          ))}
+          <div className="sidenav__section">More</div>
+          {MORE.map((item) => (
+            <SideLink key={item.to} item={item} />
+          ))}
+        </nav>
+        <span className="bot-status sidenav__status" title="WhatsApp bot +91 92170 30414">
+          <span className="bot-status__dot" />
+          Bot live
+        </span>
+      </aside>
       <div className="app-main">
         <div className="page-head">
           <div>

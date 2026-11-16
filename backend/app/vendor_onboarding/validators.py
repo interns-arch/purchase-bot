@@ -143,3 +143,17 @@ def brand_discounts(value: str) -> tuple[list[dict] | None, str | None]:
     if not rows:
         return None, "Send at least one brand with its discount, e.g. Maruti - 12"
     return rows, None
+
+
+_HAAN = {"1", "haan", "han", "ha", "haa", "haan ji", "ha ji", "haanji", "ji", "ji haan", "yes", "y", "ok"}
+_NAHI = {"2", "nahi", "nahin", "nhi", "nai", "na", "naa", "nahi ji", "no", "n"}
+
+
+def haan_nahi(value: str) -> tuple[str | None, str | None]:
+    """Haan / Nahi (also 1 / 2, yes / no) -> "Haan" or "Nahi"."""
+    text = " ".join((value or "").lower().replace(".", " ").split())
+    if text in _HAAN:
+        return "Haan", None
+    if text in _NAHI:
+        return "Nahi", None
+    return None, "Please reply 1 for Haan or 2 for Nahi."

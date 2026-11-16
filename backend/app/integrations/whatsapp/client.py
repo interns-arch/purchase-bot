@@ -226,6 +226,64 @@ class WhatsAppClient:
         # names. Callers that do not need it simply ignore it.
         return _logged(to, "text", body, None, lambda: _with_retries(f"send_text_message({to})", _call))
 
+    def send_button_message(
+        self,
+        to: str,
+        body: str,
+        buttons: list[tuple[str, str]],
+        *,
+        header: str | None = None,
+        footer: str | None = None,
+    ) -> str | None:
+        """An interactive message with up to 3 REPLY BUTTONS (id, title).
+        A tap comes back as an "interactive" message carrying the button id
+        (parser.py turns it into text). Only inside the 24-hour window, and
+        only on the Meta number -- a Whapi group has no such buttons, so a
+        number routed to a group raises and the caller sends plain text.
+        Body max 1024 characters, title 20, header 60, footer 60."""
+        if _group_route(to):
+            raise WhatsAppNotConfiguredError("buttons are not available in a WhatsApp group")
+        access_token = self._require_access_token()
+        if not self._settings.phone_number_id:
+            raise WhatsAppNotConfiguredError(
+                "WHATSAPP_PHONE_NUMBER_ID is not configured -- cannot send a message."
+            )
+        interactive: dict[str, Any] = {
+            "type": "button",
+            "body": {"text": body[:1024]},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": button_id[:256], "title": title[:20]}}
+                    for button_id, title in buttons[:3]
+                ]
+            },
+        }
+        if header:
+            interactive["header"] = {"type": "text", "text": header[:60]}
+        if footer:
+            interactive["footer"] = {"text": footer[:60]}
+        url = f"{self._settings.graph_api_base_url}/{self._settings.phone_number_id}/messages"
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+
+        def _call() -> str | None:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                return _message_id(response)
+
+        logged = "\n".join(filter(None, [header, body, footer, " | ".join(f"[{t}]" for _i, t in buttons)]))
+        return _logged(to, "text", logged, None, lambda: _with_retries(f"send_button_message({to})", _call))
+
     def send_template_message(
         self,
         to: str,

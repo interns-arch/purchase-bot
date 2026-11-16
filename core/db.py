@@ -88,6 +88,16 @@ _SCHEMA_UPGRADES = (
     ("advance_orders", "dealer_portal", "JSON"),
     # Vendor follow-ups (2 reminders, 15 min apart) before Prateek sir is asked.
     ("advance_vendor_queries", "followups_sent", "INTEGER DEFAULT 0"),
+    # Step-by-step vendor questions: pcs, MRP, discount, days (13 Nov 2026).
+    ("advance_vendor_queries", "step", "VARCHAR"),
+    ("advance_vendor_queries", "draft", "JSON"),
+    # Vendor POC tab (14 Nov 2026).
+    ("advance_vendor_contacts", "name", "VARCHAR"),
+    ("advance_vendor_contacts", "treat_as_vendor", "BOOLEAN DEFAULT FALSE"),
+    # Minimum margin on Portal procurement (14 Nov 2026).
+    ("portal_demand_lines", "portal_mrp", "NUMERIC(18, 4)"),
+    ("portal_demand_lines", "customer_discount_pct", "NUMERIC(6, 3)"),
+    ("portal_demand_lines", "sale_price", "NUMERIC(18, 4)"),
     # Dealer Portal: parts skipped because no price is known.
     ("dealer_portal_pushes", "skipped_no_price", "INTEGER DEFAULT 0"),
     ("dealer_portal_pushes", "skipped_parts", "JSON"),

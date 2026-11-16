@@ -48,6 +48,8 @@ from backend.app.api.routes.notifications import router as notifications_router
 from backend.app.api.routes.whatsapp import router as whatsapp_router
 from backend.app.api.routes.whapi import router as whapi_router
 from backend.app.api.routes.groups import router as groups_router
+from backend.app.api.routes.vendor_pocs import router as vendor_pocs_router
+from backend.app.api.routes.vendor_registrations import router as vendor_registrations_router
 from backend.app.auth import service as auth_service
 from backend.app.auth.models import User
 from backend.app.auth.router import router as auth_router
@@ -177,6 +179,8 @@ app.include_router(purchase_orders_router)
 app.include_router(whatsapp_router)
 app.include_router(whapi_router)
 app.include_router(groups_router)
+app.include_router(vendor_pocs_router)
+app.include_router(vendor_registrations_router)
 app.include_router(notifications_router)
 # Advance orders from the sales bot: answer 503 unless ADVANCE_ORDERS_ENABLED=true.
 app.include_router(advance_orders_api_router)

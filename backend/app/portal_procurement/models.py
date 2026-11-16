@@ -28,6 +28,7 @@ ENQUIRY_SCHEDULED = "enquiry_scheduled"
 AWAITING_VENDOR_REPLIES = "awaiting_vendor_replies"
 QUOTES_NORMALIZED = "quotes_normalized"
 WINNER_SELECTED = "winner_selected"
+MARGIN_HOLD = "margin_hold"  # no vendor meets the minimum margin -- the team decides
 NO_VENDOR = "no_vendor"  # every vendor said no / nobody answered -- told to a person
 CLOSED = "closed"  # no longer pending on the Portal, or its quantity went to 0
 COMPLETED = "completed"  # fully allocated and every PO-MST completed
@@ -76,6 +77,11 @@ class PortalDemandLine(Base):
     first_seen_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
     last_seen_at: Mapped[datetime | None] = mapped_column(default=None)
     updated_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
+    # The customer's side, from the Portal row (14 Nov 2026), for the minimum
+    # margin: MRP, the customer's discount % and the price he pays (incl. GST).
+    portal_mrp: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), default=None)
+    customer_discount_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 3), default=None)
+    sale_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), default=None)
 
 
 class PortalAllocation(Base):
@@ -162,3 +168,42 @@ class PortalTransition(Base):
     request_id: Mapped[str | None] = mapped_column(default=None)
     error: Mapped[str | None] = mapped_column(default=None)
     at: Mapped[datetime] = mapped_column(default=now_ist_naive)
+
+
+# ---- vendor -> Portal dealer links for PROCUREMENT ONLY (12 Nov 2026)
+LINK_LINKED = "linked"
+LINK_ONBOARDING = "onboarding_required"  # a person said N: not on the Portal yet
+
+
+class PortalVendorLink(Base):
+    """Which Portal dealer a bot vendor IS, for creating PO-MSTs.
+
+    Deliberately NOT `dealer_portal_vendor_map`: that table decides which
+    Portal account a vendor's STOCK is uploaded to, and an import here must
+    never change stock uploads. An admin-confirmed row there always wins over
+    a row here (`links.resolve`). Keyed on immutable ids, never names."""
+
+    __tablename__ = "portal_vendor_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("vendors.id", ondelete="CASCADE"), unique=True, index=True)
+    dealer_id: Mapped[int | None] = mapped_column(default=None, index=True)
+    dealer_name: Mapped[str | None] = mapped_column(default=None)  # snapshot, for the report only
+    status: Mapped[str] = mapped_column(default=LINK_LINKED)
+    source: Mapped[str | None] = mapped_column(default=None)  # the file it came from
+    decided_by: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
+    updated_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
+
+
+class PortalDealer(Base):
+    """Every Portal dealer id the Portal itself has offered as a vendor
+    option -- the table a manually typed dealer id is checked against."""
+
+    __tablename__ = "portal_dealers"
+
+    dealer_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    dealer_name: Mapped[str | None] = mapped_column(default=None)
+    brands: Mapped[list | None] = mapped_column(JSON, default=None)
+    odoo_partner_id: Mapped[int | None] = mapped_column(default=None)
+    seen_at: Mapped[datetime] = mapped_column(default=now_ist_naive)

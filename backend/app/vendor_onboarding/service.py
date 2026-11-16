@@ -132,6 +132,7 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
         session.flush()
         return False, f"ProcureHub: {exc}"
 
+    api_note = None
     if not request.dealer_portal_ref or request.dealer_portal_ref == "DRY-RUN":
         result = dealer_portal_vendor.create_vendor(
             request.answers or {}, vendor_code=vendor.vendor_code, gst=request.gst_data
@@ -142,11 +143,12 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
             session.flush()
             return False, result.error or "Dealer Portal error"
         request.dealer_portal_ref = result.reference
+        api_note = result.note
     request.dealer_portal_error = None
     request.status = m.REG_CREATED
     session.flush()
 
-    portal_note = (
+    portal_note = api_note or (
         "Dealer Portal: pending (API not connected yet)."
         if request.dealer_portal_ref == "DRY-RUN"
         else f"Dealer Portal: request {request.dealer_portal_ref} sent to data entry — the Portal account is created in a few minutes."

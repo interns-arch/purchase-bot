@@ -43,7 +43,7 @@ _ALLOC_ACTIVE = (m.WINNER_SELECTED, m.VENDOR_ONBOARDING_REQUIRED, m.VENDOR_MAPPE
 _PO_ACTIVE = (m.PO_MST_CREATED, m.KNOCKOFF_PREVIEWED, m.SAFE_KNOCKOFF_COMMITTED, m.APPROVAL_PENDING,
               m.APPROVAL_APPROVED, m.APPROVAL_REJECTED, m.ODOO_POSTING, m.ODOO_POSTED, m.PDF_DOWNLOADED,
               m.PURCHASE_USER_NOTIFIED)
-_DEMAND_OPEN = (m.DISCOVERED, m.ENQUIRY_SCHEDULED, m.AWAITING_VENDOR_REPLIES)
+_DEMAND_OPEN = (m.DISCOVERED, m.ENQUIRY_SCHEDULED, m.AWAITING_VENDOR_REPLIES, m.MARGIN_HOLD)
 
 
 # ====================================================================== helpers
@@ -211,22 +211,56 @@ def _row_hash(row: dict) -> str:
     return hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
+# Portal team, 13 Nov 2026: a source line already po_confirmed with an earlier
+# vendor is still open for (re)assignment through a new PO-MST.
+WORKABLE_STAGES = ("pending", "po_confirmed")
+_DEAD_STATUSES = ("rejected", "closed", "cancelled", "canceled", "received")
+
+
 def _eligible(row: dict) -> bool:
+    """row_type == source AND planned_quantity > 0 AND editable == true AND
+    procurement_stage IN (pending, po_confirmed) -- and not closed/cancelled."""
     if str(_first(row, "row_type") or "").lower() != "source":
         return False
     if (_int(_first(row, "planned_quantity")) or 0) <= 0:
         return False
-    if str(_first(row, "procurement_stage") or "").lower() != "pending":
+    if row.get("editable") is not True:
         return False
-    if str(_first(row, "status", "order_status") or "").lower() in ("rejected", "closed", "cancelled", "canceled"):
+    if str(_first(row, "procurement_stage") or "").lower() not in WORKABLE_STAGES:
+        return False
+    if row.get("is_closed") is True:
+        return False
+    if str(_first(row, "status", "order_status") or "").lower() in _DEAD_STATUSES:
         return False
     return _int(_first(row, "source_order_line_id")) is not None
+
+
+def _master_for(rows: list[dict], sol: int) -> dict | None:
+    """The live PO-MST allocation of a source line: a master row for the same
+    source_order_line_id that carries an allocation_id and is editable. Its
+    allocation_id makes the allocate call SUPERSEDE it instead of adding one."""
+    for row in rows:
+        if (str(row.get("row_type") or "").lower() == "master"
+                and _int(row.get("source_order_line_id")) == sol
+                and _int(row.get("allocation_id")) is not None
+                and row.get("editable") is True):
+            return row
+    return None
 
 
 def _buyer(row: dict) -> dict:
     keys = ("buyer_dealer_id", "buyer_dealer_name", "dealer_id", "dealer_name", "branch", "branch_name",
             "buyer_branch", "company", "customer_so", "order_id")
     return {k: row[k] for k in keys if k in row and row[k] not in (None, "")}
+
+
+def _customer_side(row: dict) -> dict:
+    """MRP, the customer's discount % and the price he pays, from a Portal row."""
+    return {
+        "portal_mrp": _dec(_first(row, "mrp")),
+        "customer_discount_pct": _dec(_first(row, "customer_discount_percent")),
+        "sale_price": _dec(_first(row, "price")),
+    }
 
 
 def poll(session: Session, client: PortalClient, today: date | None = None) -> dict:
@@ -264,10 +298,13 @@ def poll(session: Session, client: PortalClient, today: date | None = None) -> d
                     procurement_stage=str(_first(row, "procurement_stage") or ""),
                     row_hash=digest,
                     last_seen_at=now_ist_naive(),
+                    **_customer_side(row),
                 ))
                 new += 1
             else:
                 existing.last_seen_at = now_ist_naive()
+                for key, value in _customer_side(row).items():
+                    setattr(existing, key, value)
                 if existing.row_hash != digest:
                     existing.row_hash = digest
                     existing.planned_quantity = qty
@@ -339,12 +376,18 @@ def enquire(session: Session) -> int:
     answer maps back to exactly one Portal line."""
     from backend.app.advance_orders import service as engine
 
+    query = select(m.PortalDemandLine).where(m.PortalDemandLine.state == m.DISCOVERED)
+    pilot = None if settings.live() else settings.pilot()
+    if pilot is not None and not (pilot["lines"] or pilot["parts"]):
+        return 0  # pilot with nothing chosen: nobody is asked
     fresh = session.execute(
-        select(m.PortalDemandLine)
-        .where(m.PortalDemandLine.state == m.DISCOVERED)
-        .order_by(m.PortalDemandLine.order_date.asc().nulls_last(), m.PortalDemandLine.id)
-        .limit(settings.max_new_lines_per_poll)
+        query.order_by(m.PortalDemandLine.order_date.asc().nulls_last(), m.PortalDemandLine.id)
     ).scalars().all()
+    if pilot is not None:
+        # Pilot: only the chosen source lines / part numbers.
+        fresh = [d for d in fresh if d.source_order_line_id in pilot["lines"]
+                 or _norm_part(d.part_no) in pilot["parts"]]
+    fresh = fresh[: settings.max_new_lines_per_poll]
     if not fresh:
         return 0
     by_brand: dict[str, list[m.PortalDemandLine]] = {}
@@ -424,6 +467,85 @@ def _quote_fields(line: am.AdvanceOrderLine, session: Session) -> dict:
     }
 
 
+# ====================================================================== minimum margin
+def margin_percent(demand: m.PortalDemandLine, quote) -> Decimal | None:
+    """What we keep on this part with this vendor, in % of MRP:
+    (what the customer pays - what the vendor charges) / MRP. Both incl. GST.
+    None when either side is not known."""
+    mrp = demand.portal_mrp if demand.portal_mrp and demand.portal_mrp > 0 else (
+        quote.mrp if quote.mrp and quote.mrp > 0 else None)
+    cust = demand.customer_discount_pct
+    vend = quote.discount_pct
+    if mrp is None:
+        return (vend - cust) if vend is not None and cust is not None else None
+    sale = demand.sale_price if demand.sale_price and demand.sale_price > 0 else (
+        mrp * (1 - cust / 100) if cust is not None else None)
+    cost = quote.net_price if quote.net_price is not None else (mrp * (1 - vend / 100) if vend is not None else None)
+    if sale is None or cost is None:
+        return None
+    return ((sale - cost) / mrp * 100).quantize(Decimal("0.01"))
+
+
+def _customer_known(demand: m.PortalDemandLine) -> bool:
+    return demand.customer_discount_pct is not None or (demand.sale_price is not None and demand.sale_price > 0)
+
+
+def _point_line_at(line: am.AdvanceOrderLine, quote, note: str) -> None:
+    line.vendor_id = quote.vendor_id
+    line.available_qty = min(quote.available_qty or line.qty, line.qty)
+    line.eta_date = quote.eta_date
+    line.tat_days = quote.tat_days
+    line.mrp = quote.mrp
+    line.discount_pct = quote.discount_pct
+    line.net_price = quote.net_price
+    line.winning_quote_id = quote.id
+    line.note = note[:500]
+
+
+def _margin_check(session: Session, demand: m.PortalDemandLine, line: am.AdvanceOrderLine) -> bool:
+    """True = go ahead with the line's (possibly changed) winner. Among the
+    vendors who keep the minimum margin, the engine's order stands (fastest
+    first, then the bigger discount). None keeps it -> held, team told."""
+    floor = Decimal(str(settings.min_margin_percent or 0))
+    if floor <= 0:
+        return True
+    if not _customer_known(demand):
+        logger.info("Portal line %s: customer price not known -- margin not checked.", demand.source_order_line_id)
+        return True
+    from backend.app.advance_orders import quotes
+
+    ranked = quotes.ranked_for_line(line, session)
+    checked = [(s.quote, margin_percent(demand, s.quote)) for s in ranked]
+    ok = [(q, mg) for q, mg in checked if mg is not None and mg >= floor]
+    if ok:
+        quote, mg = ok[0]
+        if quote.id != line.winning_quote_id:
+            old = _vendor_name(line.vendor_id, session)
+            _point_line_at(line, quote, f"{line.note or ''} - margin rule: {old} below {floor}%, "
+                                        f"{_vendor_name(quote.vendor_id, session)} keeps {mg}%")
+            logger.info("Portal line %s: winner changed for the minimum margin (%s%%).",
+                        demand.source_order_line_id, mg)
+        else:
+            line.note = f"{line.note or ''} - margin {mg}%"[:500]
+        return True
+    # Nobody keeps the margin: hold, tell the team the best on the table.
+    best_q, best_m = max(checked, key=lambda x: x[1] if x[1] is not None else Decimal("-1000"), default=(None, None))
+    cust = f"{demand.customer_discount_pct:g}%" if demand.customer_discount_pct is not None else "-"
+    sale = f"Rs {demand.sale_price:.2f}" if demand.sale_price is not None else "-"
+    if best_q is not None:
+        vend = f"{best_q.discount_pct:g}%" if best_q.discount_pct is not None else "discount not given"
+        best = (f"best: {_vendor_name(best_q.vendor_id, session)} {vend}, "
+                f"margin {best_m if best_m is not None else 'unknown'}%")
+    else:
+        best = "no usable quote"
+    why = (f"margin below {floor}%: customer {cust} off (pays {sale}), {best}")
+    _move(session, demand, m.MARGIN_HOLD, entity="demand", error=why, note=why)
+    _alert(session, f"margin-{demand.source_order_line_id}",
+           f"{demand.part_no} x{demand.planned_quantity} ({demand.brand or '-'}) held -- {why}. "
+           "No PO-MST made. Decide on the Portal.", hours=24)
+    return False
+
+
 def collect(session: Session) -> int:
     """Turn every line the engine decided into an allocation; mark lines no
     vendor could supply."""
@@ -456,6 +578,8 @@ def collect(session: Session) -> int:
                 continue
             if demand.state in (m.ENQUIRY_SCHEDULED, m.AWAITING_VENDOR_REPLIES):
                 _move(session, demand, m.QUOTES_NORMALIZED, entity="demand")
+            if not _margin_check(session, demand, line):
+                break  # held: no PO-MST for this line; the team decides
             fields = _quote_fields(line, session)
             today = now_ist_naive().strftime("%Y%m%d")
             session.add(m.PortalAllocation(
@@ -498,29 +622,23 @@ def _dealer_id(row: dict) -> int | None:
 
 
 def _resolve_dealer(alloc: m.PortalAllocation, demand: m.PortalDemandLine, client: PortalClient,
-                    session: Session) -> int | None:
-    """The winning vendor's Dealer Portal dealer id -- only when the Portal's
-    own vendor-options list for this line contains it, matched by a durable
-    identifier (the admin-confirmed vendor map, or GSTIN), never by name."""
-    from core.models import DealerPortalVendorMap, DealerPortalVendorMapStatus
+                    session: Session) -> tuple[int | None, str]:
+    """(dealer id, why not). The winner's Portal dealer id only when it is
+    LINKED by immutable id (`links.resolve`: the admin-confirmed stock map
+    first, then the procurement links) AND the Portal's own vendor options
+    for this line contain it -- never by name."""
+    from backend.app.portal_procurement import links
 
     options = _dealer_rows(client.vendors_for_line(demand.source_order_line_id))
+    links.refresh_dealers(session, options, demand.brand)
     by_id = {_dealer_id(r): r for r in options if _dealer_id(r) is not None}
-    mapped = session.execute(
-        select(DealerPortalVendorMap).where(
-            DealerPortalVendorMap.vendor_id == alloc.vendor_id,
-            DealerPortalVendorMap.status == DealerPortalVendorMapStatus.CONFIRMED,
-        )
-    ).scalar_one_or_none()
-    if mapped is not None and mapped.dp_dealer_id in by_id:
-        return mapped.dp_dealer_id
-    gstins = _vendor_gstins(alloc.vendor_id, session)
-    if gstins:
-        for dealer_id, row in by_id.items():
-            gst = str(_first(row, "gstin", "gst_number", "gst_no", "gst") or "").strip().upper()
-            if gst and gst in gstins:
-                return dealer_id
-    return None
+    linked = links.resolve(alloc.vendor_id, session)
+    if linked is None:
+        return None, "the vendor is not linked to a Portal dealer yet"
+    if linked not in by_id:
+        return None, (f"linked to Portal dealer {linked}, but the Portal does not offer that dealer for this "
+                      f"part (brand {demand.brand or '?'} mapping or Odoo partner missing on the Portal)")
+    return linked, ""
 
 
 def _vendor_gstins(vendor_id: int | None, session: Session) -> set[str]:
@@ -539,25 +657,41 @@ def _vendor_gstins(vendor_id: int | None, session: Session) -> set[str]:
         return set()
 
 
-def _current_row(demand: m.PortalDemandLine, client: PortalClient, today: date) -> dict | None:
+def _current_row(demand: m.PortalDemandLine, client: PortalClient, today: date) -> tuple[dict | None, dict | None]:
     """Re-fetch this demand line right before allocating (brief: never from
-    stale quantity)."""
+    stale quantity). Returns (source row, live PO-MST master row or None).
+    Matched on source_order_line_id only."""
     date_from, date_to = _window(today)
     if demand.order_date is not None and demand.order_date.isoformat() < date_from:
         date_from = demand.order_date.isoformat()
     offset = 0
+    seen: list[dict] = []
     while True:
-        body = client.active(date_from, date_to, offset, settings.page_size,
-                             po_group_id=demand.source_po_group_id, part_no=demand.part_no)
+        body = client.active(date_from, date_to, offset, settings.page_size)
         rows = _rows(body)
-        for row in rows:
-            if _int(row.get("source_order_line_id")) == demand.source_order_line_id and str(
-                row.get("row_type") or ""
-            ).lower() == "source":
-                return row
+        seen += [r for r in rows if _int(r.get("source_order_line_id")) == demand.source_order_line_id]
         offset += len(rows)
         if _last_page(rows, _total(body), offset):
-            return None
+            break
+    source = next((r for r in seen if str(r.get("row_type") or "").lower() == "source"), None)
+    return source, _master_for(seen, demand.source_order_line_id)
+
+
+def _not_allocatable(row: dict | None, demand: m.PortalDemandLine, qty: int) -> str | None:
+    """Why this re-fetched source row must NOT be allocated now (None = ok)."""
+    if row is None:
+        return "line no longer on Active Procurement"
+    planned = _int(row.get("planned_quantity")) or 0
+    stage = str(row.get("procurement_stage") or "").lower()
+    if planned <= 0:
+        return f"planned quantity is {planned}"
+    if not _eligible(row):
+        return f"not open for assignment (stage {stage or '-'}, editable {row.get('editable')})"
+    if _norm_part(row.get("part_no")) != _norm_part(demand.part_no):
+        return f"part changed on the Portal ({demand.part_no} -> {row.get('part_no')})"
+    if (_int(row.get("qty_received")) or 0) > 0:
+        return f"already received ({row.get('qty_received')})"
+    return None
 
 
 def _vendor_name(vendor_id: int | None, session: Session) -> str:
@@ -567,7 +701,8 @@ def _vendor_name(vendor_id: int | None, session: Session) -> str:
     return vendor.name if vendor else f"vendor {vendor_id}"
 
 
-def _allocation_payload(alloc: m.PortalAllocation, demand: m.PortalDemandLine, qty: int) -> dict:
+def _allocation_payload(alloc: m.PortalAllocation, demand: m.PortalDemandLine, qty: int,
+                        allocation_id: int | None = None) -> dict:
     payload: dict[str, Any] = {
         "source_order_line_id": demand.source_order_line_id,
         "supplier_dealer_id": alloc.supplier_dealer_id,
@@ -575,6 +710,9 @@ def _allocation_payload(alloc: m.PortalAllocation, demand: m.PortalDemandLine, q
         "quote_reference": alloc.quote_reference,
         "quote_source": "vendor_bot",
     }
+    if allocation_id is not None:
+        # An existing PO-MST allocation is superseded atomically by this one.
+        payload["allocation_id"] = int(allocation_id)
     if alloc.quoted_mrp_incl_gst is not None and alloc.quoted_mrp_incl_gst > 0:
         payload["quoted_mrp_incl_gst"] = _money(alloc.quoted_mrp_incl_gst)
     if alloc.quoted_rate_ex_gst is not None and alloc.quoted_rate_ex_gst > 0:
@@ -631,7 +769,7 @@ def _tell_po_mst_created(session: Session, alloc: m.PortalAllocation, demand: m.
         body = (
             "🧾 PO-MST created on the Dealer Portal\n"
             f"PO-MST: {item.get('po_mst')}\n"
-            f"Source PO-GRP: {demand.source_po_group_id or '-'}\n"
+            # No source PO-GRP line (User, 16 Nov 2026).
             f"Vendor: {item.get('vendor') or _vendor_name(alloc.vendor_id, session)}\n"
             f"Part: {demand.part_no} x{item.get('quantity') or alloc.quantity}"
             + (f" ({demand.brand})" if demand.brand else "") + "\n"
@@ -676,20 +814,22 @@ def _step_allocation(session: Session, alloc: m.PortalAllocation, client: Portal
 
     if alloc.state in (m.WINNER_SELECTED, m.VENDOR_ONBOARDING_REQUIRED):
         try:
-            dealer = _resolve_dealer(alloc, demand, client, session)
+            dealer, why = _resolve_dealer(alloc, demand, client, session)
         except PortalError as exc:
             _bump(session, alloc, exc)
             _dead(session, alloc, "allocation", label)
             return
         if dealer is None:
+            # onboarding_needed: the quote is SAVED on the allocation and the
+            # PO-MST is created by itself as soon as the link exists
+            # (checked hourly, and at once after a link import).
             if alloc.state != m.VENDOR_ONBOARDING_REQUIRED:
-                _move(session, alloc, m.VENDOR_ONBOARDING_REQUIRED, entity="allocation",
-                      error="winning vendor is not in the Portal vendor options for this line")
-                _alert(session, f"onboard-{alloc.vendor_id}",
-                       f"{_vendor_name(alloc.vendor_id, session)} won {demand.part_no} x{alloc.quantity} "
-                       f"(quote {alloc.quote_reference}) but is not set up on the Dealer Portal for brand "
-                       f"{demand.brand or '?'}. Needed: active dealer, brand mapping, Odoo partner (GST, legal "
-                       "name, contact, address). The quote waits; it is NOT given to another vendor.", hours=24)
+                _move(session, alloc, m.VENDOR_ONBOARDING_REQUIRED, entity="allocation", error=why)
+                _alert(session, f"onboard-{alloc.vendor_id}-{demand.id}",
+                       f"onboarding needed -- {_vendor_name(alloc.vendor_id, session)} (bot vendor "
+                       f"{alloc.vendor_id}) won {demand.part_no} x{alloc.quantity} (quote {alloc.quote_reference}), "
+                       f"but {why}. The quote is saved and the PO-MST is created automatically once this is "
+                       "fixed; it is NOT given to another vendor.", hours=24)
             alloc.next_try_at = now_ist_naive() + timedelta(minutes=60)
             session.flush()
             return
@@ -697,18 +837,21 @@ def _step_allocation(session: Session, alloc: m.PortalAllocation, client: Portal
 
     if alloc.state == m.VENDOR_MAPPED:
         try:
-            row = _current_row(demand, client, today)
+            row, master = _current_row(demand, client, today)
         except PortalError as exc:
             _bump(session, alloc, exc)
             _dead(session, alloc, "allocation", label)
             return
-        planned = (_int(row.get("planned_quantity")) or 0) if row else 0
-        stage = str((row or {}).get("procurement_stage") or "").lower()
-        if row is None or planned <= 0 or stage != "pending":
-            _move(session, alloc, m.ALLOCATION_CANCELLED, entity="allocation",
-                  error=f"demand no longer pending on the Portal (qty {planned}, stage {stage or '-'})")
+        why = _not_allocatable(row, demand, alloc.quantity)
+        if why:
+            _move(session, alloc, m.ALLOCATION_CANCELLED, entity="allocation", error=f"not allocated: {why}")
             _maybe_close(session, demand)
             return
+        planned = _int(row.get("planned_quantity")) or 0
+        allocation_id = _int(master.get("allocation_id")) if master else None
+        if allocation_id is not None:
+            logger.info("Portal procurement: %s supersedes PO-MST allocation %s (%s).", alloc.quote_reference,
+                        allocation_id, _first(master, "po_group_id", "master_po_group_id"))
         qty = min(alloc.quantity, planned)
         if qty < alloc.quantity:
             logger.info("Portal procurement: %s capped %d -> %d (Portal planned quantity).",
@@ -719,7 +862,7 @@ def _step_allocation(session: Session, alloc: m.PortalAllocation, client: Portal
             return
         session.commit()
         try:
-            body = client.allocate(_allocation_payload(alloc, demand, qty))
+            body = client.allocate(_allocation_payload(alloc, demand, qty, allocation_id))
         except UnknownOutcome as exc:
             _move(session, alloc, m.ALLOCATION_UNKNOWN, entity="allocation", error=_err(exc),
                   http_status=exc.status, request_id=exc.request_id)
@@ -966,7 +1109,8 @@ def _step_po(session: Session, po: m.PortalPoMaster, client: PortalClient) -> No
                   actor="super_admin")
             session.commit()
         elif state == "rejected":
-            reason = str(_first(status if isinstance(status, dict) else {}, "reason", "decision_reason",
+            inner = status.get("approval") if isinstance(status, dict) and isinstance(status.get("approval"), dict) else status
+            reason = str(_first(inner if isinstance(inner, dict) else {}, "admin_remark", "reason", "decision_reason",
                                 "admin_reason", "remarks") or "")[:500]
             _move(session, po, m.APPROVAL_REJECTED, entity="po_mst", approval_status="rejected",
                   approval_reason=reason or None, actor="super_admin", error=reason or "rejected")
@@ -1100,6 +1244,9 @@ def _request_approval(session: Session, po: m.PortalPoMaster, client: PortalClie
 
 def _approval_state(body: Any) -> str | None:
     data = body.get("data") if isinstance(body, dict) and isinstance(body.get("data"), dict) else body
+    # The live Portal answers {"approval": {"status": "pending", ...}} (16 Nov 2026).
+    if isinstance(data, dict) and isinstance(data.get("approval"), dict):
+        data = data["approval"]
     if not isinstance(data, dict):
         return None
     value = str(_first(data, "status", "approval_status", "decision") or "").lower()
@@ -1126,7 +1273,7 @@ def _on_rejected(session: Session, po: m.PortalPoMaster, client: PortalClient, r
             continue
         demand.allocated_quantity = max(0, (demand.allocated_quantity or 0) - alloc.quantity)
         try:
-            row = _current_row(demand, client, now_ist_naive().date())
+            row, _master = _current_row(demand, client, now_ist_naive().date())
         except PortalError:
             row = None
         if row is not None and (_int(row.get("planned_quantity")) or 0) > 0:
@@ -1208,7 +1355,9 @@ def poll_job() -> None:
     """Scheduler: read the Portal, then send new lines to vendors."""
     from core.db import get_session
 
-    if not settings.enabled:
+    from backend.app.portal_procurement import client as portal_client
+
+    if not settings.enabled or portal_client.blocked():
         return
     with get_session() as session:
         if not settings.configured():
@@ -1233,7 +1382,9 @@ def steps_job() -> None:
     """Scheduler: move every allocation and PO-MST one step on."""
     from core.db import get_session
 
-    if not settings.enabled or not settings.configured():
+    from backend.app.portal_procurement import client as portal_client
+
+    if not settings.enabled or not settings.configured() or portal_client.blocked():
         return
     with get_session() as session:
         client = _client()

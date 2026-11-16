@@ -1,8 +1,10 @@
 """A WhatsApp group for every NEW vendor (team, 29 Oct 2026).
 
 When a vendor registration is created, the bot (through Whapi, on Alam sir's
-number) makes "CarTrends 🤝 <Vendor>" with the vendor's WhatsApp number and
-WHAPI_NEW_VENDOR_GROUP_MEMBERS (Seema, Rajkumar), saves it as that vendor's
+number) makes "<Vendor> x CarTrends" (12 Nov 2026) with the vendor's WhatsApp
+number and WHAPI_NEW_VENDOR_GROUP_MEMBERS -- by default NK Jain sir, Rajkumar,
+Seema, Alam sir and Prateek sir. The linked number itself (WHAPI_OWNER_NUMBER)
+is in the group as its creator, so it is never "added". Saves it as that vendor's
 group -- so the daily "stock share kar dijiye" reaches it and stock posted
 there is uploaded -- and says hello in it. A vendor whose privacy setting
 stops him being added gets the group's invite link on WhatsApp instead.
@@ -19,7 +21,20 @@ from core.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-WELCOME = "Namaste ji 🙏 CarTrends mein aapka swagat hai. Daily stock list isi group mein share kar dijiye."
+# The team in every new vendor's group (founder, 12 Nov 2026).
+DEFAULT_TEAM = (
+    "NK Jain sir:9810238966,Rajkumar:9217396458,Seema:9289015770,"
+    "Alam sir:9217030408,Prateek sir:9999492550"
+)
+
+# Posted ONCE, right after the group is made (founder's wording, 12 Nov 2026,
+# spelling corrected). A vendor never gets a second group, so never twice.
+WELCOME = (
+    "Namaste sir 🙏\n"
+    "CarTrends ka support engine banne ke liye bahut shukriya. "
+    "Aasha hai aapke saath se CarTrends aur behtar kaam kar payega.\n\n"
+    "Daily stock list isi group mein share kar dijiye."
+)
 
 
 def enabled() -> bool:
@@ -31,12 +46,19 @@ def enabled() -> bool:
 def _team() -> list[str]:
     from backend.app.integrations.whatsapp.registry import normalize_number
 
-    raw = os.environ.get("WHAPI_NEW_VENDOR_GROUP_MEMBERS") or "Seema:9289015770,Rajkumar:9217396458"
-    return [n for n in (normalize_number(x.split(":")[-1].strip()) for x in raw.split(",") if x.strip()) if n]
+    raw = os.environ.get("WHAPI_NEW_VENDOR_GROUP_MEMBERS") or DEFAULT_TEAM
+    owner = normalize_number(os.environ.get("WHAPI_OWNER_NUMBER") or "")
+    out: list[str] = []
+    for item in raw.split(","):
+        number = normalize_number(item.split(":")[-1].strip()) if item.strip() else None
+        if number and number != owner and number not in out:
+            out.append(number)
+    return out
 
 
 def group_name(vendor_name: str) -> str:
-    return f"CarTrends 🤝 {' '.join(vendor_name.split())}"[:100]  # WhatsApp's limit
+    suffix = " x CarTrends"
+    return " ".join(vendor_name.split())[: 100 - len(suffix)] + suffix  # WhatsApp's limit: 100
 
 
 def create_for_vendor(vendor_code: str, vendor_name: str, vendor_number: str) -> str | None:

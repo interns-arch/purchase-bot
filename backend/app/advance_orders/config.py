@@ -114,6 +114,14 @@ class AdvanceOrderSettings:
     # his personal chat. "group_first" (default): no group -> his own number,
     # as before. "group_only": a vendor without a group is not asked at all.
     vendor_route: str = (os.environ.get("ADVANCE_ORDER_VENDOR_ROUTE") or "group_first").strip().lower()
+    # User, 13 Nov 2026: every part enquiry asks three things -- MRP, discount
+    # and days -- and the answers go to the Dealer Portal with the PO-MST.
+    # false = the old question (availability + days; rate only for rate vendors).
+    ask_mrp_discount: bool = (os.environ.get("ADVANCE_ORDER_ASK_MRP_DISCOUNT") or "true").strip().lower() == "true"
+    # User, 13 Nov 2026: ask ONE thing at a time -- "Sir ye part hai kya with
+    # pcs?", then MRP, then discount, then days. "steps" (default) or "one"
+    # (everything in one message, as above).
+    ask_mode: str = (os.environ.get("ADVANCE_ORDER_ASK_MODE") or "steps").strip().lower()
     # Seconds between two posts into vendor groups (one group at a time,
     # nothing in bulk -- a burst got Rajkumar's number banned, 2 Nov 2026).
     group_gap_seconds: float = float(os.environ.get("ADVANCE_ORDER_GROUP_GAP_SECONDS") or 20)

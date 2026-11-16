@@ -111,7 +111,14 @@ def record(
         quoted_rate=answer.quoted_rate,
         mrp=answer.mrp,
     )
-    if answer.quoted_rate is not None:
+    stated = getattr(answer, "discount_pct", None)
+    if stated is not None:
+        # The vendor's own discount for this enquiry (13 Nov 2026: MRP,
+        # discount and days are asked every time) beats the standing one.
+        effective = stated
+        if answer.quoted_rate is None:
+            net = (answer.mrp * (1 - stated / Decimal(100))).quantize(Decimal("0.0001")) if answer.mrp else None
+    if answer.quoted_rate is not None or stated is not None:
         price_source = "quoted"
     elif net is not None:
         price_source = "standing"

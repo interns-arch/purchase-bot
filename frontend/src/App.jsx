@@ -32,8 +32,12 @@ const VendorInvoicesPage = lazy(() =>
   import("./pages/VendorInvoicesPage").then((m) => ({ default: m.VendorInvoicesPage }))
 );
 const ChatsPage = lazy(() => import("./pages/ChatsPage").then((m) => ({ default: m.ChatsPage })));
+const VendorCreationPage = lazy(() =>
+  import("./pages/VendorCreationPage").then((m) => ({ default: m.VendorCreationPage }))
+);
 const GroupsPage = lazy(() => import("./pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
 const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then((m) => ({ default: m.VendorPriorityPage })));
+const VendorPocPage = lazy(() => import("./pages/VendorPocPage").then((m) => ({ default: m.VendorPocPage })));
 const DealerPortalPage = lazy(() => import("./pages/DealerPortalPage").then((m) => ({ default: m.DealerPortalPage })));
 const TeamPerformancePage = lazy(() => import("./pages/TeamPerformancePage").then((m) => ({ default: m.TeamPerformancePage })));
 const PurchaseOrdersPage = lazy(() =>
@@ -123,10 +127,26 @@ function App() {
               }
             />
             <Route
+              path="/vendor-poc"
+              element={
+                <ProtectedRoute>
+                  <VendorPocPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
               path="/chats"
               element={
                 <ProtectedRoute>
                   <ChatsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/vendor-creation"
+              element={
+                <ProtectedRoute>
+                  <VendorCreationPage />
                 </ProtectedRoute>
               }
             />

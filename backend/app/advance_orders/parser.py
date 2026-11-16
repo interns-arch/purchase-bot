@@ -68,6 +68,15 @@ _RATE_BEFORE = re.compile(
 _RATE_AFTER = re.compile(
     _AMOUNT + r"\s*(?:\u20b9|rs\.?|rupees?|rupaye|/-|each|per\s*pc|per\s*piece)", re.I
 )
+# A DISCOUNT the vendor states (13 Nov 2026: every enquiry asks MRP, discount
+# and days). Only with a % sign or a discount word: "10%", "10 % off",
+# "discount 12", "12 disc", "chhoot 8".
+_DISC = re.compile(
+    r"\b(?:disc(?:ount)?|dis|off|chhoot|chhut|chut|scheme)\s*:?\s*(?:of\s*)?(\d{1,2}(?:\.\d{1,3})?)\s*%?"
+    r"|(\d{1,2}(?:\.\d{1,3})?)\s*%\s*(?:disc(?:ount)?|off|chhoot|chhut)?"
+    r"|\b(\d{1,2}(?:\.\d{1,3})?)\s*(?:disc(?:ount)?|off)\b",
+    re.I,
+)
 # Any standalone number. Used ONLY to notice that an unlabelled figure exists
 # when a rate was expected -- never read as a value.
 _ANY_NUMBER = re.compile(r"(?<![A-Za-z0-9.])([0-9][0-9,]*(?:\.[0-9]{1,2})?)(?![A-Za-z0-9])")
@@ -90,6 +99,7 @@ class LineAnswer:
     tat_days: int | None = None
     quoted_rate: Decimal | None = None
     mrp: Decimal | None = None
+    discount_pct: Decimal | None = None
     # True when a number was present that MIGHT be the rate but was not
     # labelled as one. The caller must not use this answer's price; it sends
     # the raw reply to the admins instead.
@@ -146,6 +156,7 @@ def parse_eta(text: str, today: date) -> date | None:
 # accounted for -- the only thing that can make a rate reply ambiguous.
 _CONSUMED = [
     _MRP,
+    _DISC,
     _RATE_BEFORE,
     _RATE_AFTER,
     _ONLY_QTY,
@@ -162,7 +173,18 @@ def _residual_numbers(text: str) -> list[str]:
     return _ANY_NUMBER.findall(residue)
 
 
-def _answer(chunk: str, today: date, want_rate: bool = False) -> LineAnswer | None:
+def _discount(text: str) -> tuple[Decimal | None, str]:
+    """(stated discount %, text without it). Only 0-100 counts."""
+    match = _DISC.search(text)
+    if not match:
+        return None, text
+    value = _amount(next(g for g in match.groups() if g))
+    if value is None or value > 100:
+        return None, text
+    return value, text[: match.start()] + " " + text[match.end():]
+
+
+def _answer(chunk: str, today: date, want_rate: bool = False, want_money: bool = False) -> LineAnswer | None:
     text = chunk.strip()
     if not text:
         return None
@@ -176,20 +198,22 @@ def _answer(chunk: str, today: date, want_rate: bool = False) -> LineAnswer | No
     if mrp_match:
         mrp = _amount(mrp_match.group(1))
         rate_text = text[: mrp_match.start()] + " " + text[mrp_match.end() :]
+    # Then the discount, so "10%" can never be read as a rate or a quantity.
+    discount, rate_text = _discount(rate_text)
 
     rate = None
     rate_match = _RATE_BEFORE.search(rate_text) or _RATE_AFTER.search(rate_text)
     if rate_match:
         rate = _amount(rate_match.group(1))
 
-    eta = parse_eta(text, today)
-    qty_match = _ONLY_QTY.search(text)
+    eta = parse_eta(rate_text, today)
+    qty_match = _ONLY_QTY.search(rate_text)
     qty = int(qty_match.group(1) or qty_match.group(2)) if qty_match else None
 
-    if _NO.search(text) and eta is None and not qty and rate is None:
+    if _NO.search(text) and eta is None and not qty and rate is None and mrp is None and discount is None:
         return LineAnswer(available=False)
 
-    if eta is None and qty is None and rate is None and mrp is None and not _YES.search(text):
+    if eta is None and qty is None and rate is None and mrp is None and discount is None and not _YES.search(text):
         return None
     if qty == 0:
         return LineAnswer(available=False)
@@ -199,6 +223,10 @@ def _answer(chunk: str, today: date, want_rate: bool = False) -> LineAnswer | No
     # an invented price in front of a customer -- so the whole answer is
     # refused and a human reads the original words.
     if want_rate and rate is None and _residual_numbers(text):
+        return LineAnswer(available=True, ambiguous=True)
+    # MRP and discount were asked for (13 Nov 2026): a bare number could be
+    # either of them, so it is not guessed -- a human reads it.
+    if want_money and _residual_numbers(text):
         return LineAnswer(available=True, ambiguous=True)
 
     tat = (eta - today).days if eta is not None else None
@@ -214,11 +242,12 @@ def _answer(chunk: str, today: date, want_rate: bool = False) -> LineAnswer | No
         tat_days=tat,
         quoted_rate=rate,
         mrp=mrp,
+        discount_pct=discount,
     )
 
 
 def parse_vendor_reply(
-    text: str, lines: list[tuple[int, str, int]], today: date, want_rate: bool = False
+    text: str, lines: list[tuple[int, str, int]], today: date, want_rate: bool = False, want_money: bool = False
 ) -> dict[int, LineAnswer] | None:
     """`lines` = [(line_id, part_number, qty)] that were asked about.
     `want_rate` is True for a vendor who has no standing discount and was
@@ -243,23 +272,23 @@ def parse_vendor_reply(
         if hit is None:
             general.append(chunk)
             continue
-        ans = _answer(chunk, today, want_rate)
+        ans = _answer(chunk, today, want_rate, want_money)
         if ans is not None:
             specific[hit] = ans
 
     out = dict(specific)
-    general_answer = _answer(" ".join(general), today, want_rate) if general else None
+    general_answer = _answer(" ".join(general), today, want_rate, want_money) if general else None
 
     # A RATE NOT WRITTEN BESIDE A PART NUMBER, while several parts were asked.
     # Different parts have different rates, so "rate 450" cannot be applied to
     # all of them, and it cannot be pinned to one either unless the vendor
     # named exactly one part. Everything else is refused as ambiguous and the
     # admin reads the vendor's words. A clear "nahi" on a named part stands.
+    # The same goes for an MRP: every part has its own (13 Nov 2026).
     if (
-        want_rate
-        and general_answer is not None
-        and general_answer.quoted_rate is not None
+        general_answer is not None
         and len(lines) > 1
+        and ((want_rate and general_answer.quoted_rate is not None) or general_answer.mrp is not None)
     ):
         # Only parts he said YES to can carry a rate -- a refused part needs
         # none. So "TT-100 hai, TT-200 nahi, rate 450" is TT-100's rate.
@@ -269,7 +298,9 @@ def parse_vendor_reply(
         else:
             for line_id, _part, _qty in lines:
                 existing = out.get(line_id)
-                if existing is not None and (not existing.available or existing.quoted_rate is not None):
+                if existing is not None and (not existing.available or (
+                        existing.quoted_rate is not None if general_answer.quoted_rate is not None
+                        else existing.mrp is not None)):
                     continue  # a clear refusal, or a rate of its own
                 out[line_id] = LineAnswer(available=True, ambiguous=True)
         return out or None
@@ -313,6 +344,8 @@ def _merge_into(target: LineAnswer, extra: LineAnswer) -> None:
         target.quoted_rate = extra.quoted_rate
     if target.mrp is None and extra.mrp is not None:
         target.mrp = extra.mrp
+    if target.discount_pct is None and extra.discount_pct is not None:
+        target.discount_pct = extra.discount_pct
     # An unexplained number anywhere in the message taints the whole reply.
     if extra.ambiguous:
         target.ambiguous = True

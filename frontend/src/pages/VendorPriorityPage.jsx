@@ -10,6 +10,7 @@ import {
   listVendorOptions,
   setBrandVendors,
 } from "../api/advanceOrders";
+import { VendorPocPanel } from "./VendorPocPanel";
 
 // Brand-wise vendor priority (Founder, 10 Oct 2026). The purchase bot asks a
 // brand's vendors in exactly this order for every advance order -- #1 first,
@@ -50,6 +51,7 @@ export function VendorPriorityPage() {
   const [adding, setAdding] = useState("");
   const [saving, setSaving] = useState(false);
   const [newVendor, setNewVendor] = useState({ name: "", phone: "", discount: "", position: "" });
+  const [tab, setTab] = useState(() => (window.location.hash === "#poc" ? "poc" : "priority"));
 
   async function load() {
     try {
@@ -163,6 +165,30 @@ export function VendorPriorityPage() {
     save([...order, ...rest], `${brand}: ordered by performance.`);
   }
 
+  function chooseTab(next) {
+    setTab(next);
+    window.history.replaceState(null, "", next === "poc" ? "#poc" : window.location.pathname);
+  }
+  const tabs = (
+    <div className="toolbar" style={{ gap: 8, marginBottom: 12 }}>
+      <button type="button" className={tab === "priority" ? "btn btn--primary" : "btn btn--ghost"} onClick={() => chooseTab("priority")}>
+        Priority by brand
+      </button>
+      <button type="button" className={tab === "poc" ? "btn btn--primary" : "btn btn--ghost"} onClick={() => chooseTab("poc")}>
+        POC
+      </button>
+    </div>
+  );
+
+  if (tab === "poc") {
+    return (
+      <Layout title="Vendors">
+        {tabs}
+        <VendorPocPanel />
+      </Layout>
+    );
+  }
+
   if (!brands) {
     return (
       <Layout title="Vendor Priority">
@@ -176,6 +202,7 @@ export function VendorPriorityPage() {
 
   return (
     <Layout title="Vendor Priority">
+      {tabs}
       <section className="panel">
         <div className="toolbar" style={{ gap: 8, flexWrap: "wrap" }}>
           <input

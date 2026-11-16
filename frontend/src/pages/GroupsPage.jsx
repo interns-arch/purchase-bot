@@ -59,6 +59,11 @@ function GroupListItem({ group, active, onOpen }) {
       </div>
       <div className="chat-item__meta">
         {group.role}
+        {group.active === false && (
+          <span className="takeover-badge" title="Messages are shown, but the bot does not reply or take stock here">
+            view only
+          </span>
+        )}
         {group.member === false && <span className="takeover-badge">number not in this group</span>}
       </div>
       <div className="chat-item__preview">{group.preview}</div>
@@ -111,6 +116,7 @@ export function GroupsPage() {
   const [thread, setThread] = useState(null);
   const [live, setLive] = useState(true);
   const [activity, setActivity] = useState([]);
+  const [groupSearch, setGroupSearch] = useState("");
   const threadEndRef = useRef(null);
   const lastMessageId = useRef(null);
 
@@ -181,11 +187,26 @@ export function GroupsPage() {
     }
   }, [thread]);
 
+  const needle = groupSearch.trim().toLowerCase();
+  const shownGroups = needle
+    ? groups.filter((g) => `${g.name} ${g.role}`.toLowerCase().includes(needle))
+    : groups;
+
   return (
     <Layout title="Groups" subtitle="The WhatsApp groups the bot is in — every message, live.">
       <section className="panel chats">
         <div className="chats__toolbar">
-          <span className="chats__chip">{groups.length} groups</span>
+          <span className="chats__chip">
+            {groups.length} groups · {groups.filter((g) => g.active !== false).length} active ·{" "}
+            {groups.filter((g) => g.active === false).length} view only
+          </span>
+          <input
+            className="field__input"
+            placeholder="Search a group…"
+            value={groupSearch}
+            onChange={(event) => setGroupSearch(event.target.value)}
+            style={{ maxWidth: 240 }}
+          />
           <label className="chats__live">
             <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> live
           </label>
@@ -210,7 +231,7 @@ export function GroupsPage() {
             ) : groups.length === 0 ? (
               <p className="chats__empty">The bot is not in any group yet.</p>
             ) : (
-              groups.map((group) => (
+              shownGroups.map((group) => (
                 <GroupListItem key={group.id} group={group} active={group.id === openId} onOpen={() => setOpenId(group.id)} />
               ))
             )}
@@ -224,6 +245,7 @@ export function GroupsPage() {
                 <div className="chats__pane-head">
                   <span className="chats__chip">
                     {thread.name} · {thread.role} · {thread.messages.length} messages
+                    {thread.active === false ? " · view only (the bot does not act here)" : ""}
                   </span>
                 </div>
                 <div className="chats__thread">

@@ -42,6 +42,8 @@ class PortalResult:
     ok: bool
     reference: str | None = None
     error: str | None = None
+    # What the approver is told (the direct API path); None = the usual text.
+    note: str | None = None
 
 
 def _vendor_payload(answers: dict, *, vendor_code: str | None, gst: dict | None) -> dict:
@@ -152,7 +154,36 @@ def _request_mail(answers: dict, *, vendor_code: str | None, gst: dict | None) -
     return PortalResult(ok=True, reference=request_id)
 
 
+def _via_api(answers: dict, *, gst: dict | None) -> PortalResult:
+    """The Portal's own vendor/create with the admin login (12 Nov 2026)."""
+    from backend.app.vendor_onboarding import portal_vendor_api as api
+
+    result = api.create_vendor(answers, gst=gst)
+    extra = f" ({'; '.join(result.notes)})" if result.notes else ""
+    if not result.ok:
+        return PortalResult(ok=False, error=(result.error or "Dealer Portal error") + extra)
+    if result.existing is not None:
+        found = result.existing
+        return PortalResult(
+            ok=True,
+            reference=f"DP-EXISTS-{found.account_id or '?'}",
+            note=f"Dealer Portal: already there as '{found.name}' (id {found.account_id or '?'}, same {found.matched_on}) "
+            f"— no new account made.{extra}",
+        )
+    customer = "Haan" if api.also_customer(answers) else "Nahi"
+    return PortalResult(
+        ok=True,
+        reference=f"DP-{result.account_id or 'OK'}",
+        note=f"Dealer Portal: vendor account created (id {result.account_id or '?'}), "
+        f"login {result.username} / {result.password}, also customer: {customer}.{extra}",
+    )
+
+
 def create_vendor(answers: dict, *, vendor_code: str | None, gst: dict | None) -> PortalResult:
+    from backend.app.vendor_onboarding import portal_vendor_api
+
+    if portal_vendor_api.settings.enabled:
+        return _via_api(answers, gst=gst)
     if settings.mail_to:
         return _request_mail(answers, vendor_code=vendor_code, gst=gst)
     return _post(settings.vendor_url, _vendor_payload(answers, vendor_code=vendor_code, gst=gst), "vendor create")

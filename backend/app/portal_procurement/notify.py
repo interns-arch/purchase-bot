@@ -116,7 +116,6 @@ def summary_text(session: Session, po: m.PortalPoMaster) -> str:
         f"📄 Purchase order ready\n"
         f"PO-MST: {po.po_mst}\n"
         f"Odoo PO: {po.odoo_name or po.odoo_ref}\n"
-        f"Source PO-GRP: {', '.join(groups) or '-'}\n"
         f"Vendor: {vendor or po.vendor_dealer_id}\n"
         + "\n".join(rows)
         + "\n\nReview this PO before sharing it with the vendor team."
