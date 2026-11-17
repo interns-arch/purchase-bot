@@ -82,6 +82,23 @@ class PortalDemandLine(Base):
     portal_mrp: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), default=None)
     customer_discount_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 3), default=None)
     sale_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), default=None)
+    # Prateek sir's choice when no reply is good enough (16 Nov 2026): the
+    # numbered options he was sent, when, and his answer ("quote:<id>" or
+    # "cancel"). A chosen quote skips the margin / 7-day rule.
+    choice_options: Mapped[list | None] = mapped_column(JSON, default=None)
+    choice_sent_at: Mapped[datetime | None] = mapped_column(default=None)
+    choice_decision: Mapped[str | None] = mapped_column(default=None)
+
+
+class PortalRound(Base):
+    """One 3-hourly send of the open Portal lines to the vendors (16 Nov 2026)."""
+
+    __tablename__ = "portal_rounds"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slot_at: Mapped[datetime] = mapped_column(unique=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
+    lines_sent: Mapped[int] = mapped_column(default=0)
 
 
 class PortalAllocation(Base):
@@ -113,6 +130,10 @@ class PortalAllocation(Base):
     next_try_at: Mapped[datetime | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
     updated_at: Mapped[datetime] = mapped_column(default=now_ist_naive)
+    # Delivery record (16 Nov 2026): the date the vendor promised (set when
+    # the PO-MST is made) and when the Portal first showed the parts received.
+    promised_date: Mapped[date | None] = mapped_column(default=None)
+    received_at: Mapped[datetime | None] = mapped_column(default=None)
 
 
 class PortalPoMaster(Base):

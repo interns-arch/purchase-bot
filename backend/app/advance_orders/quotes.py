@@ -186,7 +186,15 @@ def _scored(
 
 def ranked_for_line(line: m.AdvanceOrderLine, session: Session) -> list[ranking.ScoredQuote]:
     """Every available quote for this line, best first."""
-    return ranking.rank(_scored(for_line(line.id, session), line.brand, session))
+    scored = _scored(for_line(line.id, session), line.brand, session)
+    order = line.order if line.advance_order_id else None
+    from backend.app.portal_procurement.config import SOURCE
+
+    if order is not None and order.source == SOURCE:
+        from backend.app.portal_procurement import rounds
+
+        rounds.fill_ties(scored, session)
+    return ranking.rank(scored)
 
 
 def window_closed(
@@ -202,7 +210,8 @@ def window_closed(
     return min(sent) + timedelta(minutes=cfg.quote_window_minutes) <= now
 
 
-def apply_winner(line: m.AdvanceOrderLine, session: Session, _depth: int = 0) -> bool:
+def apply_winner(line: m.AdvanceOrderLine, session: Session, _depth: int = 0,
+                 allowed: set[int] | None = None) -> bool:
     """Copy the best available quote onto the line. True when one existed.
 
     A vendor who has only part of the line ("sirf 3" of 10) gets HIS part:
@@ -211,6 +220,9 @@ def apply_winner(line: m.AdvanceOrderLine, session: Session, _depth: int = 0) ->
     yes to the line is carried over to the remainder, so he is not asked
     twice. The quantity the sales bot asked for, added up, never changes."""
     ordered = ranked_for_line(line, session)
+    if allowed is not None:
+        # Portal rule (16 Nov 2026): only the replies that may win.
+        ordered = [s for s in ordered if s.quote.id in allowed]
     if not ordered:
         return False
     winner = ordered[0]
