@@ -15,6 +15,14 @@ router = APIRouter(
 )
 
 
+@router.get("/live")
+def portal_procurement_live(db: Session = Depends(get_db)) -> dict:
+    """Every part on Active Procurement the bot is working on, by brand."""
+    from backend.app.portal_procurement import live
+
+    return live.live(db)
+
+
 @router.get("")
 def portal_procurement_summary(db: Session = Depends(get_db)) -> dict:
     from backend.app.portal_procurement import service

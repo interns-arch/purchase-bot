@@ -8,6 +8,7 @@ import { NavLink, useLocation } from "react-router-dom";
 // duplicate Vendor Performance (= Performance) are no longer in the menu.
 const NAV = [
   { to: "/command-centre", label: "Today" },
+  { to: "/active-procurement", label: "Active Procurement" },
   { to: "/advance-orders", label: "Advance orders" },
   { to: "/customer-orders", label: "Orders" },
   { to: "/vendor-inventory", label: "Vendor stock" },
@@ -40,6 +41,7 @@ const PAGE_PURPOSE = {
   "/vendor-priority": "Brand-wise vendor lists: every vendor of the brand is asked for a part at once. Add vendors, reorder, see who replies best.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
   "/vendor-creation": "Every vendor registered on WhatsApp — its full details, whether Prateek sir / NK Jain sir approved it, and its Dealer Portal account.",
+  "/active-procurement": "Live: every part on the Dealer Portal's Active Procurement, its brand, the vendors of that brand, who replied and who wins.",
   "/vendor-poc": "A vendor's people: every number here counts as the vendor, one to one and in his WhatsApp group.",
   "/groups": "The WhatsApp groups the bot is in — every message, live.",
   "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",

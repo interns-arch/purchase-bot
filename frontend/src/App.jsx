@@ -37,6 +37,9 @@ const VendorCreationPage = lazy(() =>
 );
 const GroupsPage = lazy(() => import("./pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
 const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then((m) => ({ default: m.VendorPriorityPage })));
+const ActiveProcurementPage = lazy(() =>
+  import("./pages/ActiveProcurementPage").then((m) => ({ default: m.ActiveProcurementPage }))
+);
 const VendorPocPage = lazy(() => import("./pages/VendorPocPage").then((m) => ({ default: m.VendorPocPage })));
 const DealerPortalPage = lazy(() => import("./pages/DealerPortalPage").then((m) => ({ default: m.DealerPortalPage })));
 const TeamPerformancePage = lazy(() => import("./pages/TeamPerformancePage").then((m) => ({ default: m.TeamPerformancePage })));
@@ -123,6 +126,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <VendorPriorityPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/active-procurement"
+              element={
+                <ProtectedRoute>
+                  <ActiveProcurementPage />
                 </ProtectedRoute>
               }
             />

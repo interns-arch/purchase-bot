@@ -270,6 +270,7 @@ def poll(session: Session, client: PortalClient, today: date | None = None) -> d
     offset = 0
     seen: set[int] = set()
     new = updated = pages = 0
+    received: dict[int, int] = {}
     complete = False
     while True:
         body = client.active(date_from, date_to, offset, settings.page_size)
@@ -277,6 +278,10 @@ def poll(session: Session, client: PortalClient, today: date | None = None) -> d
         total = _total(body)
         pages += 1
         for row in rows:
+            got = _int(_first(row, "qty_received")) or 0
+            sol_any = _int(_first(row, "source_order_line_id"))
+            if got > 0 and sol_any is not None:
+                received[sol_any] = max(received.get(sol_any, 0), got)
             if not _eligible(row):
                 continue
             sol = _int(row["source_order_line_id"])
@@ -315,6 +320,12 @@ def poll(session: Session, client: PortalClient, today: date | None = None) -> d
             complete = pages < 200 or _last_page(rows, total, offset)
             break
     session.flush()
+    try:
+        from backend.app.portal_procurement import rounds
+
+        rounds.note_receipts(session, received)
+    except Exception:  # noqa: BLE001 -- the delivery record never blocks the poll
+        logger.exception("Portal procurement: could not record deliveries.")
     closed = 0
     if complete:
         # A line still being enquired that is no longer pending on the Portal
@@ -378,15 +389,19 @@ def enquire(session: Session) -> int:
 
     query = select(m.PortalDemandLine).where(m.PortalDemandLine.state == m.DISCOVERED)
     pilot = None if settings.live() else settings.pilot()
-    if pilot is not None and not (pilot["lines"] or pilot["parts"]):
+    if pilot is not None and not (pilot["lines"] or pilot["parts"] or pilot["brands"]):
         return 0  # pilot with nothing chosen: nobody is asked
     fresh = session.execute(
         query.order_by(m.PortalDemandLine.order_date.asc().nulls_last(), m.PortalDemandLine.id)
     ).scalars().all()
     if pilot is not None:
         # Pilot: only the chosen source lines / part numbers.
-        fresh = [d for d in fresh if d.source_order_line_id in pilot["lines"]
-                 or _norm_part(d.part_no) in pilot["parts"]]
+        from backend.app.advance_orders.brands import canonical_brand
+
+        fresh = [d for d in fresh if d.source_order_line_id not in pilot["skip_lines"] and (
+                 d.source_order_line_id in pilot["lines"]
+                 or _norm_part(d.part_no) in pilot["parts"]
+                 or canonical_brand(d.brand) in pilot["brands"])]
     fresh = fresh[: settings.max_new_lines_per_poll]
     if not fresh:
         return 0
@@ -509,6 +524,8 @@ def _margin_check(session: Session, demand: m.PortalDemandLine, line: am.Advance
     floor = Decimal(str(settings.min_margin_percent or 0))
     if floor <= 0:
         return True
+    if (demand.choice_decision or "").startswith("quote:"):
+        return True  # Prateek sir chose this vendor himself
     if not _customer_known(demand):
         logger.info("Portal line %s: customer price not known -- margin not checked.", demand.source_order_line_id)
         return True
@@ -731,6 +748,11 @@ def _masters(body: Any) -> list[dict]:
 
 
 def _record_masters(session: Session, alloc: m.PortalAllocation, masters: list[dict], batch_id: Any) -> None:
+    if alloc.promised_date is None:
+        from backend.app.portal_procurement import rounds
+
+        arrival = next((str(x.get("arrival_date")) for x in masters if x.get("arrival_date")), None)
+        alloc.promised_date = rounds.promise_date(alloc, arrival)
     for item in masters:
         po = str(item["po_mst"])
         row = session.execute(select(m.PortalPoMaster).where(m.PortalPoMaster.po_mst == po)).scalar_one_or_none()
@@ -1370,7 +1392,18 @@ def poll_job() -> None:
         try:
             poll(session, client)
             session.commit()
-            enquire(session)
+            if settings.rounds:
+                # Only at a round time (09:30, 12:30, 15:30, 18:30): every open
+                # line goes out together; between rounds new lines wait.
+                from backend.app.portal_procurement import rounds
+
+                slot = rounds.round_due(session)
+                if slot is not None:
+                    sent = enquire(session)
+                    rounds.mark_round(session, slot, sent)
+                    session.commit()
+            else:
+                enquire(session)
         except AuthStopped as exc:
             session.rollback()
             _alert(session, "auth", f"run stopped -- {exc}. Check the service account / Cloudflare token.", hours=6)

@@ -119,6 +119,9 @@ class ScoredQuote:
     discount_pct: Decimal | None
     net_price: Decimal | None
     vendor_priority: int
+    # Portal lines only (16 Nov 2026): same band and discount -> fewer exact
+    # days, then the vendor's delivery / reply record. Empty elsewhere.
+    tie: tuple = ()
 
     @property
     def terms_tier(self) -> int:
@@ -138,6 +141,7 @@ class ScoredQuote:
             self.band,
             self.terms_tier,
             -(self.discount_pct or Decimal(0)),
+            self.tie,
             self.net_price if self.net_price is not None else Decimal("Infinity"),
             self.vendor_priority,
             self.quote.id or 0,

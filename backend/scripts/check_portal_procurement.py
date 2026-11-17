@@ -16,7 +16,7 @@ import os
 import sys
 import tempfile
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -26,6 +26,7 @@ os.environ["ADVANCE_ORDERS_ENABLED"] = "false"
 os.environ["PURCHASE_APPROVAL_MODE"] = "true"  # as on the server: must not hold Portal demand
 os.environ["PORTAL_PROCUREMENT_ENABLED"] = "true"
 os.environ["PORTAL_PROCUREMENT_MODE"] = "live"  # the pilot is checked on its own in [14]
+os.environ["PORTAL_PROCUREMENT_ROUNDS"] = "false"  # [1]-[18]: the old timing; [19] checks the 3-hour rounds
 os.environ["PORTAL_PROCUREMENT_USERNAME"] = "svc-test"
 os.environ["PORTAL_PROCUREMENT_PASSWORD"] = "pw-test"
 os.environ["PORTAL_PROCUREMENT_NOTIFY_NUMBERS"] = "919000000099"
@@ -708,6 +709,13 @@ def main() -> int:
           and not any("86523C9000" in b for to, b in sent if to != "919100000002")
           and not any("86523C9000" in b for _, b in group_posts))
     check("pilot picked the line by PART NUMBER (a fresh advance order)", demand(12482).advance_order_id is not None)
+    portal.add_row(12484, "86525C9000", 1)
+    portal.add_row(12485, "86525C9000", 1)
+    (_TMP / "pilot.json").write_text(json.dumps({"parts": ["86525C9000"], "vendors": [vendors["B"]],
+                                                 "skip_lines": [12484]}))
+    run_poll()
+    check("skip_lines: an older line of a pilot part is not asked", demand(12484).state == m.DISCOVERED
+          and demand(12485).state == m.ENQUIRY_SCHEDULED)
     portal_settings.mode = "live"
 
     # ------------------------------------------------------------------ 15
@@ -937,6 +945,241 @@ def main() -> int:
     reply("919100000003", "nahi")
     run_steps(3)
     check("margin 0 = rule off: the same quote goes through", (payload_for(12503) or {}).get("supplier_dealer_id") == 27)
+
+    # ------------------------------------------------------------------ 19
+    print("\n[19] 3-hour rounds: brand only, groups only, 7 days + margin, ties, Prateek sir, delivery record")
+    from backend.app.portal_procurement import live as live_view, rounds
+
+    PRATEEK = "919000000077"
+    portal_settings.rounds = True
+    portal_settings.mode = "live"
+    portal_settings.min_margin_percent = 2
+    portal_settings.round_hours, portal_settings.max_asks, portal_settings.max_tat_days = 3, 3, 7
+    portal_settings.round_start, portal_settings.round_end = "10:00", "19:00"
+    check("round times: 10:00, 13:00, 16:00, 19:00",
+          [x.strftime("%H:%M") for x in rounds.slots_for(date(2026, 11, 20))] == ["10:00", "13:00", "16:00", "19:00"])
+    check("a round missed overnight is not run in the morning",
+          rounds.current_slot(datetime(2026, 11, 20, 9, 30)) is None
+          and rounds.current_slot(datetime(2026, 11, 20, 23, 0)) is None
+          and rounds.current_slot(datetime(2026, 11, 20, 19, 5)) == datetime(2026, 11, 20, 19, 0))
+    portal_settings.round_start, portal_settings.round_end = "09:00", "21:00"  # the times used below
+    cfg.escalation_numbers = [PRATEEK]
+    cfg.ask_mode = "one"
+    rounds.now_ist_naive = now
+    groups = {"CT_A": "120363000000000001@g.us", "CT_B": "120363000000000002@g.us", "CT_T": "120363000000000009@g.us"}
+    whapi.vendor_groups = lambda: groups
+    with get_session() as s:
+        tata = Vendor(name="Tata Only", vendor_code="CT_T")
+        s.add(tata)
+        s.flush()
+        s.add(am.VendorBrand(brand="TATA", vendor_id=tata.id, priority=1, discount_type=am.DISC_PERCENT, discount_pct=10))
+        s.add(am.AdvanceVendorContact(vendor_id=tata.id, whatsapp_number="919100000009"))
+
+    def run_round():
+        with get_session() as s:
+            service.poll(s, client, clock["now"].date())
+            s.commit()
+            slot = rounds.round_due(s, clock["now"])
+            if slot is not None:
+                rounds.mark_round(s, slot, service.enquire(s))
+
+    def settle(times: int = 3):
+        for _ in range(times):
+            with get_session() as s:
+                engine.tick(s, clock["now"])
+            with get_session() as s:
+                service.run_steps(s, client, clock["now"].date())
+            with get_session() as s:
+                for row in s.execute(select(m.PortalAllocation)).scalars():
+                    row.next_try_at = None
+                for row in s.execute(select(m.PortalPoMaster)).scalars():
+                    row.next_try_at = None
+
+    def posts(group: str, part: str) -> int:
+        return sum(1 for c, b in group_posts if c == group and part in b)
+
+    def to_prateek() -> list[str]:
+        return [b for to, b in sent if to == PRATEEK]
+
+    def cust(sol, part, mrp="1000.00", disc="10.00", price="900.00", brand="HYUNDAI"):
+        portal.add_row(sol, part, 1, brand=brand)
+        portal.rows[sol].update(mrp=mrp, customer_discount_percent=disc, price=price)
+        portal.options[sol] = [{"dealer_id": 27}, {"dealer_id": 28}]
+
+    GA, GB, GT = groups["CT_A"], groups["CT_B"], groups["CT_T"]
+    clock["now"] = datetime(2026, 11, 20, 9, 5)
+    group_posts.clear()
+    gamma_before = asked("919100000003")
+    cust(12601, "R19A01")
+    cust(12602, "R19T01", brand="TATA")
+    run_round()
+    check("round: Hyundai part posted in Alpha's and Beta's groups", posts(GA, "R19A01") == 1 and posts(GB, "R19A01") == 1)
+    check("round: Gamma (no group) not asked, not even one to one", asked("919100000003") == gamma_before)
+    check("brand only: the Tata part goes only to the Tata vendor",
+          posts(GT, "R19T01") == 1 and posts(GA, "R19T01") == 0 and posts(GB, "R19T01") == 0 and posts(GT, "R19A01") == 0)
+
+    clock["now"] = datetime(2026, 11, 20, 10, 0)
+    cust(12603, "R19A03")
+    run_round()
+    check("between rounds a new line waits", demand(12603).state == m.DISCOVERED and posts(GA, "R19A03") == 0)
+
+    # only reply is over 7 days -> no winner; the silent vendor is asked again next round
+    reply("919100000001", "haan 10 din, 20%")
+    clock["now"] = datetime(2026, 11, 20, 12, 10)
+    run_round()
+    settle()
+    check("a reply over 7 days does not win", payload_for(12601) is None and demand(12601).state != m.WINNER_SELECTED)
+    check("the silent vendor gets the part again after 3 hours", posts(GB, "R19A01") == 2)
+    check("...and the waiting line went out in this round", posts(GA, "R19A03") == 1)
+    reply("919100000002", "R19A01 haan 3 din, 15%")  # two lists open -> he names the part
+    settle()
+    check("a 3-day reply with 5% margin then wins", (payload_for(12601) or {}).get("supplier_dealer_id") == 28)
+
+    # tie: same days, same discount -> better delivery record wins
+    with get_session() as s:
+        d1 = s.execute(select(m.PortalDemandLine).where(m.PortalDemandLine.source_order_line_id == 12601)).scalar_one()
+        for i, (vid, late) in enumerate(((vendors["A"], True), (vendors["B"], False))):
+            s.add(m.PortalAllocation(demand_line_id=d1.id, vendor_id=vid, quantity=1, state=m.COMPLETED,
+                                     quote_reference=f"HIST-{i}", idempotency_key=f"hist-{i}",
+                                     promised_date=date(2026, 11, 1),
+                                     received_at=datetime(2026, 11, 5 if late else 1, 12, 0)))
+    clock["now"] = datetime(2026, 11, 20, 15, 5)
+    cust(12604, "R19A04")
+    run_round()
+    reply("919100000001", "haan 2 din, 15%")
+    reply("919100000002", "haan 2 din, 15%")
+    settle()
+    check("tie on days and discount: the vendor who delivers on time wins",
+          (payload_for(12604) or {}).get("supplier_dealer_id") == 28)
+
+    # every reply below the margin -> Prateek sir chooses
+    clock["now"] = datetime(2026, 11, 21, 9, 5)
+    cust(12605, "R19A05", disc="19.00", price="810.00")
+    run_round()
+    reply("919100000001", "haan 1 din, 18%")
+    reply("919100000002", "haan 2 din, 19%")
+    settle()
+    with get_session() as s:
+        d5 = s.execute(select(m.PortalDemandLine).where(m.PortalDemandLine.source_order_line_id == 12605)).scalar_one()
+        code5 = f"C{d5.id}"
+    msg = next((b for b in to_prateek() if code5 in b), "")
+    check("nobody keeps 2% -> Prateek sir gets every answer, numbered", "1. Alpha Motors" in msg and "2. Beta Spares" in msg
+          and "margin" in msg and payload_for(12605) is None)
+    with get_session() as s:
+        check("his reply picks the vendor", rounds.handle_reply(PRATEEK, f"{code5} 2", s))
+    settle()
+    check("...and the PO-MST goes to the vendor he chose", (payload_for(12605) or {}).get("supplier_dealer_id") == 28)
+
+    cust(12606, "R19A06", disc="19.00", price="810.00")
+    clock["now"] = datetime(2026, 11, 21, 12, 5)
+    run_round()
+    reply("919100000001", "haan 1 din, 18%")
+    reply("919100000002", "nahi")
+    settle()
+    with get_session() as s:
+        check("a bare 'cancel' works when only one choice waits", rounds.handle_reply(PRATEEK, "cancel", s))
+    check("...and the line is closed", demand(12606).state == m.CLOSED and payload_for(12606) is None)
+
+    # nobody replies: asked 3 times, 3 hours apart, then Prateek sir is told and asking stops
+    clock["now"] = datetime(2026, 11, 22, 9, 5)
+    cust(12607, "R19A07")
+    run_round()
+    for hour in (12, 15, 18):
+        clock["now"] = datetime(2026, 11, 22, hour, 10)
+        settle(1)
+    clock["now"] = datetime(2026, 11, 22, 18, 20)
+    settle(1)
+    check("silent vendor asked 3 times in all", posts(GA, "R19A07") == 3 and posts(GB, "R19A07") == 3)
+    check("Prateek sir told who did not reply", any("3 baar" in b and "R19A07" in b and "Alpha Motors" in b
+                                                    for b in to_prateek()))
+    clock["now"] = datetime(2026, 11, 23, 12, 10)
+    settle(2)
+    check("...and nobody is asked a 4th time", posts(GA, "R19A07") == 3)
+    check("the line ends as no vendor", demand(12607).state == m.NO_VENDOR)
+
+    # today's stock sheet shows the part: that vendor is not asked; his sheet is his reply
+    from core.models import ImportStatus, InventoryImport, VendorInventory
+
+    clock["now"] = datetime(2026, 11, 24, 9, 5)
+    with get_session() as s:
+        imp = InventoryImport(vendor_id=vendors["A"], file_name="alpha stock 24.11.xlsx", file_size_bytes=10,
+                              content_hash="h-24", status=ImportStatus.COMPLETED, is_active=True,
+                              completed_at=clock["now"] - timedelta(minutes=30))
+        for old_imp in s.execute(select(InventoryImport).where(InventoryImport.vendor_id == vendors["A"],
+                                                               InventoryImport.is_active.is_(True))).scalars():
+            old_imp.is_active = False
+        s.flush()
+        s.add(imp)
+        s.flush()
+        s.add(VendorInventory(vendor_id=vendors["A"], import_id=imp.id, row_number=2, vendor_part_number="R19A08",
+                              normalized_part_number="R19A08", quantity_available=5, mrp=1000, price=800,
+                              raw_data={"Part": "R19A08", "TAT": "1 day"}))
+        # a second part: in stock, but no price and no days on the sheet
+        s.add(VendorInventory(vendor_id=vendors["A"], import_id=imp.id, row_number=3, vendor_part_number="R19A10",
+                              normalized_part_number="R19A10", quantity_available=2, mrp=1000, price=None,
+                              raw_data={"Part": "R19A10"}))
+    cust(12608, "R19A08")
+    run_round()
+    check("stock-sheet vendor is not asked", posts(GA, "R19A08") == 0)
+    check("...the others are", posts(GB, "R19A08") == 1)
+    settle(1)
+    check("no winner before the others answer or the round ends", payload_for(12608) is None)
+    reply("919100000002", "R19A08 haan 2 din, 25%")
+    settle()
+    p8 = payload_for(12608) or {}
+    check("the sheet (1 day, 20% from MRP 1000 / price 800) beats a 2-day reply",
+          p8.get("supplier_dealer_id") == 27 and p8.get("quoted_tat_days") == 1
+          and float(p8.get("quoted_discount_percent") or 0) == 20.0)
+
+    # in stock on the sheet, but no price and no days: asked ONLY the discount, then the days
+    cust(12610, "R19A10")
+    group_posts.clear()
+    clock["now"] = datetime(2026, 11, 24, 12, 5)
+    run_round()
+    a10 = [b for c, b in group_posts if c == GA and "R19A10" in b]
+    check("sheet without price / days: not asked if he has it, asked the discount",
+          len(a10) == 1 and "discount" in a10[0].lower() and "pcs" not in a10[0].lower())
+    reply("919100000001", "12")
+    settle(1)
+    a10 = [b for c, b in group_posts if c == GA and "R19A10" in b]
+    check("...then only the days", len(a10) == 2 and "din" in a10[1].lower()
+          and "mrp" not in " ".join(a10).lower())
+    reply("919100000001", "1 din")
+    reply("919100000002", "R19A10 haan 3 din, 10%")
+    settle()
+    p10 = payload_for(12610) or {}
+    check("...and his sheet + answers win (1 day, 12%)", p10.get("supplier_dealer_id") == 27
+          and p10.get("quoted_tat_days") == 1 and float(p10.get("quoted_discount_percent") or 0) == 12.0)
+    check("rounds._sheet_days reads a days column", rounds._sheet_days({"Lead Time (days)": "4"}) == 4
+          and rounds._sheet_days({"Part": "X1", "Pending": "7"}) is None)
+    with get_session() as s:
+        imp_row = s.execute(select(InventoryImport).where(InventoryImport.content_hash == "h-24")).scalar_one()
+        imp_row.completed_at = datetime(2026, 11, 23, 18, 0)
+    clock["now"] = datetime(2026, 11, 24, 15, 5)
+    cust(12609, "R19A08")
+    portal.rows[12609]["part_no"] = "R19A08"
+    run_round()
+    check("an older sheet does not count: that vendor is asked", posts(GA, "R19A08") == 1)
+
+    # delivery record: promised date at PO-MST, received when the Portal shows it
+    a601 = [x for x in allocs(12601) if x.quote_reference.startswith("PH-Q-")]
+    check("promised date kept when the PO-MST is made", bool(a601) and a601[0].promised_date is not None)
+    portal.rows[12601]["qty_received"] = 1
+    run_round()
+    a601 = [x for x in allocs(12601) if x.quote_reference.startswith("PH-Q-")]
+    check("received day recorded from the Portal row", bool(a601) and a601[0].received_at is not None)
+
+    with get_session() as s:
+        view = live_view.live(s)
+    hy = next((b for b in view["brands"] if b["brand"] == "HYUNDAI"), {})
+    check("live view: brands with vendors and groups", hy.get("vendors", 0) >= 3 and hy.get("in_group") == 2
+          and "Gamma Auto" in hy.get("no_group_names", []))
+    check("live view: parts listed with asked / replied", any(x["part_no"] == "R19A04" and x["replied"] == 2
+                                                              for x in view["lines"]))
+    # Beta: the on-time history row + 12601, received after the Portal's arrival date -> 50%.
+    check("live view: Beta's on-time record shown", any(v["vendor"] == "Beta Spares" and v["on_time_pct"] == 50
+                                                        and v["delivered"] == 2 for v in view["vendors"]))
+    portal_settings.rounds = False
 
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0

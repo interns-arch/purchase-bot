@@ -65,21 +65,56 @@ class PortalProcurementSettings:
         return self.mode == "live"
 
     def pilot(self) -> dict:
-        """{"lines": set[int], "parts": set[str], "vendors": set[int]} for this run."""
-        lines, parts, vendors = set(self.pilot_lines), set(), set(self.pilot_vendors)
+        """{"lines": set[int], "parts": set[str], "brands": set[str], "vendors": set[int], "skip_lines": set[int]}
+        for this run. "brands" (16 Nov 2026): every line of these brands, in
+        the bot's own brand names ("FORD", "MARUTI SUZUKI")."""
+        lines, parts, brands, vendors = set(self.pilot_lines), set(), set(), set(self.pilot_vendors)
+        skip: set[int] = set()
         try:
             with open(self.pilot_file, encoding="utf-8") as fh:
                 data = json.load(fh) or {}
             lines = {int(x) for x in data.get("lines") or [] if str(x).strip().isdigit()}
             parts = {"".join(ch for ch in str(x).upper() if ch.isalnum()) for x in data.get("parts") or [] if x}
             vendors = {int(x) for x in data.get("vendors") or [] if str(x).strip().isdigit()}
+            # "skip_lines" (16 Nov 2026): Portal lines never asked, even when
+            # their part or brand is in the pilot (an older real order).
+            skip = {int(x) for x in data.get("skip_lines") or [] if str(x).strip().isdigit()}
+            from backend.app.advance_orders.brands import canonical_brand
+
+            brands = {canonical_brand(str(x)) for x in data.get("brands") or [] if str(x).strip()} - {None}
         except (OSError, ValueError):
             pass
-        return {"lines": lines, "parts": parts, "vendors": vendors}
+        return {"lines": lines, "parts": parts, "brands": brands, "vendors": vendors, "skip_lines": skip}
 
     # How often the Active Procurement list is read, and how often the
     # allocation steps (allocate, knockoff, approval, Odoo, PDF) move on.
-    poll_minutes: int = max(5, _int("PORTAL_PROCUREMENT_POLL_MINUTES", 30))
+    poll_minutes: int = max(5, _int("PORTAL_PROCUREMENT_POLL_MINUTES", 10))
+
+    # ROUNDS (User, 16 Nov 2026): the open lines go to the vendors once every
+    # `round_hours` inside vendor hours (09:30, 12:30, 15:30, 18:30). A vendor
+    # is asked a part at most `max_asks` times (the first ask + reminders one
+    # round apart); silent after that -> Prateek sir is told and that vendor
+    # is not asked about it again. Only a reply of at most `max_tat_days`
+    # with the minimum margin can win; otherwise the bot keeps asking, and
+    # when nobody is left to ask Prateek sir chooses (or cancels).
+    rounds: bool = (os.environ.get("PORTAL_PROCUREMENT_ROUNDS") or "true").strip().lower() == "true"
+    round_hours: int = max(1, _int("PORTAL_PROCUREMENT_ROUND_HOURS", 3))
+    max_asks: int = max(1, _int("PORTAL_PROCUREMENT_MAX_ASKS", 3))
+    max_tat_days: int = max(1, _int("PORTAL_PROCUREMENT_MAX_TAT_DAYS", 7))
+    # Round times (User, 16 Nov 2026): first at 10:00, last at 19:00, every
+    # `round_hours` between -> 10:00, 13:00, 16:00, 19:00.
+    round_start: str = (os.environ.get("PORTAL_PROCUREMENT_ROUND_START") or "10:00").strip()
+    round_end: str = (os.environ.get("PORTAL_PROCUREMENT_ROUND_END") or "19:00").strip()
+    # A vendor whose stock sheet from TODAY shows the part is not asked if he
+    # has it: the sheet is his answer -- available, MRP (else the Portal's),
+    # discount from the sheet price, days from a days/TAT column. A discount or
+    # days the sheet does not give is asked -- only that (User, 16 Nov 2026).
+    # PORTAL_PROCUREMENT_SHEET_TAT_DAYS set = use it instead of asking days.
+    sheet_tat_days: int | None = (
+        max(0, _int("PORTAL_PROCUREMENT_SHEET_TAT_DAYS", 0))
+        if (os.environ.get("PORTAL_PROCUREMENT_SHEET_TAT_DAYS") or "").strip() else None
+    )
+    sheet_today_only: bool = (os.environ.get("PORTAL_PROCUREMENT_SHEET_TODAY_ONLY") or "true").strip().lower() == "true"
     step_minutes: int = max(1, _int("PORTAL_PROCUREMENT_STEP_MINUTES", 5))
     # Brief: the last seven calendar days (today minus six, IST).
     days: int = max(1, _int("PORTAL_PROCUREMENT_DAYS", 7))

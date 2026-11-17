@@ -365,6 +365,14 @@ def _resolve_lines(order: m.AdvanceOrder, session: Session, now: datetime) -> bo
         still_open = [
             q for q in covering if q.status in (m.Q_QUEUED, m.Q_SENT) and q.vendor_id not in answered
         ]
+        if _rounds_on(order):
+            # Portal rounds (16 Nov 2026): only a reply with the margin and at
+            # most 7 days wins; none -> keep asking, then Prateek sir chooses.
+            from backend.app.portal_procurement import rounds
+
+            if rounds.decide_line(line, covering, still_open, now, session):
+                decided = True
+            continue
         # Wait while a vendor we asked might still answer -- unless the
         # customer has already waited out the quote window, in which case the
         # best answer ON THE TABLE beats a longer silence.
@@ -415,6 +423,7 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
             and escalation.enabled()
             and cfg.escalate_on_silence
             and not open_queries
+            and not _rounds_on(order)
         ):
             last = session.execute(
                 select(m.AdvanceVendorQuery)
@@ -462,7 +471,7 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
             # never answered, go to Prateek sir. Only a clear "no" from every
             # vendor asked is final.
             silent = any(q.status in (m.Q_TIMEOUT, m.Q_FAILED) for q in brand_queries)
-            if order.kind == m.KIND_ADVANCE and escalation.enabled() and (not asked or silent):
+            if order.kind == m.KIND_ADVANCE and escalation.enabled() and (not asked or silent) and not _rounds_on(order):
                 reason = (
                     f"brand {brand} is not in the vendor list" if not asked
                     else f"brand {brand} vendors did not answer"
@@ -473,6 +482,8 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                 line.status = m.LINE_UNAVAILABLE
                 if unreachable:
                     line.note = "could not reach any vendor on WhatsApp"
+                elif silent and _rounds_on(order):
+                    line.note = "no vendor replied after every ask"
                 elif asked:
                     line.note = "no vendor had it"
                 else:
@@ -492,12 +503,26 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                 )
             continue
         for vendor in candidates:
+            ask_lines = lines
+            if _rounds_on(order):
+                # Portal rounds (16 Nov 2026): his stock sheet from today
+                # already shows the part -> not asked; the sheet is his reply.
+                from backend.app.portal_procurement import rounds
+
+                try:
+                    from_sheet = rounds.take_from_sheet(order, brand, vendor.id, lines, session, now)
+                except Exception:  # noqa: BLE001 -- a sheet problem must never stop the question
+                    logger.exception("Advance order %s: stock-sheet check for vendor %s failed.", order.id, vendor.id)
+                    from_sheet = []
+                ask_lines = [line for line in lines if line not in from_sheet]
+                if not ask_lines:
+                    continue
             session.add(
                 m.AdvanceVendorQuery(
                     advance_order_id=order.id,
                     brand=brand,
                     vendor_id=vendor.id,
-                    line_ids=[line.id for line in lines],
+                    line_ids=[line.id for line in ask_lines],
                     status=m.Q_QUEUED,
                 )
             )
@@ -669,19 +694,29 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
             continue
         terms = quotes.brand_terms(q.vendor_id, q.brand, session)
         want_rate = quotes.wants_rate(terms)
+        # Pre-filled from his stock sheet (rounds.take_from_sheet): he is asked
+        # only the first missing thing -- discount or days -- not "is it there".
+        preset = q.step if q.step and q.step not in ("pcs", "done") else None
+        if preset:
+            from backend.app.advance_orders import steps
+
+            have = [line for line in lines if ((q.draft or {}).get(str(line.id)) or {}).get("available")] or lines
+            body = steps.question(preset, have)
+        else:
+            body = _question_text(order, lines, want_rate)
         numbers = _vendor_numbers(q.vendor_id, session)
         delivered: list[str] = []
         sent_ids: dict[str, str] = {}
         use_template = _vendor_template_ready()
         group = _vendor_group(q.vendor_id, session)
-        if group or cfg.vendor_route == "group_only":
+        if group or cfg.vendor_route == "group_only" or _rounds_on(order):
             # "Sab group me" (11 Nov 2026): one post in his group, never his
             # personal chat. A reply in the group arrives as his main number,
             # so every number of his is kept for matching it.
             numbers = []
             if group:
                 try:
-                    message_id = _send_group(group, _question_text(order, lines, want_rate))
+                    message_id = _send_group(group, body)
                     delivered = [n for n in (_normalize(x) for x in _vendor_numbers(q.vendor_id, session)) if n]
                     if isinstance(message_id, str) and message_id:
                         sent_ids[message_id] = group
@@ -693,7 +728,7 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                             order.id, q.vendor_id)
         for number in numbers:
             try:
-                if use_template:
+                if use_template and not preset:
                     message_id = _send_template(
                         number,
                         cfg.vendor_template,
@@ -705,7 +740,7 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                         ],
                     )
                 else:
-                    message_id = _send_text(number, _question_text(order, lines, want_rate))
+                    message_id = _send_text(number, body)
                 delivered.append(_normalize(number))
                 if isinstance(message_id, str) and message_id:
                     sent_ids[message_id] = _normalize(number)
@@ -721,14 +756,15 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
         if delivered:
             q.status = m.Q_SENT
             q.sent_at = now
-            if cfg.ask_mode == "steps" and order.kind != m.KIND_DEALER_STOCK:
+            if cfg.ask_mode == "steps" and order.kind != m.KIND_DEALER_STOCK and not preset:
                 from backend.app.advance_orders import steps
 
                 steps.start(q)
             # Both clocks run in VENDOR HOURS only -- no vendor is timed out
             # overnight while he is asleep.
-            q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
-            if order.kind == m.KIND_ADVANCE and order.deadline_at is None and cfg.advance_deadline_hours:
+            q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
+            if (order.kind == m.KIND_ADVANCE and order.deadline_at is None and cfg.advance_deadline_hours
+                    and not _rounds_on(order)):
                 # The overall "not found" clock starts with the first question.
                 order.deadline_at = _add_vendor_hours(now, cfg.advance_deadline_hours * 60)
             logger.info(
@@ -817,6 +853,7 @@ def tick(session: Session, now: datetime | None = None) -> None:
             m.AdvanceVendorQuery.status == m.Q_SENT, m.AdvanceVendorQuery.deadline_at < now
         )
     ).scalars().all()
+    silent: list[tuple[m.AdvanceOrder, m.AdvanceVendorQuery]] = []
     for q in overdue:
         if not _workable(session.get(m.AdvanceOrder, q.advance_order_id)):
             continue
@@ -829,7 +866,17 @@ def tick(session: Session, now: datetime | None = None) -> None:
             continue
         q.status = m.Q_TIMEOUT
         logger.info("Advance order %s: vendor %s did not answer in time.", q.advance_order_id, q.vendor_id)
+        overdue_order = session.get(m.AdvanceOrder, q.advance_order_id)
+        if _rounds_on(overdue_order):
+            silent.append((overdue_order, q))
     session.flush()
+    if silent:
+        from backend.app.portal_procurement import rounds
+
+        try:
+            rounds.tell_silent(session, silent)
+        except Exception:  # noqa: BLE001 -- never blocks the tick
+            logger.exception("Portal rounds: could not tell Prateek sir about silent vendors.")
     _send_followups(session, now)
     for order in session.execute(select(m.AdvanceOrder).where(m.AdvanceOrder.status == m.ASKING)).scalars():
         if not _workable(order):
@@ -842,11 +889,38 @@ def tick(session: Session, now: datetime | None = None) -> None:
         _notify_if_changed(order, before, session)
 
 
+def _rounds_on(order: m.AdvanceOrder | None) -> bool:
+    """Portal demand under the 3-hour rounds (16 Nov 2026)."""
+    if not _is_portal(order):
+        return False
+    from backend.app.portal_procurement.config import settings as portal
+
+    return portal.rounds
+
+
+def _wait_minutes(order: m.AdvanceOrder | None) -> int:
+    if _rounds_on(order):
+        from backend.app.portal_procurement import rounds
+
+        return rounds.ask_plan()[0]
+    return cfg.vendor_wait_minutes
+
+
+def _followup_plan(order: m.AdvanceOrder | None) -> tuple[int, int]:
+    """(how many reminders, minutes apart)."""
+    if _rounds_on(order):
+        from backend.app.portal_procurement import rounds
+
+        _wait, count, gap = rounds.ask_plan()
+        return count, gap
+    return cfg.followup_count, cfg.followup_minutes
+
+
 def _followup_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], n: int) -> str:
     rows = "\n".join(f"{i}. {line.part_number} x{line.qty}" for i, line in enumerate(lines, start=1))
     by = f"\n{_fmt_day(order.needed_by)} tak chahiye." if order.needed_by else ""
     return (
-        f"🔔 Reminder {n}/{cfg.followup_count} — Cartrends purchase desk.\n"
+        f"🔔 Reminder {n}/{_followup_plan(order)[0]} — Cartrends purchase desk.\n"
         f"In parts ka reply abhi tak nahi aaya:\n{rows}{by}\n\n"
         'Kripya bataiye: "haan 3 din" ya "nahi".'
     )
@@ -855,19 +929,20 @@ def _followup_text(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], n: in
 def _send_followups(session: Session, now: datetime) -> None:
     """Remind a silent vendor `followup_count` times, `followup_minutes`
     apart (vendor hours only), before his 2-hour buffer runs out."""
-    if not cfg.followup_count or not _in_vendor_hours(now):
+    if not _in_vendor_hours(now):
         return
     sent = session.execute(
         select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.status == m.Q_SENT)
     ).scalars().all()
     for q in sent:
         done = q.followups_sent or 0
-        if done >= cfg.followup_count or q.sent_at is None:
+        order = session.get(m.AdvanceOrder, q.advance_order_id)
+        count, gap = _followup_plan(order)
+        if done >= count or q.sent_at is None:
             continue
-        due = _add_vendor_hours(q.sent_at, cfg.followup_minutes * (done + 1))
+        due = _add_vendor_hours(q.sent_at, gap * (done + 1))
         if now < due or (q.deadline_at is not None and now >= q.deadline_at):
             continue
-        order = session.get(m.AdvanceOrder, q.advance_order_id)
         if order is None or order.status != m.ASKING or not _workable(order):
             continue
         lines = [line for line in order.lines if line.id in (q.line_ids or []) and line.status == m.LINE_ASKING]
@@ -884,7 +959,7 @@ def _send_followups(session: Session, now: datetime) -> None:
                     ids[message_id] = group
             except Exception:  # noqa: BLE001
                 logger.exception("Advance order %s: follow-up in group %s failed.", order.id, group)
-        for number in ([] if group or cfg.vendor_route == "group_only" else (q.numbers or [])):
+        for number in ([] if group or cfg.vendor_route == "group_only" or _rounds_on(order) else (q.numbers or [])):
             try:
                 # Outside the 24 h window: re-send the approved enquiry template.
                 if not outbound.in_service_window(number) and _vendor_template_ready():
@@ -905,7 +980,7 @@ def _send_followups(session: Session, now: datetime) -> None:
         q.message_ids = ids or None
         q.followups_sent = done + 1
         logger.info(
-            "Advance order %s: follow-up %d/%d to vendor %s.", order.id, done + 1, cfg.followup_count, q.vendor_id
+            "Advance order %s: follow-up %d/%d to vendor %s.", order.id, done + 1, count, q.vendor_id
         )
     session.flush()
 
@@ -1208,7 +1283,7 @@ def _vendor_redirect(
     q.message_ids = ids or None
     q.sent_at = now
     q.followups_sent = 0
-    q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
+    q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
     session.flush()
     _send_text(sender, f"Dhanyavaad 🙏 Inquiry +{new} par bhej di hai, aage se isi number par bhejenge.")
     note = (
@@ -1306,7 +1381,7 @@ def _handle_step(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.A
     q.step = nxt
     # His clock restarts for the new question; reminders count afresh.
     q.sent_at = now
-    q.deadline_at = _add_vendor_hours(now, cfg.vendor_wait_minutes)
+    q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
     q.followups_sent = 0
     have = [line for line in lines if (q.draft.get(str(line.id)) or {}).get("available")]
     _ask_vendor(q, number, steps.question(nxt, have), session)

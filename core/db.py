@@ -98,6 +98,12 @@ _SCHEMA_UPGRADES = (
     ("portal_demand_lines", "portal_mrp", "NUMERIC(18, 4)"),
     ("portal_demand_lines", "customer_discount_pct", "NUMERIC(6, 3)"),
     ("portal_demand_lines", "sale_price", "NUMERIC(18, 4)"),
+    # 3-hour rounds, Prateek sir's choice, delivery record (16 Nov 2026).
+    ("portal_demand_lines", "choice_options", "JSON"),
+    ("portal_demand_lines", "choice_sent_at", "TIMESTAMP"),
+    ("portal_demand_lines", "choice_decision", "VARCHAR"),
+    ("portal_allocations", "promised_date", "DATE"),
+    ("portal_allocations", "received_at", "TIMESTAMP"),
     # Dealer Portal: parts skipped because no price is known.
     ("dealer_portal_pushes", "skipped_no_price", "INTEGER DEFAULT 0"),
     ("dealer_portal_pushes", "skipped_parts", "JSON"),

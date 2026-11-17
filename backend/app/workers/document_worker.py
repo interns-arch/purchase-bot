@@ -130,6 +130,11 @@ def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
         from backend.app.advance_orders import service as advance_orders
 
         with get_session() as session:
+            # Prateek sir choosing a vendor for a Portal line ("C78 2").
+            from backend.app.portal_procurement import rounds
+
+            if rounds.handle_reply(message.sender, message.text, session):
+                return True
             # Prateek sir answering an escalated part comes first.
             if escalation.handle_reply(message.sender, message.text, session):
                 return True
@@ -281,7 +286,10 @@ def _mrp_list_file(message: IncomingWhatsAppMessage) -> bool:
     """True when this file is a vendor's monthly MRP list and was handled.
     Checked before the stock routes: importing one as stock would replace their
     stock with a price list. Any doubt falls through to stock, as before."""
-    from backend.app.integrations.whatsapp import mrp_list
+    try:
+        from backend.app.integrations.whatsapp import mrp_list
+    except ImportError:  # the MRP-list module is not deployed: files go to stock, as before
+        return False
 
     if not mrp_list.enabled():
         return False
