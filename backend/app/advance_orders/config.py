@@ -122,6 +122,11 @@ class AdvanceOrderSettings:
     # pcs?", then MRP, then discount, then days. "steps" (default) or "one"
     # (everything in one message, as above).
     ask_mode: str = (os.environ.get("ADVANCE_ORDER_ASK_MODE") or "steps").strip().lower()
+    # User, 18 Nov 2026: a vendor asked about SEVERAL parts (in his group) also
+    # gets a CSV -- Part No, Qty Needed (filled), Available Qty, Available
+    # (Yes/No) (he fills). The filled file he sends back is his answer; then
+    # only discount and days are asked, for the parts he has. One part: as before.
+    ask_csv: bool = (os.environ.get("ADVANCE_ORDER_ASK_CSV") or "true").strip().lower() == "true"
     # Seconds between two posts into vendor groups (one group at a time,
     # nothing in bulk -- a burst got Rajkumar's number banned, 2 Nov 2026).
     group_gap_seconds: float = float(os.environ.get("ADVANCE_ORDER_GROUP_GAP_SECONDS") or 20)

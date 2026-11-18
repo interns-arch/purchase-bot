@@ -687,6 +687,7 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
     if not queued or not _in_vendor_hours(now):
         return
     by_id = {line.id: line for line in order.lines}
+    csv_sent: dict[int, str] = {}
     for q in queued:
         lines = [by_id[i] for i in q.line_ids if i in by_id and by_id[i].status == m.LINE_ASKING]
         if not lines:
@@ -715,6 +716,14 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
             # so every number of his is kept for matching it.
             numbers = []
             if group:
+                csv_name = None
+                if _wants_csv(order, lines, preset):
+                    # Several parts (User, 18 Nov 2026): the question + a CSV
+                    # he fills (qty, yes/no, discount, days) and sends back.
+                    from backend.app.advance_orders import enquiry_csv
+
+                    body = enquiry_csv.question(lines)
+                    csv_name = enquiry_csv.filename(q.id, now.date())
                 try:
                     message_id = _send_group(group, body)
                     delivered = [n for n in (_normalize(x) for x in _vendor_numbers(q.vendor_id, session)) if n]
@@ -723,6 +732,14 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                 except Exception:  # noqa: BLE001 -- the next vendor is tried
                     logger.exception("Advance order %s: question to vendor %s in group %s failed.",
                                      order.id, q.vendor_id, group)
+                if delivered and csv_name:
+                    try:
+                        from backend.app.integrations.whatsapp import whapi
+
+                        whapi.send_document(group, enquiry_csv.build(lines), csv_name, "text/csv")
+                        csv_sent[q.id] = csv_name
+                    except Exception:  # noqa: BLE001 -- the typed question still went
+                        logger.exception("Advance order %s: enquiry CSV to vendor %s failed.", order.id, q.vendor_id)
             else:
                 logger.info("Advance order %s: vendor %s has no WhatsApp group -- not asked (group_only).",
                             order.id, q.vendor_id)
@@ -760,6 +777,8 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                 from backend.app.advance_orders import steps
 
                 steps.start(q)
+                if q.id in csv_sent:
+                    q.draft = {"_csv": csv_sent[q.id]}
             # Both clocks run in VENDOR HOURS only -- no vendor is timed out
             # overnight while he is asleep.
             q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
@@ -1306,6 +1325,10 @@ def _reminder_text(q: m.AdvanceVendorQuery, order: m.AdvanceOrder, lines: list[m
     from backend.app.advance_orders import steps
 
     draft = q.draft or {}
+    if q.step == "pcs" and draft.get("_csv"):
+        from backend.app.advance_orders import enquiry_csv
+
+        return enquiry_csv.reminder(lines)
     have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")] or lines
     return steps.reminder(q.step, lines if q.step == "pcs" else have)
 
@@ -1373,11 +1396,24 @@ def _handle_step(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.A
                 f"\"{text[:300]}\"\nParts: {', '.join(line.part_number + ' x' + str(line.qty) for line in lines)}",
             )
         return True
+    _after_answer(order, q, lines, number, text, session, now)
+    return True
+
+
+def _after_answer(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.AdvanceOrderLine], number: str,
+                  text: str, session: Session, now: datetime, thank: bool = False) -> None:
+    """A step was answered: ask the next missing thing, or record and decide."""
+    from backend.app.advance_orders import steps
+
     q.replied_at = now
+    if (q.draft or {}).get("_csv"):
+        _fill_portal_mrp(order, q, lines, session)
     nxt = steps.next_step(q.draft, lines)
     if nxt == "done":
+        if thank:
+            _ask_vendor(q, number, "Mil gaya ji, dhanyavaad 🙏", session)
         _finish_steps(order, q, session, now, text)
-        return True
+        return
     q.step = nxt
     # His clock restarts for the new question; reminders count afresh.
     q.sent_at = now
@@ -1386,7 +1422,87 @@ def _handle_step(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.A
     have = [line for line in lines if (q.draft.get(str(line.id)) or {}).get("available")]
     _ask_vendor(q, number, steps.question(nxt, have), session)
     session.flush()
-    return True
+
+
+
+def _wants_csv(order: m.AdvanceOrder, lines: list[m.AdvanceOrderLine], preset: str | None) -> bool:
+    """Several parts, asked step by step in his group: send the enquiry CSV."""
+    return (cfg.ask_csv and cfg.ask_mode == "steps" and not preset and len(lines) > 1
+            and order.kind != m.KIND_DEALER_STOCK)
+
+
+def _fill_portal_mrp(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.AdvanceOrderLine],
+                     session: Session) -> None:
+    """Several parts (User, 18 Nov 2026): only availability, discount and days
+    are asked -- the MRP is the Dealer Portal's. Asked only when unknown."""
+    if not _is_portal(order):
+        return
+    from backend.app.portal_procurement import rounds
+
+    draft = {k: (dict(v) if isinstance(v, dict) else v) for k, v in (q.draft or {}).items()}
+    for line in lines:
+        entry = draft.get(str(line.id))
+        if isinstance(entry, dict) and entry.get("available") and entry.get("mrp") is None:
+            demand = rounds.demand_for_line(line, session)
+            if demand is not None and demand.portal_mrp:
+                entry["mrp"] = str(demand.portal_mrp)
+    q.draft = draft
+
+
+def wants_enquiry_file(sender: str, filename: str | None, session: Session) -> bool:
+    """Cheap check before a file is downloaded: does this sender have an open
+    multi-part question with a CSV, and is this a sheet?"""
+    from pathlib import Path
+
+    from backend.app.advance_orders import enquiry_csv
+
+    if Path(filename or "").suffix.lower() not in enquiry_csv.SUFFIXES:
+        return False
+    return bool(_csv_queries(_normalize(sender), session))
+
+
+def _csv_queries(number: str, session: Session) -> list[m.AdvanceVendorQuery]:
+    if not number:
+        return []
+    out = []
+    for q in session.execute(
+        select(m.AdvanceVendorQuery).where(m.AdvanceVendorQuery.status == m.Q_SENT)
+        .order_by(m.AdvanceVendorQuery.sent_at.desc())
+    ).scalars():
+        if number in (q.numbers or []) and q.step == "pcs" and (q.draft or {}).get("_csv"):
+            order = session.get(m.AdvanceOrder, q.advance_order_id)
+            if order is not None and order.status == m.ASKING and order_in_scope(order):
+                out.append(q)
+    return out
+
+
+def handle_enquiry_file(sender: str, path, filename: str | None, session: Session,
+                        now: datetime | None = None) -> bool:
+    """The vendor's filled enquiry CSV: his answer to the open multi-part
+    question it matches (by part numbers). False = not that sheet."""
+    from backend.app.advance_orders import enquiry_csv, steps
+
+    now = now or now_ist_naive()
+    number = _normalize(sender)
+    for q in _csv_queries(number, session):
+        order = session.get(m.AdvanceOrder, q.advance_order_id)
+        by_id = {line.id: line for line in order.lines}
+        lines = [by_id[i] for i in q.line_ids if i in by_id and by_id[i].status == m.LINE_ASKING]
+        if not lines:
+            continue
+        answers = enquiry_csv.read(path, lines)
+        if not answers:
+            continue
+        draft = {k: (dict(v) if isinstance(v, dict) else v) for k, v in (q.draft or {}).items()}
+        for line_id, answer in answers.items():
+            draft[str(line_id)] = steps._entry(answer)  # noqa: SLF001
+        q.draft = draft
+        q.reply_text = f"enquiry sheet: {filename}"[:1000]
+        logger.info("Advance order %s: vendor %s answered %d part(s) with the enquiry sheet %s.",
+                    order.id, q.vendor_id, len(answers), filename)
+        _after_answer(order, q, lines, number, f"[file] {filename}", session, now, thank=True)
+        return True
+    return False
 
 
 def handle_vendor_text(sender: str, text: str, session: Session, now: datetime | None = None) -> bool:

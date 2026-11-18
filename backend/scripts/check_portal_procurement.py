@@ -553,6 +553,9 @@ def main() -> int:
     whapi.enabled = lambda: True
     whapi.vendor_groups = lambda: {"CT_A": "120363000000000001@g.us"}
     whapi.send_text = lambda chat, body: group_posts.append((chat, body)) or f"whapi.{len(group_posts)}"
+    group_files: list[tuple[str, str, bytes]] = []
+    whapi.send_document = (lambda chat, content, name, mime, caption=None:
+                           group_files.append((chat, name, content)) or f"whapi.f{len(group_files)}")
     cfg.group_gap_seconds = 0
     cfg.followup_count = 1
     cfg.followup_minutes = 15
@@ -1179,6 +1182,58 @@ def main() -> int:
     # Beta: the on-time history row + 12601, received after the Portal's arrival date -> 50%.
     check("live view: Beta's on-time record shown", any(v["vendor"] == "Beta Spares" and v["on_time_pct"] == 50
                                                         and v["delivered"] == 2 for v in view["vendors"]))
+    # ------------------------------------------------------------------ 20
+    print("\n[20] several parts: question + enquiry CSV; the filled CSV is the answer")
+    from backend.app.advance_orders import enquiry_csv
+
+    cfg.ask_mode = "steps"
+    clock["now"] = datetime(2026, 11, 25, 9, 5)
+    group_posts.clear()
+    group_files.clear()
+    cust(12701, "R20A01")
+    cust(12702, "R20A02")
+    run_round()
+    a_post = [b for c, b in group_posts if c == GA and "R20A01" in b]
+    a_file = [(n, body) for c, n, body in group_files if c == GA]
+    check("several parts: one question in his group, naming the CSV",
+          len(a_post) == 1 and "R20A02" in a_post[0] and "CSV" in a_post[0])
+    head = a_file[0][1].decode("utf-8-sig").splitlines() if a_file else []
+    check("...and the CSV: Part No, Qty Needed (filled), Available Qty, Yes/No, Discount %, Days",
+          bool(head) and head[0].split(",") == enquiry_csv.HEADERS and head[1].startswith("R20A01,1,")
+          and "PO-" not in a_file[0][0].upper())
+    filled = _TMP / "filled.csv"
+    filled.write_text("Part No,Qty Needed,Available Qty,Available (Yes/No),Discount %,Days (TAT)\n"
+                      "R20A01,1,1,Yes,15,\nR20A02,1,0,No,,\n", encoding="utf-8")
+    other = _TMP / "stock.csv"
+    other.write_text("Part,Stock\nR20A01,5\n", encoding="utf-8")
+    before_posts = len(group_posts)
+    with get_session() as s:
+        check("a stock sheet that is not the enquiry CSV is not taken",
+              not engine.handle_enquiry_file("919100000001", other, "stock.csv", s, clock["now"]))
+    with get_session() as s:
+        check("the filled CSV is taken as his answer",
+              engine.wants_enquiry_file("919100000001", "filled.csv", s)
+              and engine.handle_enquiry_file("919100000001", filled, "filled.csv", s, clock["now"]))
+    new_posts = [b for c, b in group_posts[before_posts:] if c == GA]
+    check("...only the missing thing is asked: days, for the part he has (no MRP, no discount)",
+          len(new_posts) == 1 and "R20A01" in new_posts[0] and "din" in new_posts[0]
+          and "R20A02" not in new_posts[0] and "mrp" not in new_posts[0].lower()
+          and "discount" not in new_posts[0].lower())
+    reply("919100000001", "2 din")
+    reply("919100000002", "nahi")
+    settle()
+    p701 = payload_for(12701) or {}
+    check("...and the CSV answer wins: Alpha, 15%, 2 days",
+          p701.get("supplier_dealer_id") == 27 and p701.get("quoted_tat_days") == 2
+          and float(p701.get("quoted_discount_percent") or 0) == 15.0)
+    check("R20A02 (No in the CSV) is not given to Alpha", (payload_for(12702) or {}).get("supplier_dealer_id") != 27)
+    cust(12703, "R20A03")
+    clock["now"] = datetime(2026, 11, 25, 12, 5)
+    group_files.clear()
+    run_round()
+    check("one part: asked as before, no CSV", not group_files
+          and any("R20A03" in b and "CSV" not in b for c, b in group_posts if c == GA))
+    cfg.ask_mode = "one"
     portal_settings.rounds = False
 
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")

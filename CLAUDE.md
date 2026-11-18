@@ -48,6 +48,12 @@ Every round-only behaviour is gated by `_rounds_on(order)` (portal orders only),
   Sheet gives pcs + MRP (else Portal MRP) + discount (from sheet price vs MRP) + days (from a TAT/lead/days column).
   Whatever is missing (discount and/or days) is asked, **only that**, one at a time. Complete sheet = his reply.
   Ranked with everyone else at the end of the round.
+- **Several parts to one vendor (18 Nov 2026):** the group question comes with a CSV
+  (`advance_orders/enquiry_csv.py`): Part No | Qty Needed (bot) | Available Qty | Available (Yes/No) | Discount % |
+  Days (TAT) (vendor). His filled file (CSV or xlsx) sent back in the group is his answer
+  (`document_worker._enquiry_answer_file` → `service.handle_enquiry_file`, checked before every other file route).
+  MRP comes from the Portal. Only what he left empty for a part he HAS is asked afterwards (discount / days).
+  A typed answer still works. **One part: asked as before** (pcs → MRP → discount → days). `ADVANCE_ORDER_ASK_CSV=false` turns it off.
 - **Delivery record:** promised date = Portal `arrival_date`, else today + TAT. Received = Portal `qty_received > 0`.
 - **PO PDF goes to Shubham only** (`PORTAL_PROCUREMENT_NOTIFY_NUMBERS=917355374975`). Never to vendors.
 
@@ -187,15 +193,19 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   - Backups on server: `no-pogrp-line-20261116.tgz`, `approval-shape-20261116.tgz`, `rounds-20261116.tgz`,
     `sheet-rounds-20261116.tgz`, `skip-lines-20261116.tgz`, pilot `uploads/portal_pilot.before-*-20261116.json`.
 
+- **18 Nov:** enquiry CSV for multi-part questions, **deployed** (merged into the server's document_worker so the Tez code stays); backup `enquiry-csv-full-20261118.tgz`. `check_whapi` has 3 failures on the server that predate this.
+
 ---
 
 ## 7. Open items (as of 17 Nov 2026)
 
-1. **BROKEN ON SERVER: vendor files fail.** The 16 Nov deploy uploaded a `document_worker.py` that imports
-   `backend.app.integrations.whatsapp.mrp_list`, which is not on the server → every incoming WhatsApp document
-   (stock sheets too) raises ImportError. Last stock import: 16 Nov 11:00. **Fix is ready locally** (`try/except
-   ImportError` in `_mrp_list_file`); deploy needs only `document_worker.py` + backend rebuild. The user said
-   "Not now" on 16 Nov, so ask again. Files sent meanwhile must be re-sent by vendors.
+1. **Server has work that is not on GitHub or on the old PC:** a "Tez ERP" change (Shubham's OK on "Create vendor
+   on Tez ERP"; `vendor_onboarding/tez.py`, approvals, scheduler, parser, `VendorCreationPage.jsx` ...) was deployed
+   on 17 Nov from another PC (backups `tez-erp-20261117.tgz`, `tez-format-20261117.tgz`). Push it to `purchasebot`
+   from that PC, and always diff a file against the server before uploading it. (The 16 Nov vendor-file ImportError
+   was fixed by that deploy; stock imports run again.)
+   **The repo's `document_worker.py` has NO `_tez_reply`; the server's has it.** Never upload the repo copy over the
+   server's: merge (add your change into the server copy) until the Tez work is pushed (user's choice, 18 Nov).
 2. PO-MST-2026-0075 and 0076 still pending approval on the Portal.
 3. PO-MST-0081 PDF goes to Shubham when he next messages the bot (24-hour rule).
 4. Nothing from 12–16 Nov is committed (18+ modified files). Commit only when the user asks.

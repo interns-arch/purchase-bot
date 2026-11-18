@@ -244,6 +244,30 @@ def _ai_route_text(message: IncomingWhatsAppText) -> bool:
         return False
 
 
+def _enquiry_answer_file(message: IncomingWhatsAppMessage) -> bool:
+    """True when this file is a vendor's filled parts-enquiry CSV (User, 18 Nov
+    2026) and was taken as his answer. Checked first, so it is never imported
+    as stock. Anything else -- or any doubt -- falls through, as before."""
+    if getattr(message, "is_photo", False):
+        return False
+    try:
+        from backend.app.advance_orders import service as advance_engine
+
+        with get_session() as session:
+            if not advance_engine.wants_enquiry_file(message.sender, message.filename, session):
+                return False
+        client = WhatsAppClient(whatsapp_settings)
+        file_path = download_document_media(message.media_id, message.filename, client)
+        with get_session() as session:
+            taken = advance_engine.handle_enquiry_file(message.sender, file_path, message.filename, session)
+            if taken:
+                session.commit()
+            return taken
+    except Exception:  # noqa: BLE001 -- never lose the file: the stock route still runs
+        logger.exception("Enquiry-sheet check failed for %s (%s).", message.sender, message.filename)
+        return False
+
+
 def _vendor_ledger_file(message: IncomingWhatsAppMessage) -> bool:
     """True when this file is a vendor LEDGER (caption "ledger", or sent after
     the "ledger" text) and was handled. Checked before every other file route
@@ -361,6 +385,7 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # A vendor answering an advance-order question ("haan 5 din", "nahi")
     # from the sales bot. Only numbers with an OPEN question are claimed, and
     # only while ADVANCE_ORDERS_ENABLED=true; everything else continues below.
+
     if _advance_order_reply(message):
         return
 
@@ -986,6 +1011,9 @@ def handle_incoming_whatsapp_message(message: IncomingWhatsAppMessage) -> None:
         message.media_id,
         message.message_id,
     )
+
+    if _enquiry_answer_file(message):
+        return
 
     if _vendor_ledger_file(message):
         return
