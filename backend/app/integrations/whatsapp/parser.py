@@ -71,6 +71,8 @@ class IncomingWhatsAppText:
     sender: str
     message_id: str
     text: str
+    # id of the message this one is a reply to (WhatsApp 'reply' / quote), else ""
+    reply_to_id: str = ""
 
 
 def parse_webhook_payload(payload: dict) -> list[IncomingWhatsAppMessage]:
@@ -189,6 +191,7 @@ def parse_text_messages(payload: dict) -> list[IncomingWhatsAppText]:
                         sender=sender,
                         message_id=raw_message.get("id", ""),
                         text=body,
+                        reply_to_id=(raw_message.get("context") or {}).get("id") or "",
                     )
                 )
 

@@ -77,7 +77,7 @@ def _section(title: str, rows: list[tuple[str, str | None]]) -> list[str]:
     return ["", f"*{title}*", *(f"• {label}: {value}" for label, value in rows)]
 
 
-def vendor_summary(request: m.VendorRegistrationRequest) -> str:
+def vendor_summary(request: m.VendorRegistrationRequest, *, heading: str | None = None) -> str:
     """Every detail of the vendor, grouped so an approver can check it at a
     glance on a phone (12 Nov 2026: "well formatted and easy to understand")."""
     a = request.answers or {}
@@ -94,7 +94,7 @@ def vendor_summary(request: m.VendorRegistrationRequest) -> str:
         f"{a['credit_days']} days" if a.get("credit_days") else None,
         f"limit ₹{a['credit_limit']}" if a.get("credit_limit") else None,
     ) if x) or None
-    lines = [f"🆕 *New vendor for approval — {_code(request)}*", f"*{a.get('vendor_name') or request.vendor_name or '-'}*"]
+    lines = [heading or f"🆕 *New vendor for approval — {_code(request)}*", f"*{a.get('vendor_name') or request.vendor_name or '-'}*"]
     lines += _section("🏢 Company", [
         ("GSTIN", _v(a, "gstin")),
         ("GST check", gst_line),

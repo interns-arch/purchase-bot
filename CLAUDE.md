@@ -194,21 +194,33 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
     `sheet-rounds-20261116.tgz`, `skip-lines-20261116.tgz`, pilot `uploads/portal_pilot.before-*-20261116.json`.
 
 - **18 Nov:** enquiry CSV for multi-part questions, **deployed** (merged into the server's document_worker so the Tez code stays); backup `enquiry-csv-full-20261118.tgz`. `check_whapi` has 3 failures on the server that predate this.
+- **19 Nov, deployed** (backup `meeting-rules-20261119.tgz`, container checks ALL PASSED): rules from the procurement meeting (Speaker 1's version):
+  - Portal `discount_percent` per vendor (`GET /procurement/active/{id}/vendors`) read before each round
+    (`rounds.prefetch_dealer_discounts`); a vendor with a discount set there is not asked the discount (0 = ask).
+  - Priority list `uploads/portal_priority.json` `{"vendors": [...]}`: inside one TAT band a listed vendor beats a
+    bigger discount (`ScoredQuote.priority_rank`). TAT band still first. No file = unchanged.
+  - 6 vendor-hours with no usable answer → Prateek sir (`rounds.escalate_stale`): `AO-12 vendor <naam> <mobile>`
+    saves a new vendor on the brand list (asked only once he has a group) or `AO-12 cancel`.
+  - Vendor quote below the customer's discount → "⚠️ Kam discount" to Prateek sir (`rounds.check_low_discount`).
+  - Evening report 20:00 IST to Prateek sir, text + Excel (`portal_procurement/reporting.py`).
+  - Parts as a file to vendors: NOT added -- the 18 Nov enquiry CSV (live) already does it; a Portal discount
+    also fills a blank discount in the returned CSV (`steps.fill_known`).
+  - Local copy synced with the server first (18 Nov CSV deploy was made from another session); merged
+    files only ADD to the server copies. Local backup of the old files: `..\local-backup-20261119\`.
+  - `scheduler.py`: the MRP-list job import is guarded (`mrp_list` is not on the server).
+  - Checks: [20] = server's CSV section, [21] = these rules; [19] now expects the 6-hour escalation.
 
 ---
 
 ## 7. Open items (as of 17 Nov 2026)
 
-1. **Server has work that is not on GitHub or on the old PC:** a "Tez ERP" change (Shubham's OK on "Create vendor
-   on Tez ERP"; `vendor_onboarding/tez.py`, approvals, scheduler, parser, `VendorCreationPage.jsx` ...) was deployed
-   on 17 Nov from another PC (backups `tez-erp-20261117.tgz`, `tez-format-20261117.tgz`). Push it to `purchasebot`
-   from that PC, and always diff a file against the server before uploading it. (The 16 Nov vendor-file ImportError
-   was fixed by that deploy; stock imports run again.)
-   **The repo's `document_worker.py` has NO `_tez_reply`; the server's has it.** Never upload the repo copy over the
-   server's: merge (add your change into the server copy) until the Tez work is pushed (user's choice, 18 Nov).
+1. ~~Server has work that is not on GitHub~~ **Resolved 19 Nov:** the 17 Nov Tez ERP work and the server's
+   `document_worker.py` (with `_tez_reply`) are committed and pushed with the 19 Nov meeting rules. The repo now
+   matches the server for every deployed file. Still: always diff a file against the server before uploading it.
+   (The 16 Nov vendor-file ImportError was fixed on the server on 17-18 Nov; stock imports run again.)
 2. PO-MST-2026-0075 and 0076 still pending approval on the Portal.
 3. PO-MST-0081 PDF goes to Shubham when he next messages the bot (24-hour rule).
-4. Nothing from 12–16 Nov is committed (18+ modified files). Commit only when the user asks.
+4. Everything deployed up to 19 Nov is committed (`feature/case1-vendor-stock`). Commit only when the user asks.
 5. Monthly MRP list: off, not deployed; needs a group channel and the Portal team's answer on an MRP field.
 6. Next steps the user may want: widen the pilot (more parts / `"brands": ["FORD"]` / live mode, ask first).
 

@@ -736,7 +736,9 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                     try:
                         from backend.app.integrations.whatsapp import whapi
 
-                        whapi.send_document(group, enquiry_csv.build(lines), csv_name, "text/csv")
+                        message_file = whapi.send_document(group, enquiry_csv.build(lines), csv_name, "text/csv", to_vendor=True)
+                        if not message_file:
+                            raise RuntimeError("Whapi did not post the file")
                         csv_sent[q.id] = csv_name
                     except Exception:  # noqa: BLE001 -- the typed question still went
                         logger.exception("Advance order %s: enquiry CSV to vendor %s failed.", order.id, q.vendor_id)
@@ -779,6 +781,18 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                 steps.start(q)
                 if q.id in csv_sent:
                     q.draft = {"_csv": csv_sent[q.id]}
+                if _rounds_on(order):
+                    # Portal demand (19 Nov 2026): a discount already set on
+                    # the Dealer Portal is not asked.
+                    from backend.app.portal_procurement import rounds
+
+                    try:
+                        known = rounds.known_discounts(lines, q.vendor_id, q.brand, session)
+                    except Exception:  # noqa: BLE001 -- then he is simply asked, as before
+                        logger.exception("Advance order %s: known-discount lookup failed.", order.id)
+                        known = {}
+                    if known:
+                        q.draft = {**(q.draft or {}), "_known_disc": known}
             # Both clocks run in VENDOR HOURS only -- no vendor is timed out
             # overnight while he is asleep.
             q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
@@ -906,6 +920,15 @@ def tick(session: Session, now: datetime | None = None) -> None:
         else:
             _advance(order, session, now)
         _notify_if_changed(order, before, session)
+    from backend.app.portal_procurement.config import settings as portal
+
+    if portal.enabled and portal.rounds:
+        from backend.app.portal_procurement import rounds
+
+        try:
+            rounds.escalate_stale(session, now)
+        except Exception:  # noqa: BLE001 -- never blocks the tick
+            logger.exception("Portal rounds: the 6-hour escalation check failed.")
 
 
 def _rounds_on(order: m.AdvanceOrder | None) -> bool:
@@ -1110,6 +1133,10 @@ def assign_vendor(
     ).scalar_one_or_none() is None:
         session.add(m.AdvanceVendorContact(vendor_id=vendor.id, whatsapp_number=number, source="Prateek sir"))
 
+    # Portal parts are asked in a vendor's WhatsApp group only (16 Nov 2026):
+    # a vendor named by Prateek sir who has no group yet is saved on the
+    # brand's list, but not asked until his group exists.
+    wait_for_group = _rounds_on(order) and not _vendor_group(vendor.id, session)
     by_brand: dict[str, list[m.AdvanceOrderLine]] = {}
     for line in lines:
         by_brand.setdefault(line.brand, []).append(line)
@@ -1131,6 +1158,10 @@ def assign_vendor(
                 )
             else:
                 terms.active = True
+        if wait_for_group:
+            for line in group:
+                line.note = f"{vendor.name} saved (named by Prateek sir); no WhatsApp group yet -- not asked"
+            continue
         for line in group:
             line.status = m.LINE_ASKING
             line.note = f"asking {vendor.name} (named by Prateek sir)"
@@ -1140,6 +1171,9 @@ def assign_vendor(
                 line_ids=[line.id for line in group], status=m.Q_QUEUED,
             )
         )
+    if wait_for_group:
+        session.flush()
+        return vendor
     # A fresh clock for the new vendor's buffer and Prateek sir's next answer.
     order.deadline_at = (
         _add_vendor_hours(now, cfg.advance_deadline_hours * 60) if cfg.advance_deadline_hours else None
@@ -1369,6 +1403,13 @@ def _finish_steps(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, session: Sessi
             terms=terms, session=session, query_id=q.id, raw_reply=f"steps: {entry}",
         )
     session.flush()
+    if _rounds_on(order):
+        from backend.app.portal_procurement import rounds
+
+        try:
+            rounds.check_low_discount(order, q, session)
+        except Exception:  # noqa: BLE001 -- an alert problem never stops the decision
+            logger.exception("Advance order %s: low-discount check failed.", order.id)
     before = _snapshot(order)
     _advance(order, session, now)
     _notify_if_changed(order, before, session)
@@ -1408,6 +1449,8 @@ def _after_answer(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.
     q.replied_at = now
     if (q.draft or {}).get("_csv"):
         _fill_portal_mrp(order, q, lines, session)
+    if (q.draft or {}).get("_known_disc"):
+        q.draft = steps.fill_known({k: (dict(v) if isinstance(v, dict) else v) for k, v in q.draft.items()})
     nxt = steps.next_step(q.draft, lines)
     if nxt == "done":
         if thank:

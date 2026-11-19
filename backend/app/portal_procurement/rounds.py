@@ -183,6 +183,11 @@ def fill_ties(scored: list, session: Session) -> None:
     then the better delivery / reply record."""
     record: dict | None = None
     groups: dict[tuple, list] = {}
+    order = settings.priority_vendors()
+    if order:
+        pos = {vid: i for i, vid in enumerate(order)}
+        for s in scored:
+            s.priority_rank = pos.get(s.quote.vendor_id, len(order))
     for s in scored:
         s.tie = (s.quote.tat_days if s.quote.tat_days is not None else 999,)
         groups.setdefault((s.band, s.terms_tier, s.discount_pct, s.tie), []).append(s)
@@ -517,3 +522,204 @@ def note_receipts(session: Session, received: dict[int, int]) -> int:
         session.flush()
         logger.info("Portal procurement: %d delivery(ies) recorded as received.", done)
     return done
+
+
+# ====================================================================== known discount (19 Nov 2026)
+# Meeting rule: a vendor whose discount for the brand is already set on the
+# Dealer Portal is NOT asked for a discount; a first-time vendor with none on
+# file is. The Portal row for a line (`GET /procurement/active/{id}/vendors`)
+# carries `discount_percent` per dealer. It is read while the round is
+# prepared (poll_job has the Portal client) and kept in memory for a few
+# hours -- the vendor question itself never calls the Portal. 0 / empty means
+# "nothing set", so he is asked.
+_dealer_discounts: dict[int, tuple[datetime, dict[int, Decimal]]] = {}
+
+
+def _pct(value) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except Exception:  # noqa: BLE001 -- not a number
+        return None
+    return number if 0 < number <= 100 else None
+
+
+def remember_dealer_discounts(source_line_id: int, rows: list[dict], now: datetime | None = None) -> dict[int, Decimal]:
+    """{dealer_id: discount %} from a Portal vendor-options list, kept for this line."""
+    from backend.app.portal_procurement.service import _dealer_id
+
+    found: dict[int, Decimal] = {}
+    for row in rows or []:
+        dealer = _dealer_id(row)
+        pct = _pct(row.get("discount_percent"))
+        if dealer is not None and pct is not None:
+            found[dealer] = pct
+    _dealer_discounts[int(source_line_id)] = (now or now_ist_naive(), found)
+    return found
+
+
+def prefetch_dealer_discounts(demands: list[m.PortalDemandLine], client, limit: int = 60) -> int:
+    """Read the Portal vendor options of these lines once. Never raises."""
+    if not settings.use_known_discount or client is None:
+        return 0
+    from backend.app.portal_procurement.service import _dealer_rows
+
+    now = now_ist_naive()
+    ttl = timedelta(hours=settings.known_discount_ttl_hours)
+    done = 0
+    for demand in demands[:limit]:
+        have = _dealer_discounts.get(int(demand.source_order_line_id))
+        if have is not None and now - have[0] < ttl:
+            continue
+        try:
+            remember_dealer_discounts(demand.source_order_line_id,
+                                      _dealer_rows(client.vendors_for_line(demand.source_order_line_id)), now)
+            done += 1
+        except Exception:  # noqa: BLE001 -- not known -> the vendor is asked, as before
+            logger.warning("Portal line %s: vendor discounts could not be read.", demand.source_order_line_id)
+    return done
+
+
+def dealer_discount(source_line_id: int, dealer_id: int | None, now: datetime | None = None) -> Decimal | None:
+    have = _dealer_discounts.get(int(source_line_id))
+    if have is None or dealer_id is None:
+        return None
+    if (now or now_ist_naive()) - have[0] >= timedelta(hours=settings.known_discount_ttl_hours):
+        return None
+    return have[1].get(dealer_id)
+
+
+def known_discounts(lines: list[am.AdvanceOrderLine], vendor_id: int, brand: str, session: Session) -> dict[str, str]:
+    """{line id: discount %} the vendor is NOT asked for."""
+    if not settings.use_known_discount:
+        return {}
+    from backend.app.portal_procurement import links
+
+    dealer = links.resolve(vendor_id, session)
+    if dealer is None:
+        return {}
+    out: dict[str, str] = {}
+    for line in lines:
+        demand = demand_for_line(line, session)
+        if demand is not None:
+            sol = demand.source_order_line_id
+        else:
+            # The first question goes out inside create_order, before the
+            # Portal line is linked to the order: match by part number among
+            # the lines whose vendor discounts were just read.
+            key = _norm(line.part_number)
+            sol = next((d.source_order_line_id for d in session.execute(
+                select(m.PortalDemandLine).where(
+                    m.PortalDemandLine.source_order_line_id.in_(list(_dealer_discounts) or [-1]),
+                    m.PortalDemandLine.advance_order_id.is_(None),
+                )
+            ).scalars() if _norm(d.part_no) == key), None)
+        if sol is None:
+            continue
+        pct = dealer_discount(sol, dealer)
+        if pct is not None:
+            out[str(line.id)] = str(pct)
+    return out
+
+
+# ====================================================================== low discount alert (19 Nov 2026)
+def check_low_discount(order: am.AdvanceOrder, q: am.AdvanceVendorQuery, session: Session) -> int:
+    """A vendor quoting LESS than the customer's discount -> Prateek sir is
+    told at once (he sees it while the round is still open). Returns how many
+    parts were reported."""
+    if not settings.low_discount_alert:
+        return 0
+    from backend.app.portal_procurement.service import margin_percent
+
+    rows = []
+    for line in order.lines:
+        if line.id not in (q.line_ids or []):
+            continue
+        quote = session.execute(
+            select(am.AdvanceVendorQuote).where(
+                am.AdvanceVendorQuote.advance_order_line_id == line.id,
+                am.AdvanceVendorQuote.vendor_id == q.vendor_id,
+            )
+        ).scalar_one_or_none()
+        demand = demand_for_line(line, session)
+        if quote is None or demand is None or not quote.available:
+            continue
+        cust, got = demand.customer_discount_pct, quote.discount_pct
+        if cust is None or got is None or got >= cust:
+            continue
+        mg = margin_percent(demand, quote)
+        rows.append(f"• {line.part_number} x{line.qty}: vendor {_money(got)}% de raha hai, customer ko {_money(cust)}% "
+                    "diya hai" + (f" (margin {_money(mg)}%)" if mg is not None else ""))
+    if not rows:
+        return 0
+    _send(f"⚠️ Kam discount — {_vendor(q.vendor_id, session)} ({q.brand or '-'}):\n" + "\n".join(rows)
+          + "\n\nCustomer ke discount se kam hai. Round ke end tak dusre vendor ke jawab bhi dekhe jayenge.")
+    logger.info("Portal rounds: vendor %s quoted below the customer's discount on %d part(s).", q.vendor_id, len(rows))
+    return len(rows)
+
+
+# ====================================================================== 6 hours with no good answer (19 Nov 2026)
+def _quote_lines(line: am.AdvanceOrderLine, session: Session) -> list[str]:
+    out = []
+    for quote in session.execute(
+        select(am.AdvanceVendorQuote).where(am.AdvanceVendorQuote.advance_order_line_id == line.id)
+    ).scalars():
+        if not quote.available:
+            out.append(f"{_vendor(quote.vendor_id, session)}: nahi hai")
+        else:
+            days = f"{quote.tat_days} din" if quote.tat_days is not None else "din -"
+            disc = f"{_money(quote.discount_pct)}%" if quote.discount_pct is not None else "discount -"
+            out.append(f"{_vendor(quote.vendor_id, session)}: {days}, {disc}")
+    return out
+
+
+def escalate_stale(session: Session, now: datetime | None = None) -> int:
+    """A Portal part with no usable answer `escalate_hours` after the first
+    ask goes to Prateek sir, who can name a NEW vendor (`AO-12 vendor <name>
+    <mobile>`) or cancel it. Counted in vendor hours. Returns parts escalated."""
+    from backend.app.advance_orders import quotes, service as engine
+    from backend.app.portal_procurement.config import SOURCE
+
+    now = now or now_ist_naive()
+    count = 0
+    for order in session.execute(
+        select(am.AdvanceOrder).where(am.AdvanceOrder.status == am.ASKING, am.AdvanceOrder.source == SOURCE)
+    ).scalars().all():
+        if not engine._workable(order):
+            continue
+        queries = session.execute(
+            select(am.AdvanceVendorQuery).where(am.AdvanceVendorQuery.advance_order_id == order.id)
+        ).scalars().all()
+        stale: list[am.AdvanceOrderLine] = []
+        for line in order.lines:
+            if line.status != am.LINE_ASKING:
+                continue
+            sent = [q.sent_at for q in queries if q.sent_at is not None and line.id in (q.line_ids or [])]
+            if not sent:
+                continue
+            if engine._add_vendor_hours(min(sent), settings.escalate_hours * 60) > now:
+                continue
+            demand = demand_for_line(line, session)
+            if any(why_not(demand, s.quote) is None for s in quotes.ranked_for_line(line, session)):
+                continue  # a good answer is on the table: the round decides it
+            stale.append(line)
+        if not stale:
+            continue
+        rows = []
+        for line in stale:
+            line.status = am.LINE_ESCALATED
+            line.note = f"no good answer in {settings.escalate_hours} hours -- asked Prateek sir"
+            said = _quote_lines(line, session)
+            rows.append(f"• {line.part_number} ({line.brand}) x{line.qty} — " + ("; ".join(said) if said else "kisi ne reply nahi kiya"))
+        session.flush()
+        ref = f"AO-{order.id}"
+        _send(
+            f"🔎 {settings.escalate_hours} ghante ho gaye, in parts ka theek jawab nahi aaya ({ref}):\n"
+            + "\n".join(rows)
+            + f"\n\nAb kya karna hai? Reply:\n"
+              f"• {ref} vendor Sharma Auto 98XXXXXXXX  (naya vendor — brand ki list mein save; unka group hone par poochhunga)\n"
+              f"• {ref} cancel"
+        )
+        logger.info("Portal order %s: %d part(s) with no good answer after %d hours -- Prateek sir told.",
+                    order.id, len(stale), settings.escalate_hours)
+        count += len(stale)
+    return count

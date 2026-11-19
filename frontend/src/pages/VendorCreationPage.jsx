@@ -4,7 +4,7 @@ import { Modal } from "../components/Modal";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
-import { getVendorRegistration, listVendorRegistrations, resendVendorApproval } from "../api/vendorRegistrations";
+import { getVendorRegistration, listVendorRegistrations, resendVendorApproval, sendVendorToTez } from "../api/vendorRegistrations";
 import { formatDateTime } from "../utils/datetime";
 
 // The one action here: send a waiting request to the approvers again.
@@ -84,6 +84,8 @@ const TONE = {
 };
 
 const PORTAL_TONE = { CREATED: "success", EXISTS: "info", MAILED: "warning", FAILED: "danger", NONE: "neutral" };
+const TEZ_TONE = { CREATED: "success", WAITING: "warning", FAILED: "danger", NONE: "neutral" };
+const TEZ_LABEL = { CREATED: "Created on Tez", WAITING: "Waiting for OK", FAILED: "Send failed", NONE: "Not sent" };
 const PORTAL_LABEL = { CREATED: "Created", EXISTS: "Already there", MAILED: "Mail sent", FAILED: "Failed", NONE: "Not yet" };
 
 const muted = { color: "var(--color-text-muted)", fontSize: "0.82rem" };
@@ -224,6 +226,17 @@ export function VendorCreationPage() {
   const [open, setOpen] = useState(null);
   const [resend, setResend] = useState(null);
 
+  async function sendTez(row) {
+    try {
+      const result = await sendVendorToTez(row.id);
+      if (result.ok) toast.success(`${row.code} sent to Shubham for Tez ERP.`);
+      else toast.error(`Could not send ${row.code} to Shubham.`);
+      load();
+    } catch (error) {
+      toast.error(extractErrorMessage(error, "Could not send to Tez ERP."));
+    }
+  }
+
   async function load() {
     try {
       setData(await listVendorRegistrations());
@@ -316,6 +329,7 @@ export function VendorCreationPage() {
                   <th>GSTIN / Mobile</th>
                   <th>Prateek sir / NK Jain sir</th>
                   <th>Dealer Portal</th>
+                  <th>Tez ERP</th>
                   <th />
                 </tr>
               </thead>
@@ -344,6 +358,27 @@ export function VendorCreationPage() {
                     <td style={{ fontSize: "0.85rem", maxWidth: 260 }}>
                       <span className={`pill pill--${PORTAL_TONE[r.portal.state] || "neutral"}`}>{PORTAL_LABEL[r.portal.state] || r.portal.state}</span>
                       <div style={{ ...muted, marginTop: 2 }}>{r.portal.text}</div>
+                    </td>
+                    <td style={{ fontSize: "0.85rem", maxWidth: 220 }}>
+                      {r.stage === "APPROVED" ? (
+                        <>
+                          <span className={`pill pill--${TEZ_TONE[r.tez.state] || "neutral"}`}>{TEZ_LABEL[r.tez.state] || r.tez.state}</span>
+                          <div style={{ ...muted, marginTop: 2 }}>
+                            {r.tez.state === "CREATED" && r.tez.done_at
+                              ? `${r.tez.done_by || "OK"} · ${formatDateTime(r.tez.done_at)}`
+                              : r.tez.state === "WAITING" && r.tez.sent_at
+                              ? `sent ${formatDateTime(r.tez.sent_at)}`
+                              : ""}
+                          </div>
+                          {(r.tez.state === "NONE" || r.tez.state === "FAILED") && (
+                            <button type="button" className="btn btn--ghost" onClick={() => sendTez(r)}>
+                              Send to Shubham
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <span style={muted}>—</span>
+                      )}
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       {r.stage === "WAITING" && (

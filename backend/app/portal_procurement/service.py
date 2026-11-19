@@ -381,10 +381,12 @@ def _external_ref(demands: list[m.PortalDemandLine]) -> str:
     return "PORTAL-" + hashlib.sha1(ids.encode()).hexdigest()[:12].upper()
 
 
-def enquire(session: Session) -> int:
+def enquire(session: Session, client: PortalClient | None = None) -> int:
     """Discovered lines -> vendor questions through the advance-order engine.
     One order per brand chunk; a part appears once per order so a vendor's
-    answer maps back to exactly one Portal line."""
+    answer maps back to exactly one Portal line. With a Portal `client`, each
+    line's vendor discounts are read first so a vendor whose discount is
+    already set is not asked for it (19 Nov 2026)."""
     from backend.app.advance_orders import service as engine
 
     query = select(m.PortalDemandLine).where(m.PortalDemandLine.state == m.DISCOVERED)
@@ -405,6 +407,10 @@ def enquire(session: Session) -> int:
     fresh = fresh[: settings.max_new_lines_per_poll]
     if not fresh:
         return 0
+    if client is not None:
+        from backend.app.portal_procurement import rounds
+
+        rounds.prefetch_dealer_discounts(fresh, client)
     by_brand: dict[str, list[m.PortalDemandLine]] = {}
     for demand in fresh:
         if not demand.part_no:
@@ -1399,11 +1405,11 @@ def poll_job() -> None:
 
                 slot = rounds.round_due(session)
                 if slot is not None:
-                    sent = enquire(session)
+                    sent = enquire(session, client)
                     rounds.mark_round(session, slot, sent)
                     session.commit()
             else:
-                enquire(session)
+                enquire(session, client)
         except AuthStopped as exc:
             session.rollback()
             _alert(session, "auth", f"run stopped -- {exc}. Check the service account / Cloudflare token.", hours=6)

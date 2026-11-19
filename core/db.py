@@ -58,6 +58,13 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 # ones, so each (table, column, DDL type) here is applied with a guarded
 # ALTER TABLE once per process. Additive-only -- nothing is ever dropped.
 _SCHEMA_UPGRADES = (
+    ("vendor_registration_requests", "create_retries", "INTEGER DEFAULT 0"),
+    ("vendor_registration_requests", "next_create_retry_at", "TIMESTAMP"),
+    ("vendor_registration_requests", "tez_status", "VARCHAR"),
+    ("vendor_registration_requests", "tez_message_id", "VARCHAR"),
+    ("vendor_registration_requests", "tez_sent_at", "TIMESTAMP"),
+    ("vendor_registration_requests", "tez_done_at", "TIMESTAMP"),
+    ("vendor_registration_requests", "tez_done_by", "VARCHAR"),
     ("incoming_documents", "stored_path", "VARCHAR"),
     # Advance-order quote comparison. These tables are imported at startup, so
     # on an existing database they already exist -- empty -- and create_all

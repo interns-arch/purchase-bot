@@ -225,6 +225,18 @@ def answer_for(entry: dict, today: date) -> LineAnswer:
     )
 
 
+def fill_known(draft: dict) -> dict:
+    """A discount already set for this vendor on the Dealer Portal (19 Nov
+    2026, kept under "_known_disc") is not asked: it fills the parts he HAS
+    that have no discount yet. What he wrote himself wins. Changes `draft`."""
+    for line_id, pct in (draft.get("_known_disc") or {}).items():
+        entry = draft.get(str(line_id))
+        if isinstance(entry, dict) and entry.get("available") and entry.get("disc") is None:
+            entry["disc"] = str(pct)
+            entry["disc_known"] = True
+    return draft
+
+
 def start(q: m.AdvanceVendorQuery) -> None:
     q.step, q.draft = PCS, {}
 
@@ -244,6 +256,7 @@ def advance_draft(q: m.AdvanceVendorQuery, text: str, lines: list[m.AdvanceOrder
         # A part he did not mention when he named others: not available from him.
         for line in lines:
             draft.setdefault(str(line.id), {"available": False})
+        fill_known(draft)
     else:
         have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")]
         values = read(q.step, text, have, today)

@@ -61,6 +61,17 @@ class VendorRegistrationRequest(Base):
     )
     dealer_portal_ref: Mapped[str | None] = mapped_column(default=None)
     dealer_portal_error: Mapped[str | None] = mapped_column(default=None)
+    # Automatic retry while the Portal is down (502/503/504/unreachable): how
+    # many waits have been used and when the sweeper may try again.
+    create_retries: Mapped[int] = mapped_column(default=0)
+    # Tez ERP hand-off: "pending" (details sent, waiting for Shubham's OK),
+    # "created" (he said OK), "send_failed"; None = not asked.
+    tez_status: Mapped[str | None] = mapped_column(default=None, index=True)
+    tez_message_id: Mapped[str | None] = mapped_column(default=None)
+    tez_sent_at: Mapped[datetime | None] = mapped_column(default=None)
+    tez_done_at: Mapped[datetime | None] = mapped_column(default=None)
+    tez_done_by: Mapped[str | None] = mapped_column(default=None)
+    next_create_retry_at: Mapped[datetime | None] = mapped_column(default=None, index=True)
 
     reminder_sent_at: Mapped[datetime | None] = mapped_column(default=None)
     submitted_at: Mapped[datetime | None] = mapped_column(default=None)

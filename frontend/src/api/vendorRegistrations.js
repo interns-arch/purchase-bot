@@ -21,3 +21,10 @@ export async function resendVendorApproval(id, alsoCustomer) {
   );
   return response.data;
 }
+
+// Send (or resend) the vendor's full details to Shubham as "Create vendor on
+// Tez ERP". His OK reply marks the vendor created on Tez ERP.
+export async function sendVendorToTez(id) {
+  const response = await apiClient.post(`/api/vendor-registrations/${id}/tez-send`);
+  return response.data;
+}

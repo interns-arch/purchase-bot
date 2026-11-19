@@ -120,6 +120,29 @@ def _purchase_approval_reply(message: IncomingWhatsAppText) -> bool:
         return False
 
 
+def _tez_reply(message: IncomingWhatsAppText) -> bool:
+    """Shubham's OK on the "Create vendor on Tez ERP" message. Claims only an
+    OK that quotes that message (or names VR-n); checked before the vendor
+    handlers because the same number may also answer vendor questions."""
+    from backend.app.vendor_onboarding import tez
+
+    if not tez.enabled() or not (message.text or "").strip():
+        return False
+    try:
+        with get_session() as session:
+            replies = tez.handle_reply(
+                message.sender, message.text, getattr(message, "reply_to_id", "") or "", session
+            )
+        if replies is None:
+            return False
+        for reply in replies:
+            send_reply_safe(message.sender, reply)
+        return True
+    except Exception:  # noqa: BLE001 -- never block the normal text handling
+        logger.exception("Tez ERP reply check failed for %s -- continuing.", message.sender)
+        return False
+
+
 def _advance_order_reply(message: IncomingWhatsAppText) -> bool:
     from backend.app.advance_orders.config import engine_enabled
 
@@ -385,6 +408,8 @@ def _handle_incoming_whatsapp_text(message: IncomingWhatsAppText) -> None:
     # A vendor answering an advance-order question ("haan 5 din", "nahi")
     # from the sales bot. Only numbers with an OPEN question are claimed, and
     # only while ADVANCE_ORDERS_ENABLED=true; everything else continues below.
+    if _tez_reply(message):
+        return
 
     if _advance_order_reply(message):
         return

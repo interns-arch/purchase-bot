@@ -122,6 +122,10 @@ class ScoredQuote:
     # Portal lines only (16 Nov 2026): same band and discount -> fewer exact
     # days, then the vendor's delivery / reply record. Empty elsewhere.
     tie: tuple = ()
+    # Portal lines only (19 Nov 2026): Prateek sir's own vendor order. Inside
+    # one speed band a listed vendor beats a bigger discount. 0 for everyone
+    # when no list is set, so nothing changes.
+    priority_rank: int = 0
 
     @property
     def terms_tier(self) -> int:
@@ -139,6 +143,7 @@ class ScoredQuote:
         # the outcome is stable rather than arbitrary.
         return (
             self.band,
+            self.priority_rank,
             self.terms_tier,
             -(self.discount_pct or Decimal(0)),
             self.tie,

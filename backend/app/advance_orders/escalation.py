@@ -160,6 +160,18 @@ def handle_reply(sender: str, text: str, session: Session) -> bool:
         vendor = service.assign_vendor(order, lines, name, "91" + digits, session, now_ist_naive())
         service._notify_if_changed(order, before, session)
         brands = ", ".join(sorted({line.brand for line in lines if line.brand != cfg.default_brand})) or "-"
+        if service._rounds_on(order) and not service._vendor_group(vendor.id, session):
+            service._send_text(
+                number,
+                f"✅ {ref(order)}: {vendor.name} (+91 {digits}) ko brand {brands} ki vendor list mein save kar diya.\n"
+                "Inka WhatsApp group abhi nahi hai, aur hum vendors se sirf group mein poochte hain — "
+                "group banne ke baad agle round mein inse poochh lunga.\n"
+                f"Abhi ke liye {', '.join(line.part_number for line in lines)} aapke paas pending hai "
+                f"({ref(order)} cancel likhkar band bhi kar sakte hain).",
+            )
+            logger.info("Advance order %s: Prateek sir named vendor %s (%s) -- no group yet, saved only.",
+                        order.id, vendor.id, digits)
+            return True
         later = not service._in_vendor_hours(now_ist_naive())
         service._send_text(
             number,

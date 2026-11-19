@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -282,7 +283,7 @@ def vendor_body(answers: dict, gst: dict | None, username: str, password: str) -
 # --------------------------------------------------------------------------
 
 
-def create_vendor(answers: dict, *, gst: dict | None) -> Created:
+def _create_vendor_once(answers: dict, *, gst: dict | None) -> Created:
     if not settings.enabled:
         return Created(ok=False, error="DEALER_PORTAL_ADMIN_USERNAME / _PASSWORD are not set")
     try:
@@ -326,3 +327,30 @@ def create_vendor(answers: dict, *, gst: dict | None) -> Created:
         return Created(ok=True, account_id=account_id, username=username, password=password, notes=notes)
     finally:
         logout(token)
+
+
+# A gateway error (502/503/504) or an unreachable Portal is the Portal being
+# briefly down, not a problem with the vendor: it is worth trying again.
+_TRANSIENT = re.compile(r"HTTP (502|503|504)|unreachable", re.IGNORECASE)
+QUICK_RETRIES = 4  # tried straight away, a few seconds apart
+QUICK_RETRY_SECONDS = 3.0
+
+
+def is_transient(error: str | None) -> bool:
+    return bool(error and _TRANSIENT.search(error))
+
+
+def create_vendor(answers: dict, *, gst: dict | None) -> Created:
+    """One go plus up to 4 quick retries when the Portal answers 502/503/504 or
+    cannot be reached. Safe to repeat: every go first checks the Portal for the
+    vendor's mobile, so a vendor made by an earlier go is found, not doubled.
+    Longer waits (2, 5, 10, then every 10 min) are the sweeper's job, see
+    `service.retry_due_job`."""
+    result = _create_vendor_once(answers, gst=gst)
+    for attempt in range(1, QUICK_RETRIES + 1):
+        if result.ok or not is_transient(result.error):
+            break
+        logger.warning("%s: %s -- quick retry %d of %d.", answers.get("vendor_name"), result.error, attempt, QUICK_RETRIES)
+        time.sleep(QUICK_RETRY_SECONDS)
+        result = _create_vendor_once(answers, gst=gst)
+    return result

@@ -77,6 +77,23 @@ def _portal(request: m.VendorRegistrationRequest) -> dict:
     return {"state": "CREATED" if ref else "NONE", "text": ref or "—"}
 
 
+def _tez(request: m.VendorRegistrationRequest) -> dict:
+    """Was the vendor created on Tez ERP? (Shubham's OK to the message)."""
+    status = request.tez_status
+    base = {
+        "sent_at": ist_isoformat(request.tez_sent_at) if request.tez_sent_at else None,
+        "done_at": ist_isoformat(request.tez_done_at) if request.tez_done_at else None,
+        "done_by": request.tez_done_by,
+    }
+    if status == "created":
+        return {**base, "state": "CREATED", "text": f"Created on Tez ERP — {request.tez_done_by or 'OK'}"}
+    if status == "pending":
+        return {**base, "state": "WAITING", "text": "Sent to Shubham — waiting for his OK"}
+    if status == "send_failed":
+        return {**base, "state": "FAILED", "text": "Could not send the message to Shubham"}
+    return {**base, "state": "NONE", "text": "—"}
+
+
 def _filled_by(request: m.VendorRegistrationRequest) -> str:
     answers = request.answers or {}
     if answers.get("_on_behalf"):
@@ -107,6 +124,7 @@ def _row(request: m.VendorRegistrationRequest, *, details: bool = False) -> dict
         "last_resent_at": ist_isoformat(request.reminder_sent_at) if request.reminder_sent_at else None,
         "customer_asked": "also_customer" in answers,
         "portal": _portal(request),
+        "tez": _tez(request),
     }
     if details:
         groups = []
@@ -200,3 +218,22 @@ def resend_approval(
     approvals.request_vendor_approval(request, db, reminder=True)
     names = ", ".join(settings.name_of(n) for n in settings.approver_numbers)
     return {"ok": True, "sent_to": names, "row": _row(request)}
+
+
+@router.post("/{request_id}/tez-send")
+def send_to_tez(request_id: int, db: Session = Depends(get_db)) -> dict:
+    """Send (or resend) the vendor's details to Shubham as "Create vendor on
+    Tez ERP" -- for a vendor created before this existed, or a failed send."""
+    from backend.app.vendor_onboarding import tez
+
+    request = db.get(m.VendorRegistrationRequest, request_id)
+    if request is None:
+        raise HTTPException(status_code=404, detail=f"No vendor registration VR-{request_id}.")
+    if request.status != m.REG_CREATED:
+        raise HTTPException(status_code=409, detail=f"VR-{request_id} is not created yet, so there is nothing to create on Tez ERP.")
+    if not tez.enabled():
+        raise HTTPException(status_code=503, detail="No Tez ERP number is set (VENDOR_TEZ_NUMBERS).")
+    if request.tez_status == tez.TEZ_CREATED:
+        raise HTTPException(status_code=409, detail=f"VR-{request_id} is already marked created on Tez ERP.")
+    ok = tez.send_for(request, db, force=True)
+    return {"ok": ok, "row": _row(request)}

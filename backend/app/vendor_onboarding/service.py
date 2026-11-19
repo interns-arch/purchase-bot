@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from datetime import timedelta
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -118,6 +120,65 @@ def _welcome(number: str, name: str, code: str, text: str) -> None:
     send_reply_safe(number, text)
 
 
+# After the 4 quick retries (portal_vendor_api) the waits are 2, 5 and 10
+# minutes, then every 10 minutes until the vendor is created.
+RETRY_WAIT_MINUTES = (2, 5, 10)
+RETRY_WAIT_FOREVER = 10
+
+
+def _schedule_retry(request: m.VendorRegistrationRequest, error: str | None) -> int | None:
+    """Set when the sweeper may try again; returns the wait in minutes, or None
+    when the error is not a Portal outage (a refusal needs a person)."""
+    from backend.app.vendor_onboarding import portal_vendor_api
+    from core.time_utils import now_ist_naive
+
+    if not portal_vendor_api.is_transient(error):
+        request.next_create_retry_at = None
+        return None
+    used = request.create_retries or 0
+    wait = RETRY_WAIT_MINUTES[used] if used < len(RETRY_WAIT_MINUTES) else RETRY_WAIT_FOREVER
+    request.create_retries = used + 1
+    request.next_create_retry_at = now_ist_naive() + timedelta(minutes=wait)
+    return wait
+
+
+def retry_due_job() -> None:
+    """Every minute: try again the approved vendors the Portal could not take
+    because it was down. One at a time; a row another worker holds is skipped."""
+    from backend.app.vendor_onboarding import approvals
+    from backend.app.vendor_onboarding.config import vendor_onboarding_settings as onboarding_settings
+    from core.db import get_session
+    from core.time_utils import now_ist_naive
+
+    with get_session() as session:
+        ids = session.execute(
+            select(m.VendorRegistrationRequest.id).where(
+                m.VendorRegistrationRequest.status == m.REG_CREATE_FAILED,
+                m.VendorRegistrationRequest.next_create_retry_at.is_not(None),
+                m.VendorRegistrationRequest.next_create_retry_at <= now_ist_naive(),
+            )
+        ).scalars().all()
+    for row_id in ids:
+        with get_session() as session:
+            request = session.execute(
+                select(m.VendorRegistrationRequest)
+                .where(m.VendorRegistrationRequest.id == row_id)
+                .with_for_update(skip_locked=True)
+            ).scalar_one_or_none()
+            if request is None or request.status != m.REG_CREATE_FAILED:
+                continue
+            code = f"VR-{request.id}"
+            ok, detail = create_vendor_from_request(request, session)
+            if ok:
+                logger.info("%s: created on the automatic retry.", code)
+                approvals.notify(
+                    list(onboarding_settings.approver_numbers),
+                    f"{code} ({request.vendor_name}) is created now -- the Portal is back. {detail}",
+                )
+            else:
+                logger.warning("%s: automatic retry %s failed: %s", code, request.create_retries, (detail or "")[:200])
+
+
 def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Session) -> tuple[bool, str]:
     """(ok, detail). Sets the request status to CREATED or CREATE_FAILED."""
     code = f"VR-{request.id}"
@@ -140,13 +201,23 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
         if not result.ok:
             request.status = m.REG_CREATE_FAILED
             request.dealer_portal_error = result.error
+            wait = _schedule_retry(request, result.error)
             session.flush()
-            return False, result.error or "Dealer Portal error"
+            detail = result.error or "Dealer Portal error"
+            if wait:
+                detail += f"\nThe Portal looks down -- the bot will try again by itself in {wait} min, and keep trying until it is created."
+            return False, detail
         request.dealer_portal_ref = result.reference
         api_note = result.note
     request.dealer_portal_error = None
+    request.create_retries = 0
+    request.next_create_retry_at = None
     request.status = m.REG_CREATED
     session.flush()
+    # Full details to Shubham: "Create vendor on Tez ERP" (once; never raises).
+    from backend.app.vendor_onboarding import tez
+
+    tez.send_for(request, session)
 
     portal_note = api_note or (
         "Dealer Portal: pending (API not connected yet)."

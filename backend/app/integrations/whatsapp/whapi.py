@@ -393,8 +393,12 @@ def send_text(chat_id: str, body: str) -> str | None:
     return _once(chat_id, body, lambda: _post(chat_id, _labelled(body)))
 
 
-def send_document(chat_id: str, content: bytes, filename: str, mime_type: str, caption: str | None = None) -> str | None:
-    if _quiet_vendor_group(chat_id):
+def send_document(chat_id: str, content: bytes, filename: str, mime_type: str, caption: str | None = None,
+                  to_vendor: bool = False) -> str | None:
+    """`to_vendor=True` (the parts-enquiry CSV, 18 Nov 2026): in "same" mode the
+    file goes into the vendor group itself, like the bot's questions do. Every
+    other file still goes to the team group. The PO-number guard applies to all."""
+    if _quiet_vendor_group(chat_id) and not (to_vendor and vendor_same()):
         if not team_group():
             return None
         chat_id, caption = team_group(), f"*{_vendor_label(chat_id)}*: {caption or filename}"

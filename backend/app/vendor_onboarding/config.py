@@ -46,6 +46,11 @@ class VendorOnboardingSettings:
     # Sunny sir, Anurag -- every ledger goes to all; first reply wins.
     ledger_checkers: dict[str, str] = _labelled("LEDGER_CHECKER_NUMBERS", fallback="WHATSAPP_ADMIN_PHONE_NUMBER")
     ledger_checker_numbers: list[str] = list(ledger_checkers)
+    # Gets every approved vendor's full details as "Create vendor on Tez ERP"
+    # (Shubham); his OK reply marks the vendor created on Tez ERP. Empty = off.
+    tez: dict[str, str] = _labelled("VENDOR_TEZ_NUMBERS")
+    tez_numbers: list[str] = list(tez)
+
     # Told about every failed ledger (Prateek sir).
     ledger_escalation_numbers: list[str] = list(_labelled("LEDGER_ESCALATION_NUMBERS", fallback="WHATSAPP_ADMIN_PHONE_NUMBER"))
 
@@ -64,6 +69,7 @@ class VendorOnboardingSettings:
             self.approvers.get(number)
             or self.purchase_team.get(number)
             or self.ledger_checkers.get(number)
+            or self.tez.get(number)
             or number
         )
 

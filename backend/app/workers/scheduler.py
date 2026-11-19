@@ -138,7 +138,10 @@ def _schedule_group_stock_requests() -> None:
 def _schedule_mrp_requests() -> None:
     """"MRP list share kar dijiye" in every vendor WhatsApp group, once a month
     (Founder, 2 Nov 2026)."""
-    from backend.app.integrations.whatsapp import mrp_list
+    try:
+        from backend.app.integrations.whatsapp import mrp_list
+    except ImportError:  # the MRP-list module is not deployed (see CLAUDE.md, 2 Nov 2026)
+        return
 
     if not mrp_list.asking_enabled():
         return
@@ -310,9 +313,30 @@ def _schedule_portal_procurement() -> None:
         max_instances=1,
         coalesce=True,
     )
+    if portal.report_time:
+        from backend.app.portal_procurement import reporting
+
+        # The evening purchase report to Prateek sir (19 Nov 2026 meeting).
+        _add_daily_ist_job("portal_procurement_report", portal.report_time, reporting.report_job)
     logger.info(
         "Portal procurement enabled -- Active Procurement read every %d min, steps every %d min.",
         portal.poll_minutes, portal.step_minutes,
+    )
+
+
+def _schedule_vendor_creation_retry() -> None:
+    """Approved vendors the Dealer Portal could not take (502/503/504 or
+    unreachable) are tried again: 2, 5, 10 min, then every 10 min until done."""
+    from backend.app.vendor_onboarding import service
+
+    _scheduler.add_job(
+        lambda: _run_safely("vendor_creation_retry", service.retry_due_job),
+        "interval",
+        minutes=1,
+        id="vendor_creation_retry",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
 
@@ -330,6 +354,7 @@ def start_scheduler() -> None:
     _schedule_whatsapp_daily_jobs()
     _schedule_advance_orders()
     _schedule_portal_procurement()
+    _schedule_vendor_creation_retry()
     _schedule_google_sheet_daily_reset()
     _schedule_group_stock_requests()
     _schedule_mrp_requests()

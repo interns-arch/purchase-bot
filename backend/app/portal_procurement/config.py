@@ -149,6 +149,36 @@ class PortalProcurementSettings:
     # PDF sanity: anything smaller is not a real PO.
     min_pdf_bytes: int = max(100, _int("PORTAL_PROCUREMENT_MIN_PDF_BYTES", 1000))
 
+    # ---- 19 Nov 2026 procurement meeting ---------------------------------
+    # A vendor whose brand discount is already known (set on the Dealer Portal
+    # for this line, else a standing % in vendor_brands) is NOT asked for a
+    # discount; first-time vendors with none on file are asked.
+    use_known_discount: bool = (os.environ.get("PORTAL_PROCUREMENT_USE_KNOWN_DISCOUNT") or "true").strip().lower() == "true"
+    known_discount_ttl_hours: int = max(1, _int("PORTAL_PROCUREMENT_KNOWN_DISCOUNT_TTL_HOURS", 12))
+    # Prateek sir's own vendor order, first = most preferred, inside the same
+    # speed band. Re-read on every run, like the pilot file:
+    # {"vendors": [145, 110, 72]}. Not listed = after the listed ones.
+    priority_file: str = (os.environ.get("PORTAL_PROCUREMENT_PRIORITY_FILE") or "uploads/portal_priority.json").strip()
+    # No answer good enough this many hours after the first ask -> Prateek
+    # sir is told, with "ask this vendor instead" (a new vendor) / cancel.
+    escalate_hours: int = max(1, _int("PORTAL_PROCUREMENT_ESCALATE_HOURS", 6))
+    # A vendor quoting less than the customer's discount -> Prateek sir is told at once.
+    low_discount_alert: bool = (os.environ.get("PORTAL_PROCUREMENT_LOW_DISCOUNT_ALERT") or "true").strip().lower() == "true"
+    # (Parts as a file to vendors: the enquiry CSV of 18 Nov 2026 does that --
+    # advance_orders/enquiry_csv.py, ADVANCE_ORDER_ASK_CSV.)
+    # End-of-day purchase report to Prateek sir (IST, HH:MM; blank = off).
+    report_time: str = (os.environ.get("PORTAL_PROCUREMENT_REPORT_TIME") or "20:00").strip()
+    report_excel: bool = (os.environ.get("PORTAL_PROCUREMENT_REPORT_EXCEL") or "true").strip().lower() == "true"
+
+    def priority_vendors(self) -> list[int]:
+        """Vendor ids, most preferred first (empty = no list)."""
+        try:
+            with open(self.priority_file, encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+            return [int(x) for x in data.get("vendors") or [] if str(x).strip().isdigit()]
+        except (OSError, ValueError, AttributeError):
+            return []
+
     def credentials(self) -> tuple[str, str]:
         """(username, password); empty strings when not configured."""
         if self.secrets_file:

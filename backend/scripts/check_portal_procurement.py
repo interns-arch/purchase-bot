@@ -554,7 +554,7 @@ def main() -> int:
     whapi.vendor_groups = lambda: {"CT_A": "120363000000000001@g.us"}
     whapi.send_text = lambda chat, body: group_posts.append((chat, body)) or f"whapi.{len(group_posts)}"
     group_files: list[tuple[str, str, bytes]] = []
-    whapi.send_document = (lambda chat, content, name, mime, caption=None:
+    whapi.send_document = (lambda chat, content, name, mime, caption=None, to_vendor=False:
                            group_files.append((chat, name, content)) or f"whapi.f{len(group_files)}")
     cfg.group_gap_seconds = 0
     cfg.followup_count = 1
@@ -1098,6 +1098,14 @@ def main() -> int:
     clock["now"] = datetime(2026, 11, 23, 12, 10)
     settle(2)
     check("...and nobody is asked a 4th time", posts(GA, "R19A07") == 3)
+    ao7 = f"AO-{demand(12607).advance_order_id}"
+    check("19 Nov: after 6 hours with no answer Prateek sir is asked (new vendor / cancel)",
+          any("6 ghante" in b and "R19A07" in b and f"{ao7} vendor" in b and f"{ao7} cancel" in b for b in to_prateek()))
+    from backend.app.advance_orders import escalation as esc
+
+    with get_session() as s:
+        check("...his cancel is taken", esc.handle_reply(PRATEEK, f"{ao7} cancel", s))
+    settle(1)
     check("the line ends as no vendor", demand(12607).state == m.NO_VENDOR)
 
     # today's stock sheet shows the part: that vendor is not asked; his sheet is his reply
@@ -1233,6 +1241,148 @@ def main() -> int:
     run_round()
     check("one part: asked as before, no CSV", not group_files
           and any("R20A03" in b and "CSV" not in b for c, b in group_posts if c == GA))
+    # ------------------------------------------------------------------ 21
+    print("\n[21] 19 Nov meeting: Portal discount not asked, priority, low-discount alert, new vendor, report")
+    from backend.app.advance_orders import escalation as esc
+    from backend.app.portal_procurement import reporting
+
+    cfg.ask_mode = "steps"
+    rounds._dealer_discounts.clear()
+
+    def round_with_portal():
+        with get_session() as s:
+            service.poll(s, client, clock["now"].date())
+            s.commit()
+            slot = rounds.round_due(s, clock["now"])
+            if slot is not None:
+                rounds.mark_round(s, slot, service.enquire(s, client))
+
+    # Portal has 15% set for Alpha (dealer 27), nothing (0) for Beta (dealer 28)
+    clock["now"] = datetime(2026, 12, 1, 9, 5)
+    cust(12801, "R21A01", disc="5.00", price="950.00")
+    portal.options[12801] = [{"dealer_id": 27, "discount_percent": "15.00"}, {"dealer_id": 28, "discount_percent": "0"}]
+    group_posts.clear()
+    round_with_portal()
+    settle(1)
+    check("Portal vendor discounts read for the line",rounds.dealer_discount(12801, 27) == 15
+          and rounds.dealer_discount(12801, 28) is None)
+    reply("919100000001", "haan 1 pcs")
+    reply("919100000001", "1000")  # MRP
+    a_posts = [b for c, b in group_posts if c == GA and "R21A01" in b]
+    check("vendor with a Portal discount: asked pcs, MRP, then days -- not discount",
+          len(a_posts) == 3 and "din" in a_posts[-1].lower() and not any("discount" in b.lower() for b in a_posts))
+    reply("919100000002", "haan 1 pcs")
+    reply("919100000002", "1000")
+    b_posts =[b for c, b in group_posts if c == GB and "R21A01" in b]
+    check("vendor with no discount on the Portal IS asked the discount", "discount" in b_posts[-1].lower())
+    reply("919100000001", "2 din")
+    reply("919100000002", "10")
+    reply("919100000002", "2 din")
+    settle()
+    p1 = payload_for(12801) or {}
+    check("...the Portal discount is his quote (15% beats 10% in the same band)",
+          p1.get("supplier_dealer_id") == 27 and float(p1.get("quoted_discount_percent") or 0) == 15.0)
+
+    # priority list: Beta first -> Beta wins the same band even with a smaller discount
+    prio_file = _TMP / "prio.json"
+    prio_file.write_text(json.dumps({"vendors": [vendors["B"]]}), encoding="utf-8")
+    portal_settings.priority_file = str(prio_file)
+    rounds._dealer_discounts.clear()
+    clock["now"] = datetime(2026, 12, 1, 12, 5)
+    cust(12802, "R21A02", disc="5.00", price="950.00")
+    round_with_portal()
+    settle(1)
+    for number, disc in (("919100000001", "20"), ("919100000002", "12")):
+        reply(number, "haan 1 pcs")
+        reply(number, "1000")
+        reply(number, disc)
+        reply(number, "2 din")
+    settle()
+    check("priority list: Beta (listed) beats Alpha's bigger discount in the same band",
+          (payload_for(12802) or {}).get("supplier_dealer_id") == 28)
+    clock["now"] = datetime(2026, 12, 1, 15, 5)
+    cust(12803, "R21A03", disc="5.00", price="950.00")
+    round_with_portal()
+    settle(1)
+    reply("919100000001", "haan 1 pcs"); reply("919100000001", "1000"); reply("919100000001", "20"); reply("919100000001", "1 din")
+    reply("919100000002", "haan 1 pcs"); reply("919100000002", "1000"); reply("919100000002", "12"); reply("919100000002", "5 din")
+    settle()
+    check("...but a faster band still beats priority (TAT first)",
+          (payload_for(12803) or {}).get("supplier_dealer_id") == 27)
+    portal_settings.priority_file = str(_TMP / "none.json")
+
+    # vendor quotes below the customer's discount -> Prateek sir told at once
+    before_p = len(to_prateek())
+    clock["now"] = datetime(2026, 12, 2, 9, 5)
+    cust(12804, "R21A04", disc="18.00", price="820.00")
+    round_with_portal()
+    settle(1)
+    reply("919100000001", "haan 1 pcs"); reply("919100000001", "1000"); reply("919100000001", "12"); reply("919100000001", "2 din")
+    alerts = [b for b in to_prateek()[before_p:] if "Kam discount" in b]
+    check("low discount: Prateek sir told (12% vs customer's 18%)",
+          len(alerts) == 1 and "R21A04" in alerts[0] and "12%" in alerts[0] and "18%" in alerts[0] and "Alpha Motors" in alerts[0])
+    check("...and the vendor group never sees it", not any("Kam discount" in b or "customer" in b.lower()
+                                                           for c, b in group_posts))
+
+    # 6 hours, no answer: Prateek sir names a NEW vendor with no group -> saved, not asked one to one
+    clock["now"] = datetime(2026, 12, 3, 9, 5)
+    cust(12805, "R21A05")
+    round_with_portal()
+    settle(1)
+    clock["now"] = datetime(2026, 12, 3, 15, 10)
+    settle(1)
+    ao5 = f"AO-{demand(12805).advance_order_id}"
+    check("6 hours: escalated with the new-vendor option",
+          any(ao5 in b and "naya vendor" in b and "R21A05" in b for b in to_prateek()))
+    sent_before = len(sent)
+    with get_session() as s:
+        check("'AO vendor <name> <mobile>' is understood", esc.handle_reply(PRATEEK, f"{ao5} vendor Naya Motors 9811122233", s))
+    check("...the new vendor (no group) is NOT messaged one to one",
+          not any(to == "919811122233" for to, _b in sent[sent_before:]))
+    with get_session() as s:
+        nv = s.execute(select(Vendor).where(Vendor.name == "Naya Motors")).scalar_one_or_none()
+        on_list = nv is not None and s.execute(select(am.VendorBrand).where(
+            am.VendorBrand.vendor_id == nv.id, am.VendorBrand.brand == "HYUNDAI")).scalar_one_or_none() is not None
+    check("...but saved on the brand's vendor list", on_list)
+    check("...and Prateek sir is told why", any("group abhi nahi" in b for b in to_prateek()))
+
+    # several parts by CSV, discount set on the Portal for Alpha: the blank discount is not asked
+    rounds._dealer_discounts.clear()
+    clock["now"] = datetime(2026, 12, 4, 9, 5)
+    cust(12810, "R21A10")
+    cust(12811, "R21A11")
+    for sol in (12810, 12811):
+        portal.options[sol] = [{"dealer_id": 27, "discount_percent": "14.00"}, {"dealer_id": 28}]
+    group_posts.clear()
+    round_with_portal()
+    settle(1)
+    filled2 = _TMP / "filled2.csv"
+    filled2.write_text("Part No,Qty Needed,Available Qty,Available (Yes/No),Discount %,Days (TAT)" + chr(10)
+                       + "R21A10,1,1,Yes,," + chr(10) + "R21A11,1,1,Yes,," + chr(10), encoding="utf-8")
+    before_posts = len(group_posts)
+    with get_session() as s:
+        took = engine.handle_enquiry_file("919100000001", filled2, "filled2.csv", s, clock["now"])
+    new_posts = [b for c, b in group_posts[before_posts:] if c == GA]
+    check("CSV + Portal discount: after the CSV only days are asked, not the discount",
+          took and len(new_posts) == 1 and "din" in new_posts[0] and "discount" not in new_posts[0].lower())
+
+    # evening report (rows carry the real clock's dates; put 12801-12803 on 25 Nov)
+    with get_session() as s:
+        for d in s.execute(select(m.PortalDemandLine).where(
+                m.PortalDemandLine.source_order_line_id.in_([12801, 12802, 12803]))).scalars():
+            d.first_seen_at = d.updated_at = datetime(2026, 12, 1, 9, 0)
+            for a in s.execute(select(m.PortalAllocation).where(m.PortalAllocation.demand_line_id == d.id)).scalars():
+                a.created_at = datetime(2026, 12, 1, 16, 0)
+    with get_session() as s:
+        data = reporting.collect(s, date(2026, 12, 1))
+    text = reporting.report_text(data, excel=True)
+    check("report: brand-wise and vendor-wise counts", data["totals"]["bought"] >= 3
+          and "HYUNDAI" in text and "Alpha Motors" in text and "Brand wise" in text)
+    check("report Excel builds", reporting.report_excel(data)[:2] == b"PK")
+    before_p = len(to_prateek())
+    with get_session() as s:
+        check("report goes to Prateek sir", reporting.send_report(s, date(2026, 12, 1))
+              and any("Purchase report" in b for b in to_prateek()[before_p:]))
     cfg.ask_mode = "one"
     portal_settings.rounds = False
 
