@@ -40,8 +40,9 @@ Every round-only behaviour is gated by `_rounds_on(order)` (portal orders only),
 - **Asks:** at most 3 times per part (first ask + reminders one round apart). Still silent → Prateek sir is told
   ("🔕 ... 3 baar poochne par bhi reply nahi kiya") and that vendor is not asked about that part again.
 - **Who can win:** a reply over **7 days** can't win (asked again next round). Below **2% margin** can't win.
-- **Ranking:** TAT band (1, 3, 7, 15 days) first → terms tier → bigger discount → **tie** (exact days, then
-  delivery history: on-time %, else reply %) → net → priority → id. TAT beats discount.
+- **Ranking:** TAT band (1, 3, 7, 15 days) first → **brand-wise order from the dashboard's Vendors page**
+  (`vendor_brands.priority`, 20 Nov 2026; `portal_priority.json` overrides it when set) → terms tier → bigger discount
+  → **tie** (exact days, then delivery history: on-time %, else reply %) → net → id. TAT beats priority, priority beats discount.
 - **All replies below 2% margin** → Prateek sir gets numbered answers ("🟠 Vendor choose kijiye — C78 ...");
   he replies `C78 1` or `C78 cancel` (bare `1`/`cancel` works when only one choice waits).
 - **Stock sheet:** if the vendor's stock sheet **from today** shows the part, he is NOT asked whether he has it.
@@ -240,6 +241,10 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   "Bot log", `/groups` redirects to `/chats?filter=groups`, `GroupsPage.jsx` removed. Minimal shell: plain side menu,
   one palette (`--ink`, `--line`, `--wash`, `--accent` in `index.css`), no shadows/gradients/emoji. `Layout bare`
   = full-height page without the title bar. Light theme kept.
+- **20 Nov, deployed** (backup `brand-priority-20261120.tgz`): the brand-wise vendor order on the Vendors page now
+  picks the Portal winner among equally fast vendors (`rounds.fill_ties`: `priority_rank = vendor_priority`), ahead of a
+  bigger discount; equal positions still go by discount. Page text updated. Checks [21] "dashboard order".
+  Ford pilot order then: Ark #2, Divine #3, S And S #4.
 
 ---
 

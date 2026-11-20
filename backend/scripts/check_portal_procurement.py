@@ -1311,6 +1311,31 @@ def main() -> int:
           (payload_for(12803) or {}).get("supplier_dealer_id") == 27)
     portal_settings.priority_file = str(_TMP / "none.json")
 
+    # 20 Nov: the brand-wise order from the dashboard's Vendors page (no file)
+    def set_order(**pos):
+        with get_session() as s:
+            for code, prio in pos.items():
+                row = s.execute(select(am.VendorBrand).where(am.VendorBrand.vendor_id == vendors[code],
+                                                           am.VendorBrand.brand == "HYUNDAI")).scalar_one()
+                row.priority = prio
+
+    def race(sol, part, when, alpha_disc, beta_disc):
+        clock["now"] = when
+        cust(sol, part, disc="5.00", price="950.00")
+        round_with_portal()
+        settle(1)
+        for number, disc in (("919100000001", alpha_disc), ("919100000002", beta_disc)):
+            reply(number, "haan 1 pcs"); reply(number, "1000"); reply(number, disc); reply(number, "2 din")
+        settle()
+        return (payload_for(sol) or {}).get("supplier_dealer_id")
+
+    set_order(B=1, A=2)
+    check("dashboard order: Beta #1 beats Alpha's bigger discount in the same band",
+          race(12820, "R21A20", datetime(2026, 12, 5, 9, 5), "20", "12") == 28)
+    set_order(A=1, B=1)
+    check("...vendors at the same position still go by the bigger discount",
+          race(12821, "R21A21", datetime(2026, 12, 5, 12, 5), "20", "12") == 27)
+
     # vendor quotes below the customer's discount -> Prateek sir told at once
     before_p = len(to_prateek())
     clock["now"] = datetime(2026, 12, 2, 9, 5)

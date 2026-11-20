@@ -185,9 +185,17 @@ def fill_ties(scored: list, session: Session) -> None:
     groups: dict[tuple, list] = {}
     order = settings.priority_vendors()
     if order:
+        # The optional file (one order for every brand) wins when it is set.
         pos = {vid: i for i, vid in enumerate(order)}
         for s in scored:
             s.priority_rank = pos.get(s.quote.vendor_id, len(order))
+    else:
+        # User, 20 Nov 2026: the brand-wise order set on the dashboard's
+        # Vendors page (vendor_brands.priority, 1 = first) beats a bigger
+        # discount inside the same speed band. Vendors left at the same
+        # position still go by discount; not on the brand's list = last.
+        for s in scored:
+            s.priority_rank = s.vendor_priority
     for s in scored:
         s.tie = (s.quote.tat_days if s.quote.tat_days is not None else 999,)
         groups.setdefault((s.band, s.terms_tier, s.discount_pct, s.tie), []).append(s)

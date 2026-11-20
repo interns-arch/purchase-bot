@@ -38,7 +38,7 @@ const PAGE_PURPOSE = {
   "/part-intelligence": "Search one part: who stocks it, how much is free, at what price.",
   "/file-inbox": "Every file received — imported, failed or needing review.",
   "/settings": "Account, integrations and system status.",
-  "/vendor-priority": "Brand-wise vendor lists: every vendor of the brand is asked for a part at once. Add vendors, reorder, see who replies best.",
+  "/vendor-priority": "Brand-wise vendor order: every vendor of the brand is asked at once; among equally fast replies, the one higher here wins.",
   "/chats": "Every WhatsApp message the bot sent and received, live.",
   "/vendor-creation": "Every vendor registered on WhatsApp — its full details, whether Prateek sir / NK Jain sir approved it, and its Dealer Portal account.",
   "/active-procurement": "Live: every part on the Dealer Portal's Active Procurement, its brand, the vendors of that brand, who replied and who wins.",

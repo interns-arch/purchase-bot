@@ -247,10 +247,12 @@ export function VendorPriorityPage() {
           </div>
         </div>
         <p style={{ color: "var(--color-text-muted)", fontSize: "0.85rem", margin: "10px 0 0" }}>
-          For a part request the bot asks EVERY vendor on this brand's list at the same time (plus any vendor whose stock
-          file shows the part); the fastest delivery wins, then the bigger discount. This order is for your view and
-          breaks ties. If nobody says yes within 2 hours (with 2 reminders), Prateek sir is asked. Score = reply rate 35 + reply speed 30 + "yes" rate 20 + discount 15, from the last 60 days of
-          WhatsApp. * = little history yet.
+          <b>This order picks the winner.</b> For a Dealer Portal part the bot asks every vendor on this brand's list at
+          once (in their WhatsApp group). Among the replies, faster delivery wins first (1 / 3 / 7 / 15 days); among
+          equally fast vendors, the one higher in this list wins, even with a smaller discount. Vendors at the same
+          position go by the bigger discount. The 7-day limit and the 2% margin still apply. Saved here, used from the
+          next round. Score = reply rate 35 + reply speed 30 + "yes" rate 20 + discount 15, last 60 days. * = little
+          history yet.
         </p>
       </section>
 
