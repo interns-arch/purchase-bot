@@ -142,6 +142,29 @@ def main() -> int:
     new_request()
     check("no button card, template to both approvers", not cards and {t[0] for t in templates} == {PRATEEK, JAIN})
     check("details still sent as text with typed replies", any("APPROVE VR-" in b and "Bank" in b for _t, b in sent))
+    out_of_window = max(r for r in (rid, rid2, rid3) if r) + 1  # the request made just above
+
+    print("\n[6b] 20 Nov (VR-26): approver says 'hi' after the template -> the full card comes now")
+    cards.clear(); sent.clear()
+    window["open"] = True  # he wrote, so his window is open
+    with get_session() as s:
+        hi = approvals.handle_reply(PRATEEK, "Hi", s)
+    check("'Hi' is answered by the card, not the help menu", hi == [])
+    check("...full details with Approve / Reject buttons, to him only",
+          len(cards) == 1 and cards[0][0] == PRATEEK and "Bank" in cards[0][1]
+          and any(f"APPROVE {out_of_window}" in b[0] for b in cards[0][2]))
+    cards.clear()
+    with get_session() as s:
+        again = approvals.handle_reply(PRATEEK, "hi", s)
+    check("a second 'hi' does not repeat the card", again is None and not cards)
+    with get_session() as s:
+        other = approvals.handle_reply(JAIN, "kal baat karte hain", s)
+    check("Jain sir's first message also brings his card, and the text goes on to the normal handlers",
+          other is None and len(cards) == 1 and cards[0][0] == JAIN)
+    cards.clear()
+    with get_session() as s:
+        done = approvals.handle_reply(PRATEEK, f"APPROVE VR-{out_of_window}", s)
+    check("APPROVE still works directly", bool(done) and not cards)
 
     print("\n[7] dashboard RESEND of an OLD waiting request, then Approve -> Portal API")
     window["open"] = True

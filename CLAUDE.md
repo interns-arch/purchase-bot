@@ -209,6 +209,13 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
     files only ADD to the server copies. Local backup of the old files: `..\local-backup-20261119\`.
   - `scheduler.py`: the MRP-list job import is guarded (`mrp_list` is not on the server).
   - Checks: [20] = server's CSV section, [21] = these rules; [19] now expects the 6-hour escalation.
+- **20 Nov, deployed** (backup `approval-card-on-hi-20261120.tgz`): vendor approval outside the 24-hour window.
+  Only the `vendor_approval_request` template reaches the approver; the details after it are blocked by WhatsApp
+  (131049 — they go in the MARKETING `purchase_bot_update` template). VR-26: Prateek sir said "Hi" and got the
+  staff help menu. Now `approvals.deliver_waiting_cards`: any message from an approver sends him the full card
+  (details + buttons) of every waiting vendor he has not seen (`answers["_card_to"]`); "hi"/"ok"/"details"
+  is answered by the card only. Check: `check_vendor_approval_buttons.py` [6b].
+  Idea (needs Meta approval): add "Details ke liye HI likhiye" to the `vendor_approval_request` template.
 
 ---
 

@@ -156,13 +156,31 @@ def _reminder_line(request: m.VendorRegistrationRequest) -> str:
     return f"🔔 *Reminder* — this vendor is still waiting for your approval{when}."
 
 
+# Numbers that have SEEN the full card for a request (inside the 24-hour
+# window). Outside it only the short approval template gets through -- the
+# details that follow it are blocked by WhatsApp (131047 / 131049, VR-26 on
+# 20 Nov 2026) -- so the card is sent again the moment he writes to the bot.
+_CARD_KEY = "_card_to"
+
+
+def _mark_card(request: m.VendorRegistrationRequest, number: str) -> None:
+    answers = dict(request.answers or {})
+    seen = list(answers.get(_CARD_KEY) or [])
+    if number not in seen:
+        seen.append(number)
+        answers[_CARD_KEY] = seen
+        request.answers = answers  # reassign so the JSON column is marked dirty
+
+
 def send_approval_card(
-    number: str, request: m.VendorRegistrationRequest, warning: str | None = None, *, reminder: bool = False
-) -> None:
+    number: str, request: m.VendorRegistrationRequest, warning: str | None = None, *, reminder: bool = False,
+    in_window: bool | None = None,
+) -> bool:
     """The vendor's details with APPROVE / REJECT buttons. Buttons need the
     24-hour window (and the Meta number): outside it the approved template
     reaches him first and the details follow as text with the typed replies,
-    exactly as before. Never raises."""
+    exactly as before. `in_window=True`: he has just written to the bot.
+    True when the full card (details + buttons) went out. Never raises."""
     from backend.app.integrations.whatsapp import outbound
 
     code = _code(request)
@@ -171,7 +189,7 @@ def send_approval_card(
     if reminder:
         details = _reminder_line(request) + "\n\n" + details
     typed = f"Ya likhiye: APPROVE {code} / REJECT {code}"
-    if outbound.in_service_window(number):
+    if in_window if in_window is not None else outbound.in_service_window(number):
         body = (f"Namaste {name},\n" if name else "") + details
         try:
             client = WhatsAppClient(whatsapp_settings)
@@ -182,7 +200,8 @@ def send_approval_card(
                 client.send_button_message(
                     number, f"{code} — *{request.vendor_name}*\nApprove karein?", _buttons(request.id), footer=typed
                 )
-            return
+            _mark_card(request, number)
+            return True
         except Exception:  # noqa: BLE001 -- fall back to text below
             logger.exception("%s: approval buttons to %s failed -- sending text.", code, number)
     notify(
@@ -191,16 +210,56 @@ def send_approval_card(
         template=settings.approval_template,
         params=[code, f"{request.vendor_name} ({request.gstin})"],
     )
+    return False
+
+
+def _duplicate_warning(request: m.VendorRegistrationRequest, session: Session) -> str | None:
+    from core.services import vendor_service
+
+    similar = vendor_service.get_vendor_by_name(request.vendor_name or "", session)
+    if similar is None:
+        return None
+    return f"⚠️ A vendor named '{similar.name}' already exists in ProcureHub — check it is not a duplicate."
+
+
+# "hi" / "details" from an approver who has a card waiting: the card IS the answer.
+_HELLO = re.compile(
+    r"^\s*(hi+|hello+|helo|hey|namaste|namaskar|good\s*(morning|afternoon|evening)|ok|okay|ji|haan|"
+    r"details?|show|dikhao|bhejo|batao)\b[\s!.?ji]*$",
+    re.IGNORECASE,
+)
+
+
+def deliver_waiting_cards(sender: str, session: Session) -> int:
+    """An approver just wrote to the bot, so his 24-hour window is open: send
+    him the full card (details + buttons) of every vendor still waiting that
+    he has not seen yet. Returns how many were sent. Never raises."""
+    if sender not in settings.approver_numbers:
+        return 0
+    try:
+        waiting = session.execute(
+            select(m.VendorRegistrationRequest)
+            .where(m.VendorRegistrationRequest.status == m.REG_AWAITING_APPROVAL)
+            .order_by(m.VendorRegistrationRequest.id)
+        ).scalars().all()
+        sent = 0
+        for request in waiting:
+            if sender in ((request.answers or {}).get(_CARD_KEY) or []):
+                continue
+            if send_approval_card(sender, request, _duplicate_warning(request, session), in_window=True):
+                sent += 1
+        if sent:
+            session.flush()
+            logger.info("Approver %s wrote to the bot: %d waiting vendor card(s) sent.", sender, sent)
+        return sent
+    except Exception:  # noqa: BLE001 -- the normal reply still follows
+        logger.exception("Could not send the waiting vendor cards to %s.", sender)
+        return 0
 
 
 def request_vendor_approval(request: m.VendorRegistrationRequest, session: Session, *, reminder: bool = False) -> None:
-    from core.services import vendor_service
-
     code = _code(request)
-    similar = vendor_service.get_vendor_by_name(request.vendor_name or "", session)
-    warning = None
-    if similar is not None:
-        warning = f"⚠️ A vendor named '{similar.name}' already exists in ProcureHub — check it is not a duplicate."
+    warning = _duplicate_warning(request, session)
     if not settings.approver_numbers:
         logger.warning("%s submitted but VENDOR_APPROVER_NUMBERS is empty -- nobody was asked.", code)
     for number in settings.approver_numbers:
@@ -438,7 +497,13 @@ def handle_reply(sender: str, text: str | None, session: Session) -> list[str] |
         return reason
     parsed = parse_reply(text)
     if parsed is None:
-        return _bare_decision(sender, text, session)
+        bare = _bare_decision(sender, text, session)
+        if bare is not None:
+            return bare
+        # Not a decision: if a vendor card never reached him, it goes now.
+        if deliver_waiting_cards(sender, session) and _HELLO.match(text or ""):
+            return []  # the card answered his "hi" -- no help menu on top
+        return None
     verb, kind, row_id, reason = parsed
     if kind == "vr":
         if verb.startswith(("pass", "fail")):
