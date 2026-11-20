@@ -17,8 +17,8 @@ const NAV = [
   { to: "/vendor-creation", label: "Vendor creation" },
   { to: "/dealer-portal", label: "Dealer Portal" },
   { to: "/performance", label: "Performance" },
+  // Chats and groups are one inbox (20 Nov 2026); /groups opens its Groups filter.
   { to: "/chats", label: "Chats" },
-  { to: "/groups", label: "Groups" },
 ];
 
 const MORE = [
@@ -43,7 +43,6 @@ const PAGE_PURPOSE = {
   "/vendor-creation": "Every vendor registered on WhatsApp — its full details, whether Prateek sir / NK Jain sir approved it, and its Dealer Portal account.",
   "/active-procurement": "Live: every part on the Dealer Portal's Active Procurement, its brand, the vendors of that brand, who replied and who wins.",
   "/vendor-poc": "A vendor's people: every number here counts as the vendor, one to one and in his WhatsApp group.",
-  "/groups": "The WhatsApp groups the bot is in — every message, live.",
   "/dealer-portal": "Each vendor's stock is copied to its Dealer Portal account automatically: reset, then the full list.",
 };
 
@@ -68,7 +67,7 @@ function SideLink({ item }) {
 // A vertical menu on the left (12 Nov 2026: the top menu had grown past the
 // screen width, so tabs such as "Vendor creation" were hidden off the edge).
 // Every page is listed; on a phone the menu opens from the ☰ button.
-export function Layout({ children, title, subtitle }) {
+export function Layout({ children, title, subtitle, bare = false }) {
   const location = useLocation();
   const purpose = subtitle ?? PAGE_PURPOSE[location.pathname];
   const [open, setOpen] = useState(false);
@@ -85,7 +84,7 @@ export function Layout({ children, title, subtitle }) {
   }, [open]);
 
   return (
-    <div className={"app-shell app-shell--side" + (open ? " app-shell--menu-open" : "")}>
+    <div className={"app-shell app-shell--side" + (open ? " app-shell--menu-open" : "") + (bare ? " app-shell--bare" : "")}>
       <header className="sidebar-top">
         <button
           type="button"
@@ -125,13 +124,15 @@ export function Layout({ children, title, subtitle }) {
         </span>
       </aside>
       <div className="app-main">
-        <div className="page-head">
-          <div>
-            <h1 className="page-head__title">{title}</h1>
-            {purpose ? <p className="page-head__purpose">{purpose}</p> : null}
+        {bare ? null : (
+          <div className="page-head">
+            <div>
+              <h1 className="page-head__title">{title}</h1>
+              {purpose ? <p className="page-head__purpose">{purpose}</p> : null}
+            </div>
+            <span className="page-head__date">{TODAY.format(new Date())}</span>
           </div>
-          <span className="page-head__date">{TODAY.format(new Date())}</span>
-        </div>
+        )}
         <main className="app-content">{children}</main>
       </div>
     </div>

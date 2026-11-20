@@ -235,6 +235,11 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   every day at 21:30 IST (scheduler job `vendor_portal_link`, `VENDOR_PORTAL_LINK_TIME`), for a vendor whose dealer id
   could not be read at creation (slow `GET /users/`). A vendor that needs a person is sent to the approvers once,
   only if approved in the last 3 days. All bot-created vendors have their login saved; only VR-24 waits for a person.
+- **20 Nov, deployed (frontend only)** (backup `inbox-redesign-20261120.tgz`): Chats and Groups are ONE inbox
+  (`ChatsPage.jsx`): filters All / Vendors / Team / Customers / Groups (`?filter=`), the group activity feed behind
+  "Bot log", `/groups` redirects to `/chats?filter=groups`, `GroupsPage.jsx` removed. Minimal shell: plain side menu,
+  one palette (`--ink`, `--line`, `--wash`, `--accent` in `index.css`), no shadows/gradients/emoji. `Layout bare`
+  = full-height page without the title bar. Light theme kept.
 
 ---
 

@@ -35,7 +35,6 @@ const ChatsPage = lazy(() => import("./pages/ChatsPage").then((m) => ({ default:
 const VendorCreationPage = lazy(() =>
   import("./pages/VendorCreationPage").then((m) => ({ default: m.VendorCreationPage }))
 );
-const GroupsPage = lazy(() => import("./pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
 const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then((m) => ({ default: m.VendorPriorityPage })));
 const ActiveProcurementPage = lazy(() =>
   import("./pages/ActiveProcurementPage").then((m) => ({ default: m.ActiveProcurementPage }))
@@ -161,14 +160,8 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/groups"
-              element={
-                <ProtectedRoute>
-                  <GroupsPage />
-                </ProtectedRoute>
-              }
-            />
+            {/* Groups are part of the Chats inbox now (20 Nov 2026). */}
+            <Route path="/groups" element={<Navigate to="/chats?filter=groups" replace />} />
             <Route path="/vendor-invoices" element={<Navigate to="/command-centre" replace />} />
             <Route
               path="/advance-orders"
