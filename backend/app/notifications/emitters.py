@@ -82,7 +82,12 @@ def publish_document_result(source: str, result) -> None:
                 if getattr(result, "sheet_synced", False):
                     # Folded in rather than sent as its own message.
                     lines.append("Google Sheet: updated")
-                broker.publish("success", f"{label} imported successfully.", "\n".join(lines))
+                # A clean customer order (the Boodmo order mail, twice a day)
+                # stays on the web UI only: on WhatsApp it told Prateek sir
+                # nothing he acts on (user, 20 Nov 2026). Failures and
+                # imports with errors are still sent.
+                broker.publish("success", f"{label} imported successfully.", "\n".join(lines),
+                               mirror=doc_type != "CUSTOMER_ORDER")
         elif status in _FAILURE_STATUSES:
             # WHOSE file failed: vendor/customer when known (WhatsApp caption
             # or number registry resolves them before the import runs), and

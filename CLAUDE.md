@@ -216,6 +216,9 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   (details + buttons) of every waiting vendor he has not seen (`answers["_card_to"]`); "hi"/"ok"/"details"
   is answered by the card only. Check: `check_vendor_approval_buttons.py` [6b].
   Idea (needs Meta approval): add "Details ke liye HI likhiye" to the `vendor_approval_request` template.
+- **20 Nov, deployed** (backup `no-order-notice-20261120.tgz`): "✅ Customer Order imported successfully" (the
+  Boodmo order mail `Bodmoo_order.xlsx` from purchase@boodmo.com, ~09:00 and ~15:25) no longer goes to WhatsApp
+  (`emitters.py`, `mirror=False`); still a toast on the web UI. Failed / with-errors imports are still sent.
 
 ---
 
