@@ -20,6 +20,10 @@ os.environ.update({
     "VENDOR_APPROVER_NUMBERS": "Prateek sir:9999492550,NK Jain sir:9810238966",
     "VENDOR_APPROVAL_TEMPLATE": "vendor_approval_request",
     "DEALER_PORTAL_VENDOR_MAIL_TO": "itsupport@cartrends.net",
+    # Run inside the live container too: never the real Portal admin login or
+    # the real stock-login file (20 Nov 2026).
+    "DEALER_PORTAL_ADMIN_USERNAME": "", "DEALER_PORTAL_ADMIN_PASSWORD": "",
+    "DEALER_PORTAL_ACCOUNTS_FILE": "",
 })
 PRATEEK, JAIN = "919999492550", "919810238966"
 failures = 0
@@ -225,14 +229,44 @@ def main() -> int:
         return _R(200, {})
 
     api.httpx.post = post
-    api.httpx.get = lambda url, **k: _R(200, [])
+
+    def get(url, **k):
+        # 20 Nov 2026: after vendor/create the new login shows up in /users/
+        # with its DEALER id (9210) -- not the id vendor/create answered (8701).
+        made = next((b for u, b in calls if u.endswith("/users/vendor/create")), None)
+        if made and "/users/" in url:
+            return _R(200, [{"username": made["username"], "dealer_id": 9210, "user_id": 2274}])
+        return _R(200, [])
+
+    api.httpx.get = get
+    import tempfile
+    from pathlib import Path as _P
+    from backend.app.integrations.dealer_portal.config import dealer_portal_settings as dps
+
+    accounts_path = _P(tempfile.mkdtemp()) / "dp_accounts.json"
+    dps.accounts_file = str(accounts_path)
     with get_session() as s:
         reply = approvals.handle_reply(PRATEEK, f"VRBTN APPROVE {old_id}", s)
     print("     ->", (reply or ["-"])[0][:170])
     create = next((b for u, b in calls if u.endswith("/users/vendor/create")), None)
     with get_session() as s:
         done = s.get(m.VendorRegistrationRequest, old_id)
-        check("approved -> CREATED with Portal ref DP-8701", done.status == m.REG_CREATED and done.dealer_portal_ref == "DP-8701")
+        check("approved -> CREATED with the Portal DEALER id as ref (DP-9210, not 8701)",
+              done.status == m.REG_CREATED and done.dealer_portal_ref == "DP-9210")
+        from backend.app.integrations.dealer_portal import mapping as dp_map
+        from backend.app.portal_procurement import links as po_links
+
+        vmap = dp_map.get_map(done.vendor_id, s)
+        check("stock-upload map CONFIRMED to dealer 9210", dp_map.is_resolved(vmap) and vmap.dp_dealer_id == 9210)
+        check("...and the PO-MST link finds the same dealer", po_links.resolve(done.vendor_id, s) == 9210)
+    import json as _json
+
+    saved = _json.loads(accounts_path.read_text(encoding="utf-8")) if accounts_path.exists() else []
+    entry = next((e for e in saved if e.get("dealer_id") == 9210), {})
+    check("stock login saved in the accounts file (dealer 9210, his vendor code, fresh files only)",
+          bool(entry.get("username")) and bool(entry.get("password")) and entry.get("enabled") is True
+          and entry.get("vendors") and entry["vendors"][0].startswith("CT_") and entry.get("push_stock_after"))
+    dps.accounts_file = None
     check("Portal vendor/create got also_add_as_customer=true (the Haan from the dashboard)",
           create is not None and create["also_add_as_customer"] is True and create["gst_no"] == "07AGEPG4675R1ZR")
     row = web.get(f"/api/vendor-registrations/{old_id}").json()

@@ -44,6 +44,12 @@ class PortalResult:
     error: str | None = None
     # What the approver is told (the direct API path); None = the usual text.
     note: str | None = None
+    # A login the bot made itself (direct API path, 20 Nov 2026): the Portal
+    # dealer id and its credentials, so the vendor is linked for stock
+    # uploads and PO-MSTs straight away. Never logged.
+    dealer_id: int | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 def _vendor_payload(answers: dict, *, vendor_code: str | None, gst: dict | None) -> dict:
@@ -171,11 +177,13 @@ def _via_api(answers: dict, *, gst: dict | None) -> PortalResult:
             f"— no new account made.{extra}",
         )
     customer = "Haan" if api.also_customer(answers) else "Nahi"
+    shown = result.dealer_id or result.account_id
     return PortalResult(
         ok=True,
-        reference=f"DP-{result.account_id or 'OK'}",
-        note=f"Dealer Portal: vendor account created (id {result.account_id or '?'}), "
+        reference=f"DP-{shown or 'OK'}",
+        note=f"Dealer Portal: vendor account created (dealer id {shown or '?'}), "
         f"login {result.username} / {result.password}, also customer: {customer}.{extra}",
+        dealer_id=result.dealer_id, username=result.username, password=result.password,
     )
 
 

@@ -209,6 +209,13 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
             return False, detail
         request.dealer_portal_ref = result.reference
         api_note = result.note
+        if result.dealer_id:
+            # 20 Nov 2026: linked straight away -- his stock is pushed and he
+            # can win Portal procurement (PO-MST) without anyone mapping him.
+            from backend.app.vendor_onboarding import portal_link
+
+            portal_link.link_vendor(vendor, result.dealer_id, session, username=result.username,
+                                    password=result.password, dealer_name=vendor.name)
     request.dealer_portal_error = None
     request.create_retries = 0
     request.next_create_retry_at = None

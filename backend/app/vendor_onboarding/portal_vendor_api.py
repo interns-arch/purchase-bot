@@ -78,6 +78,10 @@ class Created:
     existing: Existing | None = None
     error: str | None = None
     notes: list[str] = field(default_factory=list)
+    # The Portal DEALER id of the new login (20 Nov 2026). Not the id
+    # vendor/create answers with: NIRMAL OIL STORE was "8592" there and is
+    # dealer 9116 -- the dealer id is what stock uploads and PO-MSTs use.
+    dealer_id: int | None = None
 
 
 # --------------------------------------------------------------------------
@@ -170,6 +174,19 @@ def _first(row: dict, keys) -> str:
         if row.get(key) not in (None, ""):
             return str(row[key]).strip()
     return ""
+
+
+def dealer_id_for(token: str, username: str) -> int | None:
+    """The dealer id behind a Portal login, from `GET /users/`. None when
+    the list cannot be read or the login is not in it. Never raises."""
+    try:
+        for row in _get_rows(token, "/users/?limit=10000"):
+            if str(row.get("username") or "").strip().lower() == username.strip().lower():
+                value = row.get("dealer_id")
+                return int(value) if str(value or "").strip().isdigit() else None
+    except Exception:  # noqa: BLE001 -- the vendor is created; linking can be done later
+        logger.exception("Could not read the dealer id of Portal login %s.", username)
+    return None
 
 
 def find_existing(token: str, *, gstin: str | None, mobile: str | None) -> tuple[Existing | None, set[str], list[str]]:
@@ -322,9 +339,11 @@ def _create_vendor_once(answers: dict, *, gst: dict | None) -> Created:
         account_id = None
         if isinstance(data, dict):
             account_id = str(_first(data, ("account_id", "vendor_id", "dealer_id", "user_id", "id")) or "") or None
-        logger.info("Vendor %s created on the Portal: id %s, login %s, also customer %s.",
-                    answers.get("vendor_name"), account_id, username, body["also_add_as_customer"])
-        return Created(ok=True, account_id=account_id, username=username, password=password, notes=notes)
+        dealer_id = dealer_id_for(token, username)
+        logger.info("Vendor %s created on the Portal: id %s, dealer %s, login %s, also customer %s.",
+                    answers.get("vendor_name"), account_id, dealer_id, username, body["also_add_as_customer"])
+        return Created(ok=True, account_id=account_id, username=username, password=password, notes=notes,
+                       dealer_id=dealer_id)
     finally:
         logout(token)
 

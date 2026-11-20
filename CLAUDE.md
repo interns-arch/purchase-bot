@@ -219,6 +219,18 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
 - **20 Nov, deployed** (backup `no-order-notice-20261120.tgz`): "✅ Customer Order imported successfully" (the
   Boodmo order mail `Bodmoo_order.xlsx` from purchase@boodmo.com, ~09:00 and ~15:25) no longer goes to WhatsApp
   (`emitters.py`, `mirror=False`); still a toast on the web UI. Failed / with-errors imports are still sent.
+- **20 Nov, deployed** (backups `vendor-portal-link-20261120.tgz`, `dealer_portal_accounts.before-link-20261120.json`):
+  vendors made by the bot on the Portal are now LINKED. The id `vendor/create` returns is NOT the dealer id
+  (NIRMAL: 8592 there, dealer 9116); the dealer id comes from `GET /users/` by username
+  (`portal_vendor_api.dealer_id_for`). On create, `vendor_onboarding/portal_link.link_vendor` saves the stock map
+  (CONFIRMED -- also what `portal_procurement.links.resolve` reads for PO-MSTs) + the login in the accounts file
+  (vendors = [vendor_code], `push_stock_after` = now). Registration ref is now `DP-<dealer id>`.
+  Backfill `backend/scripts/link_created_vendors.py` (dry run; `--apply`): one test login per vendor, then link.
+  Linked: HPP 9210, SRG 9180, OSR 9209, PSA 9283, UMI 9279, TAI 9310 (NOS 9116 was already).
+  **VR-24 M/S S S S INTARNATIONAL not linked:** its mobile is on an older login `OM_3_AND_SONS` (dealer 8857)
+  the bot did not make -- a person must confirm it is the same firm and connect it on the Dealer Portal page.
+  `check_vendor_approval_buttons.py` now blanks the Portal admin login + accounts file (it reached the real
+  Portal when run in the container; nothing was created).
 
 ---
 
