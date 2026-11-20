@@ -340,6 +340,18 @@ def _schedule_vendor_creation_retry() -> None:
     )
 
 
+def _schedule_vendor_portal_link() -> None:
+    """Every evening: any vendor the bot created on the Dealer Portal whose
+    dealer id / login could not be saved at creation (a slow Portal) is
+    linked now, after one test login (20 Nov 2026)."""
+    import os
+
+    from backend.app.vendor_onboarding import portal_link
+
+    _add_daily_ist_job("vendor_portal_link", os.environ.get("VENDOR_PORTAL_LINK_TIME", "21:30"),
+                       portal_link.backfill_job)
+
+
 def _schedule_heartbeat() -> None:
     """Proof the scheduler is still running, read by /api/bot-status."""
     from backend.app import bot_status
@@ -355,6 +367,7 @@ def start_scheduler() -> None:
     _schedule_advance_orders()
     _schedule_portal_procurement()
     _schedule_vendor_creation_retry()
+    _schedule_vendor_portal_link()
     _schedule_google_sheet_daily_reset()
     _schedule_group_stock_requests()
     _schedule_mrp_requests()

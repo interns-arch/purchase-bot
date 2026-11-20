@@ -231,6 +231,10 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   the bot did not make -- a person must confirm it is the same firm and connect it on the Dealer Portal page.
   `check_vendor_approval_buttons.py` now blanks the Portal admin login + accounts file (it reached the real
   Portal when run in the container; nothing was created).
+- **20 Nov, deployed** (backup `vendor-link-job-20261120.tgz`): the backfill is now `portal_link.backfill()` and runs
+  every day at 21:30 IST (scheduler job `vendor_portal_link`, `VENDOR_PORTAL_LINK_TIME`), for a vendor whose dealer id
+  could not be read at creation (slow `GET /users/`). A vendor that needs a person is sent to the approvers once,
+  only if approved in the last 3 days. All bot-created vendors have their login saved; only VR-24 waits for a person.
 
 ---
 
