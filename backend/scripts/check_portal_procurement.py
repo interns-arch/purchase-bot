@@ -225,6 +225,9 @@ def main() -> int:
     portal = FakePortal()
     client = PortalClient(transport=httpx.MockTransport(portal.handler), sleep=lambda s: None,
                           base_url="https://portal.test/api/v1")
+    # the re-check before each vendor question reads the same fake Portal
+    service._client = lambda: PortalClient(transport=httpx.MockTransport(portal.handler), sleep=lambda s: None,
+                                           base_url="https://portal.test/api/v1")
 
     with get_session() as s:
         vendors = {}
@@ -879,15 +882,51 @@ def main() -> int:
     run_poll()
     run_steps(1)
     mark = len(sent) + len(group_posts)
+    s_mark, g_mark = len(sent), len(group_posts)
     reply("919100000001", "haan 1 pcs, MRP 900, 12%, 2 din")
     reply("919100000002", "nahi")
     reply("919100000003", "nahi")
-    check("everything in one answer -> no more questions", not any("Sir," in b for b in said_since()))
+
+    def asked_after():
+        return [(to, b) for to, b in sent[s_mark:] + group_posts[g_mark:] if "Sir," in b]
+
+    got = asked_after()
+    check("everything in one answer -> no more questions to him; the 'nahi' vendors are asked the ETA",
+          sorted(to for to, _ in got) == ["919100000002", "919100000003"]
+          and all("kab tak aa jayega" in b and "86537C9000" in b for _, b in got))
+    check("...ETA question spelt right",
+          bool(got) and got[0][1].startswith("Sir, abhi agar nahi hai to kab tak aa jayega? ETA bata do (kitne din mein)."))
+    reply("919100000002", "nahi aayega")
+    reply("919100000003", "pata nahi")
+    check("...'nahi aayega' / 'pata nahi' -> nothing more asked", len(asked_after()) == 2)
     run_steps(3)
     p = payload_for(12497) or {}
     check("...and the Portal gets MRP 900, 12%, 2 days",
           float(p.get("quoted_mrp_incl_gst") or 0) == 900.0 and float(p.get("quoted_discount_percent") or 0) == 12.0
           and p.get("quoted_tat_days") == 2)
+
+    # "nahi" -> "kab tak aa jayega?" -> "4 din": counted as available in 4 days
+    portal.add_row(12499, "86539C9000", 1)
+    portal.options[12499] = [{"dealer_id": 27}]
+    run_poll()
+    run_steps(1)
+    mark = len(sent) + len(group_posts)
+    reply("919100000001", "nahi hai")
+    reply("919100000001", "4 din")
+    nxt = [b for b in said_since() if "Sir," in b]
+    check("'nahi' -> ETA asked; '4 din' -> then MRP is asked (not days again)",
+          len(nxt) == 2 and "kab tak aa jayega" in nxt[0] and "MRP" in nxt[1])
+    reply("919100000001", "800")
+    reply("919100000001", "10")
+    reply("919100000002", "nahi")
+    reply("919100000002", "nahi")
+    reply("919100000003", "nahi")
+    reply("919100000003", "nahi")
+    run_steps(3)
+    p = payload_for(12499) or {}
+    check("...the part coming in 4 days goes to him: MRP 800, 10%, 4 days",
+          p.get("supplier_dealer_id") == 27 and float(p.get("quoted_mrp_incl_gst") or 0) == 800.0
+          and float(p.get("quoted_discount_percent") or 0) == 10.0 and p.get("quoted_tat_days") == 4)
 
     # vendor stops after MRP: his time runs out -> partial answer kept
     portal.add_row(12498, "86538C9000", 1)
@@ -1229,7 +1268,14 @@ def main() -> int:
           len(new_posts) == 1 and "R20A01" in new_posts[0] and "din" in new_posts[0]
           and "R20A02" not in new_posts[0] and "mrp" not in new_posts[0].lower()
           and "discount" not in new_posts[0].lower())
+    later_mark = len(group_posts)
     reply("919100000001", "2 din")
+    later_q = [b for c, b in group_posts[later_mark:] if c == GA]
+    check("...then the part he does not have: when will it come",
+          len(later_q) == 1 and "R20A02" in later_q[0] and "kab tak aa jayega" in later_q[0]
+          and "R20A01" not in later_q[0])
+    reply("919100000001", "nahi aayega")
+    reply("919100000002", "nahi")
     reply("919100000002", "nahi")
     settle()
     p701 = payload_for(12701) or {}
@@ -1457,6 +1503,27 @@ def main() -> int:
     check("a line the Portal still shows is sent", posts(GB, "R22H04") == 1)
     check("a line not on the Portal for 2 days is NOT sent and waits",
           posts(GB, "R22H05") == 0 and posts(GA, "R22H05") == 0 and demand(12905).state == m.DISCOVERED)
+    # Active Procurement is read again right before a question / reminder goes
+    # out: a part that left it is not asked again
+    clock["now"] = datetime(2026, 12, 10, 12, 5)
+    group_posts.clear()
+    for sol, part in ((12906, "R22H06"), (12907, "R22H07")):
+        cust(sol, part)
+        portal.rows[sol]["order_date"] = clock["now"].date().isoformat()
+    with get_session() as s:
+        service.poll(s, client, clock["now"].date())
+        s.commit()
+        slot = rounds.round_due(s, clock["now"])
+        rounds.mark_round(s, slot, service.enquire(s, client))
+        s.commit()
+    check("re-check: both parts on the Portal are asked at the round",
+          posts(GB, "R22H06") == 1 and posts(GB, "R22H07") == 1)
+    portal.rows.pop(12907, None)          # someone took it off the Portal meanwhile
+    clock["now"] = datetime(2026, 12, 10, 15, 10)   # reminder time, no poll ran in between
+    settle(1)
+    check("...the reminder still goes for the part on the Portal", posts(GB, "R22H06") == 2)
+    check("...the part that left Active Procurement gets NO reminder and its line is closed",
+          posts(GB, "R22H07") == 1 and demand(12907).state == m.CLOSED)
     allow_file.write_text(json.dumps({}), encoding="utf-8")
     cfg.ask_mode = "one"
     portal_settings.rounds = False

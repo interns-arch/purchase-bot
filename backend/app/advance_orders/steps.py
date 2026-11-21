@@ -9,6 +9,15 @@
     bot:    Sir, kitne din mein aa jayega?
     vendor: 3 din
 
+A part he does NOT have (User, 21 Nov 2026) gets one more question, after
+the parts he has are done:
+
+    vendor: nahi hai
+    bot:    Sir, abhi agar nahi hai to kab tak aa jayega? ETA bata do (kitne din mein).
+    vendor: 4 din
+    -> counted as available in 4 days; then MRP and discount are asked.
+    ("nahi aayega" / "pata nahi" -> stays not available.)
+
 Only then is the quote recorded and the line decided, so the Dealer Portal
 gets the MRP, discount and days with the PO-MST. A step the vendor already
 answered ("haan 1 pcs, MRP 3589, 10%, 3 din") is skipped.
@@ -33,11 +42,13 @@ from core.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-PCS, MRP, DISCOUNT, ETA, DONE = "pcs", "mrp", "discount", "eta", "done"
+PCS, LATER, MRP, DISCOUNT, ETA, DONE = "pcs", "later", "mrp", "discount", "eta", "done"
 _ORDER = (MRP, DISCOUNT, ETA)
 _FIELD = {MRP: "mrp", DISCOUNT: "disc", ETA: "tat"}
 _NUMBER = re.compile(r"(?<![A-Za-z0-9.])(\d[\d,]*(?:\.\d{1,3})?)(?![A-Za-z0-9])")
 _PART_TOKEN = re.compile(r"[A-Za-z0-9-]{5,}")
+_NOT_COMING = re.compile(r"\b(nahi|nahin|nhi|nai|no|nope|na|pata\s+nahi|nahi\s+aayega|nahi\s+milega|mushkil|band)\b", re.I)
+_NO_LATER = "no"
 
 
 def _key(value: str) -> str:
@@ -56,9 +67,16 @@ def first_question(lines: list[m.AdvanceOrderLine]) -> str:
 
 
 def question(step: str, lines: list[m.AdvanceOrderLine]) -> str:
-    """The question for `step`, about the parts he said he HAS."""
+    """The question for `step`, about the parts he said he HAS (for LATER:
+    the parts he said he does NOT have)."""
     one = len(lines) == 1
     names = lines[0].part_number if one else None
+    if step == LATER:
+        if one:
+            return (f"Sir, abhi agar nahi hai to kab tak aa jayega? ETA bata do (kitne din mein).\n\n"
+                    f"{names} x{lines[0].qty}")
+        return ("Sir, jo parts abhi nahi hain, wo kab tak aa jayenge? Har part ka ETA bata do (kitne din mein):\n"
+                f"{_rows(lines)}\n\nJaise: \"{lines[0].part_number} 5 din\"")
     if step == MRP:
         if one:
             return f"Sir, {names} ka MRP kitna hai?"
@@ -149,6 +167,14 @@ def _read_days(text: str, parts: list[str], today: date) -> int | None:
     return None
 
 
+def _read_later(text: str, parts: list[str], today: date):
+    """Days until it comes, or "no" (it will not come / he does not know)."""
+    days = _read_days(text, parts, today)
+    if days is not None:
+        return days
+    return _NO_LATER if _NOT_COMING.search(text) else None
+
+
 def read(step: str, text: str, lines: list[m.AdvanceOrderLine], today: date) -> dict[int, object]:
     """{line_id: value} for the parts this answer covers."""
     parts = [line.part_number for line in lines]
@@ -156,6 +182,7 @@ def read(step: str, text: str, lines: list[m.AdvanceOrderLine], today: date) -> 
         MRP: lambda t: _read_mrp(t, parts),
         DISCOUNT: lambda t: _read_discount(t, parts),
         ETA: lambda t: _read_days(t, parts, today),
+        LATER: lambda t: _read_later(t, parts, today),
     }[step]
     said, rest = _per_part(text, lines)
     out: dict[int, object] = {}
@@ -205,11 +232,34 @@ def _entry(answer: LineAnswer) -> dict:
     }
 
 
+def not_yet_asked_later(draft: dict, lines: list[m.AdvanceOrderLine]) -> list[m.AdvanceOrderLine]:
+    """Parts he said he does not have, not yet asked when they will come."""
+    out = []
+    for line in lines:
+        entry = draft.get(str(line.id))
+        if isinstance(entry, dict) and not entry.get("available") and not entry.get("later_asked"):
+            out.append(line)
+    return out
+
+
+def lines_for(step: str, draft: dict, lines: list[m.AdvanceOrderLine]) -> list[m.AdvanceOrderLine]:
+    """The parts the question for `step` is about."""
+    if step == PCS:
+        return lines
+    if step == LATER:
+        return not_yet_asked_later(draft, lines) or lines
+    return [line for line in lines if (draft.get(str(line.id)) or {}).get("available")] or lines
+
+
 def next_step(draft: dict, lines: list[m.AdvanceOrderLine]) -> str:
+    """What he HAS is finished first; then the parts he does not have:
+    when will they come (asked once)."""
     have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")]
     for step in _ORDER:
         if any((draft.get(str(line.id)) or {}).get(_FIELD[step]) is None for line in have):
             return step
+    if not_yet_asked_later(draft, lines):
+        return LATER
     return DONE
 
 
@@ -256,6 +306,24 @@ def advance_draft(q: m.AdvanceVendorQuery, text: str, lines: list[m.AdvanceOrder
         # A part he did not mention when he named others: not available from him.
         for line in lines:
             draft.setdefault(str(line.id), {"available": False})
+            entry = draft[str(line.id)]
+            if not entry.get("available") and entry.get("tat") is not None:
+                # "abhi nahi, 3 din mein aa jayega" -- already told when.
+                _coming(entry, line, int(entry["tat"]))
+        fill_known(draft)
+    elif q.step == LATER:
+        later = not_yet_asked_later(draft, lines)
+        values = read(LATER, text, later, today)
+        if not values:
+            return False
+        for line in later:
+            value = values.get(line.id)
+            if value is None:
+                continue
+            entry = draft[str(line.id)]
+            entry["later_asked"] = True
+            if value != _NO_LATER:
+                _coming(entry, line, int(value))
         fill_known(draft)
     else:
         have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")]
@@ -266,3 +334,8 @@ def advance_draft(q: m.AdvanceVendorQuery, text: str, lines: list[m.AdvanceOrder
             draft[str(line_id)][_FIELD[q.step]] = str(value) if isinstance(value, Decimal) else value
     q.draft = draft
     return True
+
+
+def _coming(entry: dict, line: m.AdvanceOrderLine, days: int) -> None:
+    """Not in stock now, comes in `days`: a quote for the full qty with that ETA."""
+    entry.update(available=True, qty=entry.get("qty") or line.qty, tat=days, later=True, later_asked=True)

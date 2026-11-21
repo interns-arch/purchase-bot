@@ -91,6 +91,9 @@ class PortalProcurementSettings:
     # rows are lines that left the 7-day Active Procurement list (21 Nov 2026:
     # 3 pilot lines from 12-13 Nov would have gone out on the first live round).
     fresh_hours: int = max(1, _int("PORTAL_PROCUREMENT_FRESH_HOURS", 6))
+    # Right before a vendor question / reminder is sent, Active Procurement is
+    # read again (one read covers all sends for this many seconds).
+    recheck_seconds: int = max(0, _int("PORTAL_PROCUREMENT_RECHECK_SECONDS", 120))
 
     def allowed_vendors(self) -> set[int]:
         """LIVE mode's vendor allow-list (user, 21 Nov 2026: "remove pilot mode

@@ -342,7 +342,43 @@ def poll(session: Session, client: PortalClient, today: date | None = None) -> d
             closed += 1
     logger.info("Portal procurement poll %s..%s: %d page(s), %d new, %d changed, %d closed.",
                 date_from, date_to, pages, new, updated, closed)
-    return {"new": new, "updated": updated, "closed": closed, "pages": pages}
+    return {"new": new, "updated": updated, "closed": closed, "pages": pages, "complete": complete}
+
+
+_last_recheck: datetime | None = None
+
+
+def recheck_before_send(session: Session, now: datetime | None = None) -> bool:
+    """Read Active Procurement once more right before a vendor question or
+    reminder goes out (User, 21 Nov 2026). A line the Portal no longer shows
+    is closed here, so its question is not sent. One read covers every send
+    for `recheck_seconds`. False = the Portal could not be read in full:
+    nothing is sent now, the next tick tries again."""
+    global _last_recheck
+    now = now or now_ist_naive()
+    if _last_recheck is not None and timedelta(0) <= now - _last_recheck < timedelta(seconds=settings.recheck_seconds):
+        return True
+    from backend.app.portal_procurement import client as portal_client
+
+    if portal_client.blocked() or not settings.configured():
+        logger.warning("Portal procurement: Active Procurement cannot be read -- vendor questions held.")
+        return False
+    client = _client()
+    try:
+        result = poll(session, client)
+    except Exception:  # noqa: BLE001 -- held, never sent unchecked
+        logger.exception("Portal procurement: re-check before sending failed -- vendor questions held.")
+        return False
+    finally:
+        client.close()
+    if not result.get("complete"):
+        logger.warning("Portal procurement: Active Procurement read only in part -- vendor questions held.")
+        return False
+    _last_recheck = now
+    if result.get("closed"):
+        logger.info("Portal procurement: re-check before sending closed %d line(s) no longer on the Portal.",
+                    result["closed"])
+    return True
 
 
 def _order_lines_for(demand: m.PortalDemandLine, session: Session) -> list[am.AdvanceOrderLine]:

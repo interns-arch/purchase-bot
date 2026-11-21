@@ -302,6 +302,16 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   (default 6; the Portal is read every 10 min) and logs them. 8 old lines (19-20 Nov) are now left out by this.
   The check script now uses its own empty pilot file (`PORTAL_PROCUREMENT_PILOT_FILE`): in the container it was reading
   the real one, whose allow-list kept the test vendors out.
+- **21 Nov, 18:00 extra round** (user, one-off; normal round times unchanged): the 18:00 run hit a Portal login HTTP 502
+  (Portal outage), ran again at 18:04 -> line 15551 CS6Z13405C asked in the Ark / Divine / S And S groups.
+- **21 Nov, deployed** (backup `recheck-eta-20261121.tgz`, container checks 195 ALL PASSED):
+  - **Re-check before sending:** right before a Portal question or reminder goes to a vendor group, Active
+    Procurement is read again (`service.recheck_before_send`, via `advance_orders._portal_still_active` in
+    `_send_queued` / `_send_followups`); a part no longer there is closed and not asked. One read covers
+    `PORTAL_PROCUREMENT_RECHECK_SECONDS` (120). Portal unreadable -> held, retried next tick (never sent unchecked).
+  - **ETA after "nahi"** (`steps.LATER`): a part he does not have -> "Sir, abhi agar nahi hai to kab tak aa jayega?
+    ETA bata do (kitne din mein)." Days -> available for the full qty with that TAT, then only MRP/discount asked;
+    "nahi aayega"/"pata nahi" -> stays not available. Asked once, after the parts he has are finished.
 
 ---
 

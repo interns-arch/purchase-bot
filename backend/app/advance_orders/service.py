@@ -691,6 +691,8 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
     ).scalars().all()
     if not queued or not _in_vendor_hours(now):
         return
+    if not _portal_still_active(order, session, now):
+        return
     by_id = {line.id: line for line in order.lines}
     csv_sent: dict[int, str] = {}
     for q in queued:
@@ -936,6 +938,16 @@ def tick(session: Session, now: datetime | None = None) -> None:
             logger.exception("Portal rounds: the 6-hour escalation check failed.")
 
 
+def _portal_still_active(order: m.AdvanceOrder | None, session: Session, now: datetime) -> bool:
+    """Portal demand: read Active Procurement again just before asking a
+    vendor; parts gone from it are cancelled and not sent. Other orders: True."""
+    if not _is_portal(order):
+        return True
+    from backend.app.portal_procurement import service as portal_service
+
+    return portal_service.recheck_before_send(session, now)
+
+
 def _rounds_on(order: m.AdvanceOrder | None) -> bool:
     """Portal demand under the 3-hour rounds (16 Nov 2026)."""
     if not _is_portal(order):
@@ -991,6 +1003,8 @@ def _send_followups(session: Session, now: datetime) -> None:
         if now < due or (q.deadline_at is not None and now >= q.deadline_at):
             continue
         if order is None or order.status != m.ASKING or not _workable(order):
+            continue
+        if not _portal_still_active(order, session, now):
             continue
         lines = [line for line in order.lines if line.id in (q.line_ids or []) and line.status == m.LINE_ASKING]
         if not lines:
@@ -1368,8 +1382,7 @@ def _reminder_text(q: m.AdvanceVendorQuery, order: m.AdvanceOrder, lines: list[m
         from backend.app.advance_orders import enquiry_csv
 
         return enquiry_csv.reminder(lines)
-    have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")] or lines
-    return steps.reminder(q.step, lines if q.step == "pcs" else have)
+    return steps.reminder(q.step, steps.lines_for(q.step, draft, lines))
 
 
 def _ask_vendor(q: m.AdvanceVendorQuery, number: str, body: str, session: Session) -> None:
@@ -1431,8 +1444,7 @@ def _handle_step(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.A
             # Asked ONE thing; say once more what we need.
             draft["_again"] = step
             q.draft = draft
-            have = [line for line in lines if (draft.get(str(line.id)) or {}).get("available")] or lines
-            body = steps.first_question(lines) if step == "pcs" else steps.question(step, have)
+            body = steps.first_question(lines) if step == "pcs" else steps.question(step, steps.lines_for(step, draft, lines))
             _ask_vendor(q, number, "Sir, samajh nahi aaya. " + body[0].lower() + body[1:], session)
         else:
             vendor = session.get(Vendor, q.vendor_id)
@@ -1467,8 +1479,7 @@ def _after_answer(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.
     q.sent_at = now
     q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
     q.followups_sent = 0
-    have = [line for line in lines if (q.draft.get(str(line.id)) or {}).get("available")]
-    _ask_vendor(q, number, steps.question(nxt, have), session)
+    _ask_vendor(q, number, steps.question(nxt, steps.lines_for(nxt, q.draft, lines)), session)
     session.flush()
 
 
