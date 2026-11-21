@@ -230,10 +230,12 @@ _HELLO = re.compile(
 )
 
 
-def deliver_waiting_cards(sender: str, session: Session) -> int:
+def deliver_waiting_cards(sender: str, session: Session, *, all_waiting: bool = False) -> int:
     """An approver just wrote to the bot, so his 24-hour window is open: send
     him the full card (details + buttons) of every vendor still waiting that
-    he has not seen yet. Returns how many were sent. Never raises."""
+    he has not seen yet -- or, with `all_waiting` (his "hi", user 21 Nov 2026),
+    EVERY vendor still waiting, oldest first, after a one-line header: the
+    approval queue. Returns how many cards were sent. Never raises."""
     if sender not in settings.approver_numbers:
         return 0
     try:
@@ -242,10 +244,16 @@ def deliver_waiting_cards(sender: str, session: Session) -> int:
             .where(m.VendorRegistrationRequest.status == m.REG_AWAITING_APPROVAL)
             .order_by(m.VendorRegistrationRequest.id)
         ).scalars().all()
+        queue = [r for r in waiting if all_waiting or sender not in ((r.answers or {}).get(_CARD_KEY) or [])]
+        if all_waiting and queue:
+            name = settings.honorific(sender)
+            codes = ", ".join(f"{_code(r)} {r.vendor_name or ''}".strip() for r in queue)
+            greeting = f"Namaste {name},\n" if name else ""
+            send_reply_safe(sender, greeting
+                            + f"📋 {len(queue)} vendor approval ke liye ruke hain (purane pehle): {codes}\n"
+                            + "Har ek ke neeche Approve / Reject dabaiye.")
         sent = 0
-        for request in waiting:
-            if sender in ((request.answers or {}).get(_CARD_KEY) or []):
-                continue
+        for request in queue:
             if send_approval_card(sender, request, _duplicate_warning(request, session), in_window=True):
                 sent += 1
         if sent:
@@ -500,9 +508,13 @@ def handle_reply(sender: str, text: str | None, session: Session) -> list[str] |
         bare = _bare_decision(sender, text, session)
         if bare is not None:
             return bare
-        # Not a decision: if a vendor card never reached him, it goes now.
-        if deliver_waiting_cards(sender, session) and _HELLO.match(text or ""):
-            return []  # the card answered his "hi" -- no help menu on top
+        # Not a decision. His "hi": the whole approval queue (every vendor still
+        # waiting, oldest first). Anything else: only cards he has not seen.
+        if _HELLO.match(text or ""):
+            if deliver_waiting_cards(sender, session, all_waiting=True):
+                return []  # the queue answered his "hi" -- no help menu on top
+            return None
+        deliver_waiting_cards(sender, session)
         return None
     verb, kind, row_id, reason = parsed
     if kind == "vr":

@@ -277,6 +277,10 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   only an "AO-n" message or a clear answer, never `_OTHER_DECISION` (VRBTN / APPROVE / REJECT / PASS / FAIL ...).
   VR-27 ORAFOL INDIA was then processed with his tap (`approvals.handle_reply(..., "VRBTN APPROVE 27")`) at 16:15:
   CT_OIP, dealer 9325, stock login OIP; brand "pent protection" is not a Portal brand (not mapped -- ask the real brand).
+- **21 Nov, deployed** (backup `approval-queue-20261121.tgz`, container checks ALL PASSED): **approval QUEUE on "hi".** An approver's "hi"/"ok"/"details" now sends a header ("📋 N vendor
+  approval ke liye ruke hain (purane pehle): VR-.., VR-..") and the card of EVERY vendor still waiting, oldest first,
+  each with Approve / Reject (`approvals.deliver_waiting_cards(all_waiting=True)`); a second "hi" sends it again. Any
+  other message brings only cards he has not seen. Approve -> vendor created on the Portal as before.
 - **21 Nov, deployed with the fix above: duplicate mobile / email REFUSED in the vendor form** (user: refuse, agent must enter another).
   `vendor_onboarding/portal_directory.py` keeps who owns which phone/email on the Portal (`GET /users/` phone+email,
   `GET /dealers/` dealer_contact), refreshed every 6 h (scheduler `portal_directory_refresh`, first run 2 min after

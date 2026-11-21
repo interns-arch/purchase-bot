@@ -152,15 +152,26 @@ def main() -> int:
     cards.clear(); sent.clear()
     window["open"] = True  # he wrote, so his window is open
     with get_session() as s:
+        waiting_ids = [r.id for r in s.query(m.VendorRegistrationRequest).filter(
+            m.VendorRegistrationRequest.status == m.REG_AWAITING_APPROVAL).order_by(m.VendorRegistrationRequest.id)]
         hi = approvals.handle_reply(PRATEEK, "Hi", s)
-    check("'Hi' is answered by the card, not the help menu", hi == [])
-    check("...full details with Approve / Reject buttons, to him only",
-          len(cards) == 1 and cards[0][0] == PRATEEK and "Bank" in cards[0][1]
-          and any(f"APPROVE {out_of_window}" in b[0] for b in cards[0][2]))
+    check("'Hi' is answered by the queue, not the help menu", hi == [])
+    # 21 Nov 2026: "hi" = the whole approval queue, oldest first, with a header
+    check("...a header naming every waiting vendor", any(to == PRATEEK and f"{len(waiting_ids)} vendor approval" in b
+                                                       for to, b in sent))
+    check("...one card per waiting vendor, oldest first, to him only",
+          [c[0] for c in cards] == [PRATEEK] * len(waiting_ids) and len(waiting_ids) >= 2
+          and [int(c[2][0][0].split()[-1]) for c in cards] == waiting_ids)
+    check("...the new one has full details and Approve / Reject",
+          any("Bank" in c[1] and any(f"APPROVE {out_of_window}" in b[0] for b in c[2]) for c in cards))
     cards.clear()
     with get_session() as s:
         again = approvals.handle_reply(PRATEEK, "hi", s)
-    check("a second 'hi' does not repeat the card", again is None and not cards)
+    check("a second 'hi' sends the whole queue again", again == [] and len(cards) == len(waiting_ids))
+    cards.clear()
+    with get_session() as s:
+        chat = approvals.handle_reply(PRATEEK, "kal baat karte hain", s)
+    check("any other message: no repeat of cards he has seen, text goes on", chat is None and not cards)
     with get_session() as s:
         other = approvals.handle_reply(JAIN, "kal baat karte hain", s)
     check("Jain sir's first message also brings his card, and the text goes on to the normal handlers",
