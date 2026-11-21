@@ -450,6 +450,11 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
                 # Pilot: only the chosen vendors are asked (none chosen -> nobody).
                 chosen = portal.pilot()["vendors"]
                 candidates = [v for v in candidates if v.id in chosen]
+            else:
+                # Live with a vendor allow-list (21 Nov 2026): only those vendors.
+                allowed = portal.allowed_vendors()
+                if allowed:
+                    candidates = [v for v in candidates if v.id in allowed]
         candidates = candidates[:slots]
         if not candidates:
             if open_queries:

@@ -128,7 +128,13 @@ Keep any waiting loop short and bounded.
 ## 4. Live settings (17 Nov 2026; no secrets)
 
 `backend/.env` on the server:
-- `PORTAL_PROCUREMENT_ENABLED=true`, `PORTAL_PROCUREMENT_MODE=pilot`, `PORTAL_PROCUREMENT_NOTIFY_NUMBERS=917355374975` (Shubham)
+- `PORTAL_PROCUREMENT_ENABLED=true`, **`PORTAL_PROCUREMENT_MODE=live` since 21 Nov 2026 ~17:20** (user's go-ahead) with a
+  vendor ALLOW-LIST in the pilot file: `"allowed_vendors": [72, 110, 145]` (Ark, Divine, S And S) -> only these are
+  asked and only Portal parts of their brands (FORD) are taken; everything else waits untouched. `skip_lines`
+  [14245, 14323, 14477, 14501] (the first three: stale -- off the Portal since 18-19 Nov). Backups:
+  `backups/env-before-live-20261121`, `portal_pilot.before-live-20261121.json`, `live-allowlist-20261121.tgz`.
+  To go back to pilot: `PORTAL_PROCUREMENT_MODE=pilot` in backend/.env + `up -d --no-deps backend`.
+  `PORTAL_PROCUREMENT_NOTIFY_NUMBERS=917355374975` (Shubham)
 - Defaults in `backend/app/portal_procurement/config.py`: poll 10 min, rounds on, round_hours 3, max_asks 3,
   max_tat_days 7, round_start 10:00, round_end 19:00, min margin 2%, sheet_today_only true,
   `PORTAL_PROCUREMENT_SHEET_TAT_DAYS` unset (= ask days when the sheet has none), days window 7.
@@ -289,6 +295,13 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   GST portal (paid; not repeated at CONFIRM). **The Portal's lists have NO GST number** -> the GSTIN cannot be checked on
   the Portal (the creation-time `find_existing` GST match never fires; only its mobile match works). Asked of the
   Portal team: a dealer search by GSTIN. Check: `check_vendor_brand_questions.py` [8]-[9].
+- **21 Nov, deployed: live mode with a vendor allow-list** (see section 4): `config.allowed_vendors()` /
+  `service._allowed_brands`; `advance_orders._advance` asks only allowed vendors. Check [22].
+- **21 Nov, deployed** (backup `stale-lines-20261121.tgz`, container checks ALL PASSED, 187): **lines that left the Portal
+  are never sent.** `enquire()` skips a DISCOVERED line not seen on the Portal for `PORTAL_PROCUREMENT_FRESH_HOURS`
+  (default 6; the Portal is read every 10 min) and logs them. 8 old lines (19-20 Nov) are now left out by this.
+  The check script now uses its own empty pilot file (`PORTAL_PROCUREMENT_PILOT_FILE`): in the container it was reading
+  the real one, whose allow-list kept the test vendors out.
 
 ---
 

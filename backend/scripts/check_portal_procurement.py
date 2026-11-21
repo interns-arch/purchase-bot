@@ -26,6 +26,8 @@ os.environ["ADVANCE_ORDERS_ENABLED"] = "false"
 os.environ["PURCHASE_APPROVAL_MODE"] = "true"  # as on the server: must not hold Portal demand
 os.environ["PORTAL_PROCUREMENT_ENABLED"] = "true"
 os.environ["PORTAL_PROCUREMENT_MODE"] = "live"  # the pilot is checked on its own in [14]
+# never the server's real pilot file (its allowed_vendors would keep the test vendors out)
+os.environ["PORTAL_PROCUREMENT_PILOT_FILE"] = str(_TMP / "no-pilot.json")
 os.environ["PORTAL_PROCUREMENT_ROUNDS"] = "false"  # [1]-[18]: the old timing; [19] checks the 3-hour rounds
 os.environ["PORTAL_PROCUREMENT_USERNAME"] = "svc-test"
 os.environ["PORTAL_PROCUREMENT_PASSWORD"] = "pw-test"
@@ -1414,6 +1416,48 @@ def main() -> int:
     with get_session() as s:
         check("report goes to Prateek sir", reporting.send_report(s, date(2026, 12, 1))
               and any("Purchase report" in b for b in to_prateek()[before_p:]))
+    # ------------------------------------------------------------------ 22
+    print("\n[22] live mode with a vendor allow-list (21 Nov 2026)")
+    allow_file = _TMP / "pilot_live.json"
+    allow_file.write_text(json.dumps({"allowed_vendors": [vendors["B"]], "skip_lines": [12903]}), encoding="utf-8")
+    portal_settings.pilot_file = str(allow_file)
+    portal_settings.mode = "live"
+    cfg.ask_mode = "one"
+    clock["now"] = datetime(2026, 12, 8, 9, 5)
+    group_posts.clear()
+    cust(12901, "R22H01")                 # HYUNDAI: Alpha and Beta sell it, only Beta allowed
+    cust(12902, "R22T01", brand="TATA")   # TATA: only the Tata vendor, not allowed
+    cust(12903, "R22H03")                 # a skip line
+    tata_alerts = len(sent)
+    round_with_portal()
+    settle(1)
+    check("live + allow-list: the Hyundai part goes to Beta's group only",
+          posts(GB, "R22H01") == 1 and posts(GA, "R22H01") == 0)
+    check("...a Tata part (no allowed vendor) is not taken and waits untouched",
+          posts(GT, "R22T01") == 0 and demand(12902).state == m.DISCOVERED)
+    check("...no 'no vendor for this brand' alert for it",
+          not any("R22T01" in b for _t, b in sent[tata_alerts:]))
+    check("...a skip line is never asked in live mode", demand(12903).state == m.DISCOVERED
+          and posts(GA, "R22H03") == 0 and posts(GB, "R22H03") == 0)
+    # a line that left the Portal (not seen for 2 days) is never sent
+    clock["now"] = datetime(2026, 12, 9, 12, 5)
+    group_posts.clear()
+    cust(12904, "R22H04")                 # still on the Portal
+    cust(12905, "R22H05")                 # will leave the Portal
+    with get_session() as s:
+        service.poll(s, client, clock["now"].date())
+        s.commit()
+    portal.rows.pop(12905, None)
+    with get_session() as s:
+        d = s.execute(select(m.PortalDemandLine).where(m.PortalDemandLine.source_order_line_id == 12905)).scalar_one()
+        d.last_seen_at = clock["now"] - timedelta(days=2)
+        s.commit()
+    round_with_portal()
+    settle(1)
+    check("a line the Portal still shows is sent", posts(GB, "R22H04") == 1)
+    check("a line not on the Portal for 2 days is NOT sent and waits",
+          posts(GB, "R22H05") == 0 and posts(GA, "R22H05") == 0 and demand(12905).state == m.DISCOVERED)
+    allow_file.write_text(json.dumps({}), encoding="utf-8")
     cfg.ask_mode = "one"
     portal_settings.rounds = False
 

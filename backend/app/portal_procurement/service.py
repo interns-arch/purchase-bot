@@ -381,6 +381,20 @@ def _external_ref(demands: list[m.PortalDemandLine]) -> str:
     return "PORTAL-" + hashlib.sha1(ids.encode()).hexdigest()[:12].upper()
 
 
+def _allowed_brands(session: Session) -> set[str] | None:
+    """Live mode with a vendor allow-list: the brands those vendors are on
+    (vendor_brands, active). None = no allow-list (every brand)."""
+    allowed = settings.allowed_vendors()
+    if not allowed:
+        return None
+    from backend.app.advance_orders.brands import canonical_brand
+
+    rows = session.execute(
+        select(am.VendorBrand.brand).where(am.VendorBrand.vendor_id.in_(allowed), am.VendorBrand.active.is_(True))
+    ).scalars()
+    return {canonical_brand(b) for b in rows if canonical_brand(b)}
+
+
 def enquire(session: Session, client: PortalClient | None = None) -> int:
     """Discovered lines -> vendor questions through the advance-order engine.
     One order per brand chunk; a part appears once per order so a vendor's
@@ -396,6 +410,13 @@ def enquire(session: Session, client: PortalClient | None = None) -> int:
     fresh = session.execute(
         query.order_by(m.PortalDemandLine.order_date.asc().nulls_last(), m.PortalDemandLine.id)
     ).scalars().all()
+    # Only lines the Portal still shows (seen in the last fresh_hours).
+    cutoff = now_ist_naive() - timedelta(hours=settings.fresh_hours)
+    stale = [d for d in fresh if d.last_seen_at is not None and d.last_seen_at < cutoff]
+    if stale:
+        logger.info("Portal procurement: %d discovered line(s) not on the Portal since %s -- not sent: %s",
+                    len(stale), cutoff.strftime("%d %b %H:%M"), [d.source_order_line_id for d in stale][:20])
+    fresh = [d for d in fresh if d not in stale]
     if pilot is not None:
         # Pilot: only the chosen source lines / part numbers.
         from backend.app.advance_orders.brands import canonical_brand
@@ -404,6 +425,17 @@ def enquire(session: Session, client: PortalClient | None = None) -> int:
                  d.source_order_line_id in pilot["lines"]
                  or _norm_part(d.part_no) in pilot["parts"]
                  or canonical_brand(d.brand) in pilot["brands"])]
+    else:
+        # LIVE (21 Nov 2026): every Portal part -- but never a skip line, and
+        # with a vendor allow-list only parts of the allowed vendors' brands
+        # (the rest wait untouched: no "no vendor for this brand" alerts).
+        skip = settings.skip_lines()
+        fresh = [d for d in fresh if d.source_order_line_id not in skip]
+        brands = _allowed_brands(session)
+        if brands is not None:
+            from backend.app.advance_orders.brands import canonical_brand
+
+            fresh = [d for d in fresh if canonical_brand(d.brand) in brands]
     fresh = fresh[: settings.max_new_lines_per_poll]
     if not fresh:
         return 0

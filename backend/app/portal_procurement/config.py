@@ -86,6 +86,29 @@ class PortalProcurementSettings:
             pass
         return {"lines": lines, "parts": parts, "brands": brands, "vendors": vendors, "skip_lines": skip}
 
+    # A line is sent to vendors only while the Portal still shows it: seen in
+    # the last N hours (the Portal is read every 10 min). Older "discovered"
+    # rows are lines that left the 7-day Active Procurement list (21 Nov 2026:
+    # 3 pilot lines from 12-13 Nov would have gone out on the first live round).
+    fresh_hours: int = max(1, _int("PORTAL_PROCUREMENT_FRESH_HOURS", 6))
+
+    def allowed_vendors(self) -> set[int]:
+        """LIVE mode's vendor allow-list (user, 21 Nov 2026: "remove pilot mode
+        but restrict to limited vendors"): `"allowed_vendors": [72, 110, 145]`
+        in the same pilot file, re-read every run. Set -> in live mode only
+        these vendors are asked, and only Portal parts of THEIR brands are
+        taken (other parts wait untouched). Empty -> every vendor."""
+        try:
+            with open(self.pilot_file, encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+            return {int(x) for x in data.get("allowed_vendors") or [] if str(x).strip().isdigit()}
+        except (OSError, ValueError):
+            return set()
+
+    def skip_lines(self) -> set[int]:
+        """Portal lines never asked, in pilot AND live mode."""
+        return set(self.pilot()["skip_lines"])
+
     # How often the Active Procurement list is read, and how often the
     # allocation steps (allocate, knockoff, approval, Odoo, PDF) move on.
     poll_minutes: int = max(5, _int("PORTAL_PROCUREMENT_POLL_MINUTES", 10))
