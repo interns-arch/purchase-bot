@@ -168,10 +168,11 @@ export function VendorInventoryPage() {
 
   return (
     <Layout title="Vendor Inventory">
-      <section className="panel">
-        <div className="panel__header">
-          <h2>Upload Vendor Inventory Files</h2>
-        </div>
+      <details className="panel panel--fold">
+        <summary>
+          <span className="panel--fold__title">Upload Vendor Inventory Files</span>
+          <span className="panel--fold__hint">Upload a vendor stock file by hand</span>
+        </summary>
         <p style={{ color: "var(--color-text-muted)", fontSize: "0.9rem", marginBottom: 12 }}>
           A vendor's first upload can be named with their real company name (e.g. "Arvind Auto
           Parts.xlsx") -- a Vendor Code is generated automatically and shown in the message below.
@@ -266,7 +267,7 @@ export function VendorInventoryPage() {
             </div>
           </>
         )}
-      </section>
+      </details>
 
       <section className="panel">
         <div className="panel__header">

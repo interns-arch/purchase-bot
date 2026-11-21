@@ -1,3 +1,4 @@
+import { Segmented, Tabs } from "../components/Tabs";
 import { useEffect, useState } from "react";
 import { Layout } from "../components/Layout";
 import { useToast } from "../context/ToastContext";
@@ -49,19 +50,22 @@ export function TeamPerformancePage() {
   }, [days]);
 
   const periodPicker = (
-    <div className="toolbar" style={{ gap: 6, flexWrap: "wrap" }}>
-      <button type="button" className={"btn " + (view === "daily" ? "btn--primary" : "btn--ghost")} onClick={() => setView("daily")}>
-        📅 Day by day
-      </button>
-      <button type="button" className={"btn " + (view === "summary" ? "btn--primary" : "btn--ghost")} onClick={() => setView("summary")}>
-        📊 Summary
-      </button>
-      <span style={{ width: 16 }} />
-      {PERIODS.map((p) => (
-        <button key={p} type="button" className={"btn " + (p === days ? "btn--primary" : "btn--ghost")} onClick={() => setDays(p)}>
-          Last {p} days
-        </button>
-      ))}
+    <div className="tabbar">
+      <Tabs
+        value={view}
+        onChange={setView}
+        label="Performance views"
+        items={[
+          { id: "daily", label: "Day by day" },
+          { id: "summary", label: "Summary" },
+        ]}
+      />
+      <Segmented
+        value={days}
+        onChange={setDays}
+        label="Period"
+        items={PERIODS.map((p) => ({ id: p, label: `${p} days` }))}
+      />
     </div>
   );
 

@@ -1,0 +1,203 @@
+/* ================================================================
+   ProcureHub UI layer (21 Nov 2026) -- loaded AFTER index.css.
+   Goals: a clear hierarchy (menu group > page > section > row),
+   readable sizes, keyboard focus you can see, and lists that show
+   all their information WITHOUT scrolling sideways.
+   ================================================================ */
+
+:root {
+  --ui-radius: 10px;
+  --ui-gap: 16px;
+  --ui-text: 0.94rem;
+  --ui-small: 0.82rem;
+  --ui-label: 0.7rem;
+  --accent-strong: #176540;
+  --focus: #1d4ed8;
+}
+
+body { font-size: 15px; line-height: 1.45; -webkit-text-size-adjust: 100%; }
+h1, h2, h3 { line-height: 1.25; }
+
+/* ---------- Keyboard and screen readers ---------- */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.skip-link {
+  position: fixed; left: 12px; top: -48px; z-index: 100; padding: 10px 14px; border-radius: 8px;
+  background: var(--ink); color: #fff; font-weight: 600; text-decoration: none; transition: top 0.12s;
+}
+.skip-link:focus { top: 12px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ---------- Menu: grouped, readable, easy to hit ---------- */
+.sidenav { width: 232px; padding: 18px 10px 14px; gap: 10px; }
+.app-shell--side .app-main { margin-left: 232px; max-width: 1560px; }
+.sidenav__links { gap: 0; padding-bottom: 8px; }
+.sidenav__group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 4px; }
+.sidenav__section {
+  margin: 14px 10px 5px; font-size: var(--ui-label); font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-3);
+}
+.sidenav__group:first-child .sidenav__section { margin-top: 4px; }
+.sidenav__link {
+  display: flex; align-items: center; min-height: 36px; padding: 6px 12px; border-radius: 8px;
+  font-size: var(--ui-text); font-weight: 500; color: var(--ink-2); box-shadow: none;
+}
+.sidenav__link:hover { background: var(--wash); color: var(--ink); }
+.sidenav__link--active {
+  background: var(--accent-wash); color: var(--accent-strong); font-weight: 650; box-shadow: inset 3px 0 0 var(--accent); border-radius: 8px;
+}
+.sidenav__status { margin: 4px 10px 0; }
+
+/* ---------- Page header: where am I, what is this page for ---------- */
+.page-head { padding: 22px 28px 6px; align-items: flex-start; }
+.page-head__text { min-width: 0; }
+.page-head__crumb {
+  display: flex; gap: 6px; align-items: center; margin-bottom: 4px; font-size: var(--ui-label); font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+}
+.page-head__title { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.015em; color: var(--ink); }
+.page-head__purpose { max-width: 78ch; margin: 5px 0 0; font-size: 0.9rem; line-height: 1.5; color: var(--ink-2); }
+.page-head__date { padding-top: 4px; font-size: var(--ui-small); color: var(--ink-3); }
+.app-shell--side .app-content { padding: 16px 28px 56px; }
+
+/* ---------- Sections and summary numbers ---------- */
+.panel { border-radius: var(--ui-radius); border: 1px solid var(--line); box-shadow: none; padding: 18px 20px; margin-bottom: 18px; }
+.panel > h2, .panel__title { margin: 0 0 12px; font-size: 1.02rem; font-weight: 650; color: var(--ink); }
+.stat-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat-card { border-radius: var(--ui-radius); padding: 14px 16px; background: #fff; }
+.stat-card__label { font-size: var(--ui-label); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.stat-card__value { font-size: 1.6rem; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.stat-card__hint { font-size: var(--ui-small); color: var(--ink-2); }
+
+/* ---------- Filter bars ---------- */
+.toolbar { gap: 10px 12px; margin-bottom: 14px; }
+.toolbar input, .toolbar select, .toolbar .toolbar__search {
+  min-height: 38px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font: inherit; color: var(--ink);
+}
+.toolbar .toolbar__search, .toolbar input[type="search"], .toolbar input[type="text"] { flex: 1 1 220px; max-width: 420px; }
+.btn { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.btn--small { min-height: 30px; }
+input:not([type="checkbox"]):not([type="radio"]), select, textarea { font: inherit; }
+
+/* ---------- Lists: all the information, never a sideways scroll ---------- */
+.table-scroll { overflow-x: visible; overflow-y: visible; border: 1px solid var(--line); border-radius: var(--ui-radius); background: #fff; }
+.table-scroll--modal { overflow-y: auto; }
+.data-table { width: 100%; font-size: var(--ui-text); table-layout: auto; border-collapse: collapse; }
+.data-table th {
+  padding: 9px 12px; background: var(--wash); font-size: var(--ui-label); font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-2); white-space: normal; vertical-align: bottom; border-bottom: 1px solid var(--line);
+}
+.data-table td { padding: 11px 12px; white-space: normal; overflow-wrap: anywhere; vertical-align: top; border-bottom: 1px solid var(--wash); }
+.data-table tbody tr:last-child td { border-bottom: 0; }
+.data-table tbody tr:nth-child(even) { background: transparent; }
+.data-table tbody tr:hover { background: var(--wash); }
+.data-table td, .data-table th { min-width: 0; }
+.data-table__actions { flex-wrap: wrap; }
+
+/* A table that does not fit its box is shown as record rows (see
+   components/useResponsiveTables): the first cell is the title, every other
+   cell is a labelled field. Same information, any width. */
+table.data-table[data-records], table.data-table[data-records] > tbody { display: block; width: 100%; }
+table.data-table[data-records] > thead { display: none; }
+table.data-table[data-records] > tbody > tr {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 18px; align-items: start;
+  padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fff;
+}
+table.data-table[data-records] > tbody > tr:last-child { border-bottom: 0; }
+table.data-table[data-records] > tbody > tr:hover { background: var(--wash); }
+table.data-table[data-records] > tbody > tr > td {
+  display: block; min-width: 0; padding: 0; border: 0; font-size: var(--ui-text); overflow-wrap: anywhere; white-space: normal !important;
+}
+table.data-table[data-records] > tbody > tr > td::before {
+  content: attr(data-label); display: block; margin-bottom: 2px; font-size: var(--ui-label); font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+table.data-table[data-records] > tbody > tr > td[data-label=""]::before { display: none; }
+/* title line: the column marked data-title (else the first), shown first */
+table.data-table[data-records] > tbody > tr > td[data-title] { grid-column: 1 / -1; order: -1; font-size: 1.02rem; }
+table.data-table[data-records] > tbody > tr > td[data-title]::before { display: none; }
+/* long text and the action buttons take the whole line */
+table.data-table[data-records] > tbody > tr > td[colspan], table.data-table[data-records] > tbody > tr > td.cell-wide,
+table.data-table[data-records] > tbody > tr > td:last-child:not([data-label]),
+table.data-table[data-records] > tbody > tr > td:last-child[data-label=""] { grid-column: 1 / -1; }
+table.data-table[data-records] > tbody > tr > td:last-child[data-label=""] { padding-top: 10px; border-top: 1px dashed var(--line); }
+table.data-table[data-records] > tbody > tr > td .btn { min-height: 34px; }
+
+/* ---------- Status pills, easier to read ---------- */
+.pill { font-size: var(--ui-small); padding: 2px 9px; }
+
+/* ---------- Phones ---------- */
+@media (max-width: 900px) {
+  .sidenav { width: min(300px, 86vw); }
+  .app-shell--side .app-main { margin-left: 0; max-width: 100%; }
+  .sidebar-top { height: 54px; }
+  .sidebar-top__toggle { width: 42px; height: 42px; }
+  .page-head { padding: 14px 16px 4px; }
+  .page-head__title { font-size: 1.25rem; }
+  .page-head__date { display: none; }
+  .app-shell--side .app-content { padding: 12px 16px 48px; }
+  .panel { padding: 14px 14px; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .toolbar .toolbar__search, .toolbar input[type="search"], .toolbar input[type="text"] { max-width: none; flex-basis: 100%; }
+  table.data-table[data-records] > tbody > tr { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px 12px; }
+}
+@media (max-width: 420px) {
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* short cells (a date, a number, a status) never split over two lines */
+.data-table td[data-short] { white-space: nowrap; overflow-wrap: normal; }
+table.data-table[data-measure] td, table.data-table[data-measure] th { white-space: nowrap !important; }
+table.data-table[data-measure] { width: auto; }
+
+/* ---------- Two levels of choice: page views (tabs) and filters (segmented) ---------- */
+.tabbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.tabs__tab {
+  position: relative; min-height: 42px; padding: 8px 14px; border: 0; background: none; font: inherit; font-size: 0.95rem; font-weight: 600;
+  color: var(--ink-2); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -1px;
+}
+.tabs__tab:hover { color: var(--ink); }
+.tabs__tab--on { color: var(--accent-strong); border-bottom-color: var(--accent); }
+.tabs__count { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--wash); font-size: var(--ui-small); font-weight: 600; color: var(--ink-2); }
+.seg { display: inline-flex; flex-wrap: wrap; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--wash); margin-bottom: 8px; }
+.seg__item { min-height: 32px; padding: 4px 12px; border: 0; border-radius: 7px; background: transparent; font: inherit; font-size: 0.86rem; font-weight: 600; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+.seg__item:hover { color: var(--ink); }
+.seg__item--on { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.12); }
+
+/* ---------- Today page ---------- */
+.today-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 14px; }
+.today-bar .seg { margin-bottom: 0; }
+.today-bar__right { display: flex; align-items: center; gap: 12px; }
+.today-bar__stamp { font-size: var(--ui-small); color: var(--ink-3); }
+.panel--attention { border-color: #f0d9b5; background: #fffdf8; }
+.panel__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.panel__header h2 { margin: 0; font-size: 1.05rem; font-weight: 650; }
+.kpi-group { margin-bottom: 18px; }
+.kpi-group:last-child { margin-bottom: 0; }
+.kpi-group__title { margin: 0 0 8px; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-2); }
+.kpi-group__title span { margin-left: 8px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--ink-3); }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.kpi { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 12px 14px; text-align: left; font: inherit; color: inherit; cursor: pointer;
+  border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: var(--ui-radius); background: #fff; }
+.kpi:hover { background: var(--wash); }
+.kpi__label { font-size: var(--ui-small); font-weight: 600; color: var(--ink-2); }
+.kpi__value { font-size: 1.6rem; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; color: var(--ink); }
+.kpi__sub { font-size: var(--ui-small); color: var(--ink-3); }
+.page-loading { padding: 18px 4px; color: var(--ink-3); }
+
+/* An upload box is a side action: folded until it is needed, the list stays on top. */
+.panel--fold { padding: 0; }
+.panel--fold > summary { display: flex; align-items: center; gap: 12px; padding: 14px 20px; cursor: pointer; list-style: none; min-height: 52px; }
+.panel--fold > summary::-webkit-details-marker { display: none; }
+.panel--fold > summary::before { content: "＋"; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--wash); font-weight: 700; color: var(--ink-2); }
+.panel--fold[open] > summary::before { content: "－"; }
+.panel--fold > summary:hover { background: var(--wash); border-radius: var(--ui-radius); }
+.panel--fold__title { font-size: 1.02rem; font-weight: 650; color: var(--ink); }
+.panel--fold__hint { margin-left: auto; font-size: var(--ui-small); color: var(--ink-3); }
+.panel--fold[open] > summary { border-bottom: 1px solid var(--line); border-radius: var(--ui-radius) var(--ui-radius) 0 0; margin-bottom: 14px; }
+.panel--fold > :not(summary) { margin-left: 20px; margin-right: 20px; }
+.panel--fold > :last-child { margin-bottom: 18px; }
+
+/* config names and long values never push a card wider than itself */
+.stat-card__hint, .stat-card__value { overflow-wrap: anywhere; }
+.data-table td { overflow-wrap: break-word; }
+table.data-table[data-records] > tbody > tr > td { overflow-wrap: anywhere; }

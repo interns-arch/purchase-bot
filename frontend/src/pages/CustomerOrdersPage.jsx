@@ -181,10 +181,11 @@ export function CustomerOrdersPage() {
 
   return (
     <Layout title="Customer Orders">
-      <section className="panel">
-        <div className="panel__header">
-          <h2>Upload Customer Order</h2>
-        </div>
+      <details className="panel panel--fold">
+        <summary>
+          <span className="panel--fold__title">Upload Customer Order</span>
+          <span className="panel--fold__hint">Upload a customer part list</span>
+        </summary>
         <p style={{ color: "var(--color-text-muted)", fontSize: "0.9rem", marginBottom: 12 }}>
           Upload the part list your customer sent. Once imported, open{" "}
           <Link to="/vendor-comparison">Vendor Comparison</Link> to see which vendors can supply it.
@@ -271,7 +272,7 @@ export function CustomerOrdersPage() {
             </table>
           </div>
         )}
-      </section>
+      </details>
 
       <section className="panel">
         <div className="panel__header">

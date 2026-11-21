@@ -39,7 +39,6 @@ const VendorPriorityPage = lazy(() => import("./pages/VendorPriorityPage").then(
 const ActiveProcurementPage = lazy(() =>
   import("./pages/ActiveProcurementPage").then((m) => ({ default: m.ActiveProcurementPage }))
 );
-const VendorPocPage = lazy(() => import("./pages/VendorPocPage").then((m) => ({ default: m.VendorPocPage })));
 const DealerPortalPage = lazy(() => import("./pages/DealerPortalPage").then((m) => ({ default: m.DealerPortalPage })));
 const TeamPerformancePage = lazy(() => import("./pages/TeamPerformancePage").then((m) => ({ default: m.TeamPerformancePage })));
 const PurchaseOrdersPage = lazy(() =>
@@ -136,14 +135,8 @@ function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/vendor-poc"
-              element={
-                <ProtectedRoute>
-                  <VendorPocPage />
-                </ProtectedRoute>
-              }
-            />
+            {/* Vendor contacts are a tab of the Vendors page (one place for a vendor). */}
+            <Route path="/vendor-poc" element={<Navigate to="/vendor-priority#poc" replace />} />
             <Route
               path="/chats"
               element={

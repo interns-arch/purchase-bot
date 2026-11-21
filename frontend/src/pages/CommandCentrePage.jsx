@@ -13,6 +13,7 @@ import {
   YAxis,
 } from "recharts";
 import { Layout } from "../components/Layout";
+import { Segmented, Tabs } from "../components/Tabs";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../context/ToastContext";
 import { extractErrorMessage } from "../api/client";
@@ -85,27 +86,13 @@ function KpiCard({ label, value, sub, tone, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      style={{
-        textAlign: "left",
-        background: "var(--color-surface, #fff)",
-        border: "1px solid var(--color-border, #e5e7eb)",
-        borderLeft: `4px solid ${tone || "var(--color-border, #e5e7eb)"}`,
-        borderRadius: 10,
-        padding: "12px 16px",
-        cursor: "pointer",
-        minWidth: 0,
-      }}
+      className="kpi"
+      style={tone ? { borderLeftColor: tone } : undefined}
       title="Click to open the underlying records"
     >
-      <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)", marginBottom: 4 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: "1.5rem", fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
-      {sub && (
-        <div style={{ fontSize: "0.78rem", color: "var(--color-text-muted)", marginTop: 4 }}>
-          {sub}
-        </div>
-      )}
+      <span className="kpi__label">{label}</span>
+      <span className="kpi__value">{value}</span>
+      {sub ? <span className="kpi__sub">{sub}</span> : null}
     </button>
   );
 }
@@ -126,51 +113,45 @@ export function CommandCentrePage() {
   const [teamActivity, setTeamActivity] = useState([]);
   const [days, setDays] = useState(7);
   const [isLoading, setIsLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [tab, setTab] = useState("shortages");
 
+  function openTab(next) {
+    setTab(next);
+    requestAnimationFrame(() => document.getElementById("today-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  // The headline numbers and the action list come first, so the page is usable
+  // at once; the heavier detail below fills in as it arrives.
   async function load(windowDays) {
     setIsLoading(true);
+    setDetailLoading(true);
     try {
-      const [
-        summaryData,
-        alertsData,
-        gapsData,
-        funnelData,
-        orderData,
-        poData,
-        deliveryData,
-        scorecardData,
-        trendsData,
-        leakageData,
-        teamActivityData,
-      ] = await Promise.all([
-        getCommandCentreSummary(),
-        getCommandCentreAlerts(),
-        getCommandCentreStockGaps(),
-        getCommandCentreFunnel(windowDays),
-        getCommandCentreOrderTower(windowDays),
-        getCommandCentrePoTower(windowDays),
-        getCommandCentreDeliveryTower(windowDays),
-        getCommandCentreVendorScorecard(),
-        getCommandCentreTrends(windowDays),
-        getPriceLeakage(windowDays),
-        getTeamActivity(windowDays),
-      ]);
+      const [summaryData, alertsData] = await Promise.all([getCommandCentreSummary(), getCommandCentreAlerts()]);
       setSummary(summaryData);
       setAlerts(alertsData);
-      setGaps(gapsData);
-      setFunnel(funnelData);
-      setOrderTower(orderData);
-      setPoTower(poData);
-      setDeliveryTower(deliveryData);
-      setScorecard(scorecardData);
-      setTrends(trendsData);
-      setLeakage(leakageData);
-      setTeamActivity(teamActivityData);
     } catch (error) {
       toast.error(extractErrorMessage(error, "Could not load the Command Centre."));
     } finally {
       setIsLoading(false);
     }
+    const detail = [
+      [getCommandCentreStockGaps(), setGaps],
+      [getCommandCentreFunnel(windowDays), setFunnel],
+      [getCommandCentreOrderTower(windowDays), setOrderTower],
+      [getCommandCentrePoTower(windowDays), setPoTower],
+      [getCommandCentreDeliveryTower(windowDays), setDeliveryTower],
+      [getCommandCentreVendorScorecard(), setScorecard],
+      [getCommandCentreTrends(windowDays), setTrends],
+      [getPriceLeakage(windowDays), setLeakage],
+      [getTeamActivity(windowDays), setTeamActivity],
+    ];
+    const results = await Promise.allSettled(
+      detail.map(([request, setter]) => request.then((value) => setter(value)))
+    );
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) toast.error(extractErrorMessage(failed.reason, "Some of the detail could not be loaded."));
+    setDetailLoading(false);
   }
 
   useEffect(() => {
@@ -180,7 +161,7 @@ export function CommandCentrePage() {
 
   if (isLoading || !summary) {
     return (
-      <Layout title="Command Centre">
+      <Layout title="Today">
         <div className="page-loading">Loading the procurement position…</div>
       </Layout>
     );
@@ -190,145 +171,23 @@ export function CommandCentrePage() {
   const problemCount = alerts.filter((a) => a.severity === "error").length;
 
   return (
-    <Layout title="Founder Command Centre">
-      <section className="panel">
-        <div className="panel__header">
-          <h2>Today at a glance</h2>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <span style={{ fontSize: "0.8rem", color: "var(--color-text-muted)" }}>
-              {summary.generated_at_ist}
-            </span>
-            <div style={{ display: "flex", gap: 4 }}>
-              {PERIODS.map((period) => (
-                <button
-                  key={period.days}
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => setDays(period.days)}
-                  style={
-                    period.days === days
-                      ? { fontWeight: 700, textDecoration: "underline" }
-                      : undefined
-                  }
-                >
-                  {period.label}
-                </button>
-              ))}
-            </div>
-            <button type="button" className="btn btn--ghost" onClick={() => load(days)}>
-              Refresh
-            </button>
-          </div>
+    <Layout title="Today">
+      <div className="today-bar">
+        <Segmented
+          value={days}
+          onChange={setDays}
+          label="Period"
+          items={PERIODS.map((period) => ({ id: period.days, label: period.label }))}
+        />
+        <div className="today-bar__right">
+          <span className="today-bar__stamp">Updated {summary.generated_at_ist}</span>
+          <button type="button" className="btn btn--ghost" onClick={() => load(days)}>
+            Refresh
+          </button>
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
-            gap: 12,
-          }}
-        >
-          <KpiCard
-            label="Vendors Expected Today"
-            value={`${vendors.received} / ${vendors.expected}`}
-            sub={
-              vendors.pending
-                ? `${vendors.pending} pending`
-                : "all received"
-            }
-            tone={vendors.pending ? SEVERITY_COLORS.warning : "#16a34a"}
-            onClick={() => navigate("/vendor-inventory")}
-          />
-          <KpiCard
-            label="Customer Orders Today"
-            value={orders.orders_today}
-            sub={`${orders.lines_today} line(s)`}
-            tone="#2563eb"
-            onClick={() => navigate("/customer-orders")}
-          />
-          <KpiCard
-            label="Qty Ordered Today"
-            value={orders.qty_ordered_today}
-            sub={`allocated ${orders.qty_allocated_today}`}
-            tone="#2563eb"
-            onClick={() => navigate("/customer-orders")}
-          />
-          <KpiCard
-            label="Fill Rate Today"
-            value={orders.fill_rate_pct === null ? "—" : `${orders.fill_rate_pct}%`}
-            sub={`short ${orders.qty_short_today}`}
-            tone={
-              orders.qty_short_today > 0 ? SEVERITY_COLORS.error : "#16a34a"
-            }
-            onClick={() => navigate("/vendor-comparison")}
-          />
-          <KpiCard
-            label="At-Risk Orders (7d)"
-            value={orders.at_risk_orders}
-            sub="orders still short"
-            tone={orders.at_risk_orders ? SEVERITY_COLORS.error : "#16a34a"}
-            onClick={() => navigate("/customer-orders")}
-          />
-          <KpiCard
-            label="Live Remaining Stock"
-            value={stock.live_remaining}
-            sub={`${stock.total_quantity} imported − ${stock.reserved_quantity} reserved`}
-            tone="#0891b2"
-            onClick={() => navigate("/vendor-comparison")}
-          />
-          <KpiCard
-            label="Active Parts / Vendors"
-            value={stock.distinct_parts}
-            sub={`${stock.vendors_with_stock} vendor(s) with stock`}
-            tone="#0891b2"
-            onClick={() => navigate("/vendor-inventory")}
-          />
-          <KpiCard
-            label="POs Today / MTD"
-            value={`${purchase_orders.created_today} / ${purchase_orders.created_mtd}`}
-            sub={
-              purchase_orders.email_failed
-                ? `${purchase_orders.email_failed} email(s) failed`
-                : `qty ${purchase_orders.ordered_qty_today} today`
-            }
-            tone={purchase_orders.email_failed ? SEVERITY_COLORS.warning : "#7c3aed"}
-            onClick={() => navigate("/purchase-orders")}
-          />
-          <KpiCard
-            label="Delivery Outstanding"
-            value={delivery.short_qty}
-            sub={`${delivery.delivered_qty} of ${delivery.ordered_qty} delivered${
-              delivery.fulfilment_pct !== null ? ` (${delivery.fulfilment_pct}%)` : ""
-            }`}
-            tone={delivery.short_qty > 0 ? SEVERITY_COLORS.warning : "#16a34a"}
-            onClick={() => navigate("/delivery-tracking")}
-          />
-          <KpiCard
-            label="Invoice Mismatches (7d)"
-            value={
-              invoices.short_supply +
-              invoices.extra_supply +
-              invoices.missing_part +
-              invoices.unexpected_part
-            }
-            sub={`${invoices.matched_lines} matched, ${invoices.needs_review} need review`}
-            tone={
-              invoices.short_supply + invoices.missing_part > 0
-                ? SEVERITY_COLORS.warning
-                : "#16a34a"
-            }
-            onClick={() => navigate("/vendor-invoices")}
-          />
-          <KpiCard
-            label="Files Today"
-            value={files_today.received}
-            sub={`${files_today.processed} ok · ${files_today.failed} failed · ${files_today.needs_review} review`}
-            tone={files_today.failed ? SEVERITY_COLORS.error : "#16a34a"}
-            onClick={() => navigate("/file-inbox")}
-          />
-        </div>
-      </section>
+      </div>
 
-      <section className="panel">
+      <section className="panel panel--attention">
         <div className="panel__header">
           <h2>
             Action Required{" "}
@@ -398,6 +257,144 @@ export function CommandCentrePage() {
 
       <section className="panel">
         <div className="panel__header">
+          <h2>Numbers</h2>
+        </div>
+        <div className="kpi-group">
+          <h3 className="kpi-group__title">Orders <span>what customers asked for</span></h3>
+          <div className="kpi-grid">
+          <KpiCard
+            label="Customer Orders Today"
+            value={orders.orders_today}
+            sub={`${orders.lines_today} line(s)`}
+            tone="#2563eb"
+            onClick={() => navigate("/customer-orders")}
+          />
+          <KpiCard
+            label="Qty Ordered Today"
+            value={orders.qty_ordered_today}
+            sub={`allocated ${orders.qty_allocated_today}`}
+            tone="#2563eb"
+            onClick={() => navigate("/customer-orders")}
+          />
+          <KpiCard
+            label="Fill Rate Today"
+            value={orders.fill_rate_pct === null ? "—" : `${orders.fill_rate_pct}%`}
+            sub={`short ${orders.qty_short_today}`}
+            tone={
+              orders.qty_short_today > 0 ? SEVERITY_COLORS.error : "#16a34a"
+            }
+            onClick={() => navigate("/vendor-comparison")}
+          />
+          <KpiCard
+            label="At-Risk Orders (7d)"
+            value={orders.at_risk_orders}
+            sub="orders still short"
+            tone={orders.at_risk_orders ? SEVERITY_COLORS.error : "#16a34a"}
+            onClick={() => navigate("/customer-orders")}
+          />
+          </div>
+        </div>
+        <div className="kpi-group">
+          <h3 className="kpi-group__title">Procurement and delivery <span>what we bought and what arrived</span></h3>
+          <div className="kpi-grid">
+          <KpiCard
+            label="POs Today / MTD"
+            value={`${purchase_orders.created_today} / ${purchase_orders.created_mtd}`}
+            sub={
+              purchase_orders.email_failed
+                ? `${purchase_orders.email_failed} email(s) failed`
+                : `qty ${purchase_orders.ordered_qty_today} today`
+            }
+            tone={purchase_orders.email_failed ? SEVERITY_COLORS.warning : "#7c3aed"}
+            onClick={() => openTab("pipeline")}
+          />
+          <KpiCard
+            label="Delivery Outstanding"
+            value={delivery.short_qty}
+            sub={`${delivery.delivered_qty} of ${delivery.ordered_qty} delivered${
+              delivery.fulfilment_pct !== null ? ` (${delivery.fulfilment_pct}%)` : ""
+            }`}
+            tone={delivery.short_qty > 0 ? SEVERITY_COLORS.warning : "#16a34a"}
+            onClick={() => openTab("pipeline")}
+          />
+          <KpiCard
+            label="Invoice Mismatches (7d)"
+            value={
+              invoices.short_supply +
+              invoices.extra_supply +
+              invoices.missing_part +
+              invoices.unexpected_part
+            }
+            sub={`${invoices.matched_lines} matched, ${invoices.needs_review} need review`}
+            tone={
+              invoices.short_supply + invoices.missing_part > 0
+                ? SEVERITY_COLORS.warning
+                : "#16a34a"
+            }
+            onClick={() => openTab("pipeline")}
+          />
+          </div>
+        </div>
+        <div className="kpi-group">
+          <h3 className="kpi-group__title">Stock, vendors and files <span>what we have and who sent it</span></h3>
+          <div className="kpi-grid">
+          <KpiCard
+            label="Vendors Expected Today"
+            value={`${vendors.received} / ${vendors.expected}`}
+            sub={
+              vendors.pending
+                ? `${vendors.pending} pending`
+                : "all received"
+            }
+            tone={vendors.pending ? SEVERITY_COLORS.warning : "#16a34a"}
+            onClick={() => navigate("/vendor-inventory")}
+          />
+          <KpiCard
+            label="Live Remaining Stock"
+            value={stock.live_remaining}
+            sub={`${stock.total_quantity} imported − ${stock.reserved_quantity} reserved`}
+            tone="#0891b2"
+            onClick={() => navigate("/vendor-comparison")}
+          />
+          <KpiCard
+            label="Active Parts / Vendors"
+            value={stock.distinct_parts}
+            sub={`${stock.vendors_with_stock} vendor(s) with stock`}
+            tone="#0891b2"
+            onClick={() => navigate("/vendor-inventory")}
+          />
+          <KpiCard
+            label="Files Today"
+            value={files_today.received}
+            sub={`${files_today.processed} ok · ${files_today.failed} failed · ${files_today.needs_review} review`}
+            tone={files_today.failed ? SEVERITY_COLORS.error : "#16a34a"}
+            onClick={() => navigate("/file-inbox")}
+          />
+          </div>
+        </div>
+      </section>
+
+      <div className="tabbar">
+        <Tabs
+          value={tab}
+          onChange={setTab}
+          label="Detail"
+          items={[
+            { id: "shortages", label: "Parts we cannot supply", count: gaps.length },
+            { id: "pipeline", label: "Orders to delivery" },
+            { id: "vendors", label: "Vendor scorecard", count: scorecard.length },
+            { id: "team", label: "Team activity" },
+            ...(leakage ? [{ id: "price", label: "Price check" }] : []),
+            { id: "trends", label: "Trends" },
+          ]}
+        />
+      </div>
+      <div id="today-detail">
+      {detailLoading ? <p className="page-loading">Loading the details…</p> : null}
+      {tab === "shortages" && (
+        <>
+      <section className="panel">
+        <div className="panel__header">
           <h2>Parts We Cannot Supply</h2>
         </div>
         <SectionHint>
@@ -459,6 +456,10 @@ export function CommandCentrePage() {
         )}
       </section>
 
+        </>
+      )}
+      {tab === "pipeline" && (
+        <>
       <section className="panel">
         <div className="panel__header">
           <h2>Stock-to-Delivery Journey ({days === 1 ? "today" : `${days} days`})</h2>
@@ -596,6 +597,10 @@ export function CommandCentrePage() {
         </div>
       </section>
 
+        </>
+      )}
+      {tab === "vendors" && (
+        <>
       <section className="panel">
         <div className="panel__header">
           <h2>Vendor Scorecard</h2>
@@ -659,6 +664,10 @@ export function CommandCentrePage() {
         )}
       </section>
 
+        </>
+      )}
+      {tab === "team" && (
+        <>
       <section className="panel">
         <div className="panel__header">
           <h2>Team Activity ({days === 1 ? "today" : `${days} days`})</h2>
@@ -708,6 +717,10 @@ export function CommandCentrePage() {
         )}
       </section>
 
+        </>
+      )}
+      {tab === "price" && (
+        <>
       {leakage && (
         <section className="panel">
           <div className="panel__header">
@@ -793,6 +806,10 @@ export function CommandCentrePage() {
         </section>
       )}
 
+        </>
+      )}
+      {tab === "trends" && (
+        <>
       <section className="panel">
         <div className="panel__header">
           <h2>Trends ({days === 1 ? "today" : `last ${days} days`})</h2>
@@ -836,6 +853,9 @@ export function CommandCentrePage() {
           </div>
         )}
       </section>
+        </>
+      )}
+      </div>
     </Layout>
   );
 }

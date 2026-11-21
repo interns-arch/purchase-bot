@@ -1,3 +1,4 @@
+import { Tabs } from "../components/Tabs";
 import { useEffect, useMemo, useState } from "react";
 import { Layout } from "../components/Layout";
 import { EmptyState } from "../components/EmptyState";
@@ -170,13 +171,16 @@ export function VendorPriorityPage() {
     window.history.replaceState(null, "", next === "poc" ? "#poc" : window.location.pathname);
   }
   const tabs = (
-    <div className="toolbar" style={{ gap: 8, marginBottom: 12 }}>
-      <button type="button" className={tab === "priority" ? "btn btn--primary" : "btn btn--ghost"} onClick={() => chooseTab("priority")}>
-        Priority by brand
-      </button>
-      <button type="button" className={tab === "poc" ? "btn btn--primary" : "btn btn--ghost"} onClick={() => chooseTab("poc")}>
-        POC
-      </button>
+    <div className="tabbar">
+      <Tabs
+        value={tab}
+        onChange={chooseTab}
+        label="Vendor views"
+        items={[
+          { id: "priority", label: "Priority by brand" },
+          { id: "poc", label: "Contacts (POC)" },
+        ]}
+      />
     </div>
   );
 

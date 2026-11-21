@@ -325,7 +325,7 @@ export function VendorCreationPage() {
               <thead>
                 <tr>
                   <th>Request</th>
-                  <th>Vendor</th>
+                  <th data-title>Vendor</th>
                   <th>GSTIN / Mobile</th>
                   <th>Prateek sir / NK Jain sir</th>
                   <th>Dealer Portal</th>
