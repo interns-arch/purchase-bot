@@ -365,6 +365,14 @@ def _resolve_lines(order: m.AdvanceOrder, session: Session, now: datetime) -> bo
         still_open = [
             q for q in covering if q.status in (m.Q_QUEUED, m.Q_SENT) and q.vendor_id not in answered
         ]
+        if _batch_on(order):
+            # Batch rule (21 Nov 2026): a good answer wins once everyone asked
+            # has answered, or at the end of the 3-hour window.
+            from backend.app.portal_procurement import rounds
+
+            if rounds.decide_batch_line(line, still_open, now, session):
+                decided = True
+            continue
         if _rounds_on(order):
             # Portal rounds (16 Nov 2026): only a reply with the margin and at
             # most 7 days wins; none -> keep asking, then Prateek sir chooses.
@@ -394,7 +402,19 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
     vendor list runs out, its remaining lines are marked unavailable."""
     if order.status not in (m.ASKING,):
         return
+    if _batch_on(order):
+        from backend.app.portal_procurement import rounds
+
+        rounds.start_batch(order, session, now)
     _resolve_lines(order, session, now)
+    if _batch_on(order):
+        from backend.app.portal_procurement import rounds
+
+        end = rounds.batch_end(order)
+        if end is not None and now >= end:
+            # Window over: nobody is asked about this batch again.
+            _settle(order)
+            return
 
     if order.kind == m.KIND_DEALER_STOCK:
         _mark_ordered(order, session)
@@ -459,6 +479,8 @@ def _advance(order: m.AdvanceOrder, session: Session, now: datetime) -> None:
         if not candidates:
             if open_queries:
                 continue  # somebody we already asked may still answer
+            if _batch_on(order):
+                continue  # batch rule: the end of the window reports it to the team
             # "Nobody had it" and "nobody could be reached" are different
             # facts. Telling a customer the part is unavailable when the truth
             # is that no message got through would be a false answer.
@@ -802,7 +824,7 @@ def _send_queued(order: m.AdvanceOrder, session: Session, now: datetime) -> None
                         q.draft = {**(q.draft or {}), "_known_disc": known}
             # Both clocks run in VENDOR HOURS only -- no vendor is timed out
             # overnight while he is asleep.
-            q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
+            q.deadline_at = _query_deadline(order, now)
             if (order.kind == m.KIND_ADVANCE and order.deadline_at is None and cfg.advance_deadline_hours
                     and not _rounds_on(order)):
                 # The overall "not found" clock starts with the first question.
@@ -907,7 +929,7 @@ def tick(session: Session, now: datetime | None = None) -> None:
         q.status = m.Q_TIMEOUT
         logger.info("Advance order %s: vendor %s did not answer in time.", q.advance_order_id, q.vendor_id)
         overdue_order = session.get(m.AdvanceOrder, q.advance_order_id)
-        if _rounds_on(overdue_order):
+        if _rounds_on(overdue_order) and not _batch_on(overdue_order):
             silent.append((overdue_order, q))
     session.flush()
     if silent:
@@ -933,7 +955,10 @@ def tick(session: Session, now: datetime | None = None) -> None:
         from backend.app.portal_procurement import rounds
 
         try:
-            rounds.escalate_stale(session, now)
+            if portal.batch:
+                rounds.batch_report(session, now)
+            else:
+                rounds.escalate_stale(session, now)
         except Exception:  # noqa: BLE001 -- never blocks the tick
             logger.exception("Portal rounds: the 6-hour escalation check failed.")
 
@@ -957,6 +982,31 @@ def _rounds_on(order: m.AdvanceOrder | None) -> bool:
     return portal.rounds
 
 
+def _batch_on(order: m.AdvanceOrder | None) -> bool:
+    """Portal demand under the batch rule (21 Nov 2026)."""
+    if not _rounds_on(order):
+        return False
+    from backend.app.portal_procurement.config import settings as portal
+
+    return portal.batch
+
+
+def _query_deadline(order: m.AdvanceOrder, now: datetime) -> datetime:
+    """When this vendor's time to answer runs out: the batch's window end
+    (clock time), else vendor hours from now."""
+    if _batch_on(order):
+        from backend.app.portal_procurement import rounds
+
+        from sqlalchemy.orm import object_session
+
+        if rounds.batch_end(order) is None and object_session(order) is not None:
+            rounds.start_batch(order, object_session(order), now)
+        end = rounds.batch_end(order)
+        if end is not None:
+            return end
+    return _add_vendor_hours(now, _wait_minutes(order))
+
+
 def _wait_minutes(order: m.AdvanceOrder | None) -> int:
     if _rounds_on(order):
         from backend.app.portal_procurement import rounds
@@ -967,6 +1017,10 @@ def _wait_minutes(order: m.AdvanceOrder | None) -> int:
 
 def _followup_plan(order: m.AdvanceOrder | None) -> tuple[int, int]:
     """(how many reminders, minutes apart)."""
+    if _batch_on(order):
+        from backend.app.portal_procurement.config import settings as portal
+
+        return (1 if portal.batch_reminder_minutes else 0), portal.batch_reminder_minutes
     if _rounds_on(order):
         from backend.app.portal_procurement import rounds
 
@@ -999,7 +1053,8 @@ def _send_followups(session: Session, now: datetime) -> None:
         count, gap = _followup_plan(order)
         if done >= count or q.sent_at is None:
             continue
-        due = _add_vendor_hours(q.sent_at, gap * (done + 1))
+        due = (q.sent_at + timedelta(minutes=gap * (done + 1)) if _batch_on(order)
+               else _add_vendor_hours(q.sent_at, gap * (done + 1)))
         if now < due or (q.deadline_at is not None and now >= q.deadline_at):
             continue
         if order is None or order.status != m.ASKING or not _workable(order):
@@ -1355,7 +1410,7 @@ def _vendor_redirect(
     q.message_ids = ids or None
     q.sent_at = now
     q.followups_sent = 0
-    q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
+    q.deadline_at = _query_deadline(order, now)
     session.flush()
     _send_text(sender, f"Dhanyavaad 🙏 Inquiry +{new} par bhej di hai, aage se isi number par bhejenge.")
     note = (
@@ -1477,7 +1532,7 @@ def _after_answer(order: m.AdvanceOrder, q: m.AdvanceVendorQuery, lines: list[m.
     q.step = nxt
     # His clock restarts for the new question; reminders count afresh.
     q.sent_at = now
-    q.deadline_at = _add_vendor_hours(now, _wait_minutes(order))
+    q.deadline_at = _query_deadline(order, now)
     q.followups_sent = 0
     _ask_vendor(q, number, steps.question(nxt, steps.lines_for(nxt, q.draft, lines)), session)
     session.flush()
@@ -1596,6 +1651,15 @@ def handle_vendor_text(sender: str, text: str, session: Session, now: datetime |
         else:
             x.status = m.Q_CLOSED
     if not mine:
+        from backend.app.portal_procurement.config import settings as portal
+
+        if portal.enabled and portal.rounds and portal.batch:
+            from backend.app.portal_procurement import rounds
+
+            try:
+                rounds.note_late_reply(number, text, session, now)  # kept for his record only
+            except Exception:  # noqa: BLE001 -- never blocks the message
+                logger.exception("Advance order: could not keep a late reply from %s.", number)
         return False
     # ONE NUMBER, SEVERAL VENDORS. The Founder's sheet has numbers shared by
     # two or three vendor names (919831799000 is listed for Anv Marketing,

@@ -129,8 +129,14 @@ Keep any waiting loop short and bounded.
 
 `backend/.env` on the server:
 - `PORTAL_PROCUREMENT_ENABLED=true`, **`PORTAL_PROCUREMENT_MODE=live` since 21 Nov 2026 ~17:20** (user's go-ahead) with a
-  vendor ALLOW-LIST in the pilot file: `"allowed_vendors": [72, 110, 145]` (Ark, Divine, S And S) -> only these are
-  asked and only Portal parts of their brands (FORD) are taken; everything else waits untouched. `skip_lines`
+  vendor ALLOW-LIST in the pilot file: **since 21 Nov ~20:00 `"allowed_vendors": [56, 72, 66, 65, 61]`** (user) =
+  Ark Vehicles (TOYOTA), Ark Automotive (FORD), Northend Distributors (MARUTI SUZUKI + ACCESSORIES), Frontier Cars
+  (VOLKSWAGEN, SKODA), Ess Aay Automotive (MAHINDRA) -> only these are asked and only Portal parts of their brands are
+  taken; everything else waits untouched. (Before: [72, 110, 145] Ark/Divine/S And S.) Same change:
+  `WHAPI_ACTIVE_GROUPS` + "CarTrends 🤝 Ark Group (Ford)" 120363228026339833 and "CarTrends 🤝 Frontier Cars"
+  120363171468375945, minus "Testing ark automotive" 120363432431007530; Ark contact 917355374975 (Shubham -- NOT Ark,
+  user) set inactive, Ark's number = 919999922732. Backups: `backups/env-before-vendors5-20261121`,
+  `uploads/portal_pilot.before-vendors5-20261121.json`. `skip_lines`
   [14245, 14323, 14477, 14501] (the first three: stale -- off the Portal since 18-19 Nov). Backups:
   `backups/env-before-live-20261121`, `portal_pilot.before-live-20261121.json`, `live-allowlist-20261121.tgz`.
   To go back to pilot: `PORTAL_PROCUREMENT_MODE=pilot` in backend/.env + `up -d --no-deps backend`.
@@ -312,6 +318,24 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   - **ETA after "nahi"** (`steps.LATER`): a part he does not have -> "Sir, abhi agar nahi hai to kab tak aa jayega?
     ETA bata do (kitne din mein)." Days -> available for the full qty with that TAT, then only MRP/discount asked;
     "nahi aayega"/"pata nahi" -> stays not available. Asked once, after the parts he has are finished.
+- **21 Nov: BATCH rule** (user; `PORTAL_PROCUREMENT_BATCH=true` default, replaces the round rules below for Portal orders):
+  - A round's parts (collected over 3 h) go out together to every vendor of the brand (groups only, as before).
+  - ONE reply window per batch: `PORTAL_PROCUREMENT_BATCH_REPLY_MINUTES` 180, **clock time** (19:00 batch ends 22:00),
+    ONE reminder at `..._BATCH_REMINDER_MINUTES` 90. Window = first question's time + 3 h (`order.dealer_portal["batch"]`).
+  - Winner (`rounds.decide_batch_line`): a good answer (≤7 days, ≥2% margin) wins once everyone asked has answered, or
+    at window end. Ranking unchanged: days band, then Vendors-page priority, then discount (user chose "keep days first").
+  - Window end (`rounds.batch_report`, in the engine tick): open questions closed; parts with no good answer (incl. over
+    7 days / under 2% -- user: "not fulfilled") -> ONE brand-wise message to Rajkumar 919217396458, Alam sir, Prateek
+    sir (`..._BATCH_ESCALATION_NUMBERS`): total, ✅ found (vendor, days, %), ❗ to arrange (why). Those lines ->
+    LINE_UNAVAILABLE (NOT escalated -- that would catch Prateek sir's messages), demand -> NO_VENDOR. Never asked again.
+  - Off in batch mode: 3 asks across rounds, 🔕 silent alert, Prateek sir C-choice, 6-hour AO escalation.
+  - Late reply (after the window): kept on the question (`draft["_late"]`, `rounds.note_late_reply`), counted as
+    "late" in the vendor record (dashboard column "Late"); never used to pick a winner.
+  - Checks [23]; [19]-[22] run with batch off (old rules).
+  - **Deployed 21 Nov ~19:47** (backup `batch-rule-20261121.tgz`, backend + frontend, container checks 207 ALL PASSED).
+    First report 19:51: order 44 DG9Z8100A (old AO-44) -> team message. **Alam sir's copy failed: WhatsApp 131049**
+    (outside the 24 h window the text goes in the marketing `purchase_bot_update` template, which Meta limits per
+    user). Rajkumar's/Prateek sir's: no failure logged. Order 45 (CS6Z13405C) window ends 21:04.
 
 ---
 

@@ -250,6 +250,7 @@ export function ActiveProcurementPage() {
                       <th>On time</th>
                       <th>Asked</th>
                       <th>Replied</th>
+                      <th title="Replied after the 3-hour batch window">Late</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -260,6 +261,7 @@ export function ActiveProcurementPage() {
                         <td>{pct(v.on_time_pct)}</td>
                         <td>{v.asked}</td>
                         <td>{pct(v.reply_pct)}</td>
+                        <td>{v.late || 0}</td>
                       </tr>
                     ))}
                   </tbody>

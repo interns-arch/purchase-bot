@@ -147,7 +147,7 @@ def _vendor_record(session: Session) -> dict[int, dict]:
     out: dict[int, dict] = {}
 
     def slot(vid):
-        return out.setdefault(vid, {"delivered": 0, "on_time": 0, "asked": 0, "replied": 0})
+        return out.setdefault(vid, {"delivered": 0, "on_time": 0, "asked": 0, "replied": 0, "late": 0})
 
     for vid, promised, received in session.execute(
         select(m.PortalAllocation.vendor_id, m.PortalAllocation.promised_date, m.PortalAllocation.received_at)
@@ -157,14 +157,16 @@ def _vendor_record(session: Session) -> dict[int, dict]:
         rec["delivered"] += 1
         if promised is None or received.date() <= promised:
             rec["on_time"] += 1
-    for vid, status in session.execute(
-        select(am.AdvanceVendorQuery.vendor_id, am.AdvanceVendorQuery.status)
+    for vid, status, draft in session.execute(
+        select(am.AdvanceVendorQuery.vendor_id, am.AdvanceVendorQuery.status, am.AdvanceVendorQuery.draft)
         .where(am.AdvanceVendorQuery.status.in_((am.Q_REPLIED, am.Q_TIMEOUT, am.Q_SENT)))
     ):
         rec = slot(vid)
         rec["asked"] += 1
         if status == am.Q_REPLIED:
             rec["replied"] += 1
+        elif isinstance(draft, dict) and draft.get("_late"):
+            rec["late"] += 1  # answered after his batch window (21 Nov 2026)
     return out
 
 
@@ -731,3 +733,232 @@ def escalate_stale(session: Session, now: datetime | None = None) -> int:
                     order.id, len(stale), settings.escalate_hours)
         count += len(stale)
     return count
+
+
+# ====================================================================== batch rule (User, 21 Nov 2026)
+# A round's parts are ONE batch: every vendor of the brand gets them at once
+# and has ONE window (`batch_reply_minutes`, clock time) with one reminder
+# halfway. A part with a good answer gets its winner (fewer days first, then
+# the Vendors-page order, then the bigger discount) as soon as every vendor
+# asked has answered, or at the end of the window. At the end, whatever has
+# no good answer goes to the purchase team in ONE brand-wise message, and the
+# vendors are not asked about that batch again. A reply after the window is
+# kept for the vendor record only.
+_BATCH = "batch"
+
+
+def batch_on() -> bool:
+    return bool(settings.rounds and settings.batch)
+
+
+def _batch(order: am.AdvanceOrder) -> dict:
+    return dict((order.dealer_portal or {}).get(_BATCH) or {})
+
+
+def batch_end(order: am.AdvanceOrder) -> datetime | None:
+    raw = _batch(order).get("end")
+    return datetime.fromisoformat(raw) if raw else None
+
+
+def start_batch(order: am.AdvanceOrder, session: Session, now: datetime) -> None:
+    """Fix the order's window once: from its first question (or now)."""
+    info = _batch(order)
+    if info.get("end"):
+        return
+    sent = [q.sent_at for q in session.execute(
+        select(am.AdvanceVendorQuery).where(am.AdvanceVendorQuery.advance_order_id == order.id)
+    ).scalars() if q.sent_at is not None]
+    start = min(sent) if sent else now
+    info["start"] = start.isoformat(timespec="seconds")
+    info["end"] = (start + timedelta(minutes=settings.batch_reply_minutes)).isoformat(timespec="seconds")
+    order.dealer_portal = {**(order.dealer_portal or {}), _BATCH: info}
+
+
+def decide_batch_line(line: am.AdvanceOrderLine, still_open: list, now: datetime, session: Session) -> bool:
+    """A good answer wins once nobody asked is still to answer, or the window
+    is over. No good answer: wait -- the end of the window reports it."""
+    from backend.app.advance_orders import quotes
+
+    demand = demand_for_line(line, session)
+    good = [s for s in quotes.ranked_for_line(line, session) if why_not(demand, s.quote) is None]
+    end = batch_end(line.order)
+    over = end is not None and now >= end
+    if good and (not still_open or over):
+        return quotes.apply_winner(line, session, allowed={s.quote.id for s in good})
+    return False
+
+
+_WHY = (
+    (re.compile(r"^(\d+) days \(over (\d+)\)$"), r"\2 din se zyada"),
+    (re.compile(r"^margin (.+)% \(under (.+)%\)$"), r"margin \1%, \2% se kam"),
+    (re.compile(r"^no days given$"), "din nahi bataye"),
+    (re.compile(r"^margin unknown.*$"), "MRP / discount nahi bataya"),
+)
+
+
+def _why_hi(reason: str) -> str:
+    for pattern, repl in _WHY:
+        if pattern.match(reason):
+            return pattern.sub(repl, reason)
+    return reason
+
+
+def _arrange_reason(line: am.AdvanceOrderLine, asked: bool, session: Session) -> str:
+    from backend.app.advance_orders import quotes
+
+    if not asked:
+        return "kisi vendor se poocha nahi ja saka (brand ka vendor / group nahi)"
+    ranked = quotes.ranked_for_line(line, session)
+    offers = [s for s in ranked if s.quote.available]
+    if offers:
+        demand = demand_for_line(line, session)
+        bits = []
+        for s in offers[:3]:
+            q = s.quote
+            days = f"{q.tat_days} din" if q.tat_days is not None else "din -"
+            disc = f"{_money(q.discount_pct)}%" if q.discount_pct is not None else "discount -"
+            why = why_not(demand, q)
+            bits.append(f"{_vendor(q.vendor_id, session)}: {days}, {disc}" + (f" — {_why_hi(why)}" if why else ""))
+        return "rule se bahar — " + "; ".join(bits)
+    if ranked:
+        return "sab vendors ne mana kiya"
+    return "kisi vendor ne reply nahi kiya"
+
+
+def _close_batch_questions(order: am.AdvanceOrder, session: Session, now: datetime) -> None:
+    from backend.app.advance_orders import service as engine
+
+    for q in session.execute(
+        select(am.AdvanceVendorQuery).where(am.AdvanceVendorQuery.advance_order_id == order.id)
+    ).scalars().all():
+        if q.status == am.Q_SENT and q.step and q.step not in ("pcs", "done") and q.draft:
+            engine._finish_steps(order, q, session, now)  # what he did say is kept
+        elif q.status == am.Q_SENT:
+            q.status = am.Q_TIMEOUT
+        elif q.status == am.Q_QUEUED:
+            q.status = am.Q_CLOSED
+        q.draft = {**(q.draft or {}), "_batch_closed": now.isoformat(timespec="seconds")}
+    session.flush()
+
+
+def batch_report(session: Session, now: datetime | None = None) -> int:
+    """End of a batch window: decide what can be decided, hand the rest to
+    the purchase team (one brand-wise message per batch). Returns parts
+    handed over."""
+    from backend.app.advance_orders import service as engine
+    from backend.app.portal_procurement.config import SOURCE
+
+    now = now or now_ist_naive()
+    due: list[am.AdvanceOrder] = []
+    for order in session.execute(
+        select(am.AdvanceOrder).where(am.AdvanceOrder.source == SOURCE).order_by(am.AdvanceOrder.id.desc()).limit(500)
+    ).scalars():
+        info = _batch(order)
+        if info.get("end") and not info.get("reported") and datetime.fromisoformat(info["end"]) <= now:
+            due.append(order)
+    if not due:
+        return 0
+    groups: dict[str, list[am.AdvanceOrder]] = {}
+    for order in due:
+        groups.setdefault(_batch(order)["start"][:16], []).append(order)
+    handed = 0
+    for start, orders in sorted(groups.items()):
+        filled: dict[str, list[str]] = {}
+        arrange: dict[str, list[str]] = {}
+        for order in orders:
+            _close_batch_questions(order, session, now)
+            if order.status == am.ASKING:
+                engine._resolve_lines(order, session, now)
+            asked_lines = set()
+            for q in session.execute(
+                select(am.AdvanceVendorQuery).where(am.AdvanceVendorQuery.advance_order_id == order.id,
+                                                    am.AdvanceVendorQuery.status != am.Q_FAILED)
+            ).scalars():
+                asked_lines.update(q.line_ids or [])
+            for line in order.lines:
+                brand = line.brand or "-"
+                if line.status in (am.LINE_AVAILABLE, am.LINE_ORDERED) and line.vendor_id:
+                    days = f"{line.tat_days} din" if line.tat_days is not None else "din -"
+                    disc = f"{_money(line.discount_pct)}%" if line.discount_pct is not None else "discount -"
+                    filled.setdefault(brand, []).append(
+                        f"{line.part_number} x{line.qty} — {_vendor(line.vendor_id, session)}, {days}, {disc}")
+                elif line.status in (am.LINE_ASKING, am.LINE_UNAVAILABLE, am.LINE_ESCALATED):
+                    # A split part's remainder was never asked on its own: its
+                    # vendors are the original line's.
+                    asked = line.id in asked_lines or any(
+                        other.part_number == line.part_number and other.id in asked_lines for other in order.lines)
+                    arrange.setdefault(brand, []).append(
+                        f"{line.part_number} x{line.qty} — {_arrange_reason(line, asked, session)}")
+                    # Not LINE_ESCALATED: that would make Prateek sir's next
+                    # message look like an answer to an AO escalation.
+                    line.status = am.LINE_UNAVAILABLE
+                    line.note = "batch: no good answer in 3 hours -- purchase team told to arrange it"
+                    handed += 1
+            engine._settle(order)
+            order.dealer_portal = {**(order.dealer_portal or {}),
+                                   _BATCH: {**_batch(order), "reported": now.isoformat(timespec="seconds")}}
+        session.flush()
+        if arrange:
+            _send_batch(batch_text(datetime.fromisoformat(start), filled, arrange))
+            logger.info("Portal batch %s: %d part(s) to arrange -- purchase team told.", start,
+                        sum(len(v) for v in arrange.values()))
+    return handed
+
+
+def batch_text(start: datetime, filled: dict[str, list[str]], arrange: dict[str, list[str]]) -> str:
+    n_fill = sum(len(v) for v in filled.values())
+    n_arr = sum(len(v) for v in arrange.values())
+    end = start + timedelta(minutes=settings.batch_reply_minutes)
+    out = [
+        f"📦 *Purchase batch — {start:%d %b, %H:%M}* (reply time {end:%H:%M} tak, poora ho gaya)",
+        f"Kul {n_fill + n_arr} part · ✅ {n_fill} mil gaye · ❗ {n_arr} arrange karne hain",
+    ]
+    for brand in sorted(set(filled) | set(arrange)):
+        got, need = filled.get(brand, []), arrange.get(brand, [])
+        out += ["", f"*{brand}* — {len(got) + len(need)} part"]
+        if got:
+            out.append("✅ Mil gaye (PO-MST ban raha hai):")
+            out += [f"  {i}. {row}" for i, row in enumerate(got, start=1)]
+        if need:
+            out.append("❗ Arrange karna hai:")
+            out += [f"  {i}. {row}" for i, row in enumerate(need, start=1)]
+    out += ["", "In parts ke liye ab vendors se nahi poocha jayega. Arrange karke Dealer Portal par allocate kar dijiye."]
+    return "\n".join(out)
+
+
+def batch_numbers() -> list[str]:
+    from backend.app.advance_orders.service import _normalize
+
+    return [n for n in dict.fromkeys(_normalize(x) for x in settings.batch_escalation_numbers) if n]
+
+
+def _send_batch(text: str) -> None:
+    from backend.app.advance_orders.service import _send_text
+
+    for number in batch_numbers():
+        try:
+            _send_text(number, text)
+        except Exception:  # noqa: BLE001 -- the next number is tried
+            logger.exception("Portal batch: message to %s failed.", number)
+
+
+def note_late_reply(number: str, text: str, session: Session, now: datetime | None = None) -> bool:
+    """A vendor answering after his batch closed: kept on that question for
+    his record (`_late`), never used to pick a winner. True when kept."""
+    now = now or now_ist_naive()
+    for q in session.execute(
+        select(am.AdvanceVendorQuery)
+        .where(am.AdvanceVendorQuery.status.in_((am.Q_TIMEOUT, am.Q_CLOSED)))
+        .order_by(am.AdvanceVendorQuery.id.desc())
+        .limit(300)
+    ).scalars():
+        draft = q.draft or {}
+        if number not in (q.numbers or []) or not draft.get("_batch_closed") or draft.get("_late"):
+            continue
+        if q.sent_at is None or q.sent_at < now - timedelta(hours=24):
+            continue
+        q.draft = {**draft, "_late": {"at": now.isoformat(timespec="seconds"), "text": (text or "")[:500]}}
+        session.flush()
+        logger.info("Portal batch: late reply from vendor %s kept for his record (question %s).", q.vendor_id, q.id)
+        return True
+    return False

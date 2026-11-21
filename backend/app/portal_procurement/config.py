@@ -95,6 +95,21 @@ class PortalProcurementSettings:
     # read again (one read covers all sends for this many seconds).
     recheck_seconds: int = max(0, _int("PORTAL_PROCUREMENT_RECHECK_SECONDS", 120))
 
+    # BATCH rule (User, 21 Nov 2026). Parts collected over a round's 3 hours go
+    # out together to every vendor of their brand; vendors get ONE 3-hour
+    # window (clock time) with one reminder halfway. At the end: parts with a
+    # good answer -> winner -> PO-MST; the rest -> ONE brand-wise message to
+    # the purchase team, and vendors are not asked about that batch again.
+    # Late replies are kept for the vendor record only.
+    batch: bool = _flag("PORTAL_PROCUREMENT_BATCH", "true")
+    batch_reply_minutes: int = max(30, _int("PORTAL_PROCUREMENT_BATCH_REPLY_MINUTES", 180))
+    batch_reminder_minutes: int = max(0, _int("PORTAL_PROCUREMENT_BATCH_REMINDER_MINUTES", 90))
+    # Rajkumar, Alam sir, Prateek sir.
+    batch_escalation_numbers: list[str] = [
+        n.strip() for n in (os.environ.get("PORTAL_PROCUREMENT_BATCH_ESCALATION_NUMBERS")
+                            or "919217396458,919217030408,919999492550").split(",") if n.strip()
+    ]
+
     def allowed_vendors(self) -> set[int]:
         """LIVE mode's vendor allow-list (user, 21 Nov 2026: "remove pilot mode
         but restrict to limited vendors"): `"allowed_vendors": [72, 110, 145]`

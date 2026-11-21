@@ -996,6 +996,7 @@ def main() -> int:
 
     PRATEEK = "919000000077"
     portal_settings.rounds = True
+    portal_settings.batch = False  # [19]-[22]: the round rules before the batch rule; [23] checks it
     portal_settings.mode = "live"
     portal_settings.min_margin_percent = 2
     portal_settings.round_hours, portal_settings.max_asks, portal_settings.max_tat_days = 3, 3, 7
@@ -1526,6 +1527,74 @@ def main() -> int:
           posts(GB, "R22H07") == 1 and demand(12907).state == m.CLOSED)
     allow_file.write_text(json.dumps({}), encoding="utf-8")
     cfg.ask_mode = "one"
+    portal_settings.rounds = False
+
+    # ------------------------------------------------------------------ 23
+    print("\n[23] batch rule: one 3-hour window, one reminder, winner or brand-wise escalation (21 Nov 2026)")
+    RAJ, ALAM = "919000000061", "919000000062"
+    portal_settings.batch = True
+    portal_settings.rounds = True
+    portal_settings.mode = "live"
+    portal_settings.batch_reply_minutes, portal_settings.batch_reminder_minutes = 180, 90
+    portal_settings.batch_escalation_numbers = [RAJ, ALAM, PRATEEK]
+    allow_file.write_text(json.dumps({"skip_lines": [12902, 12903, 12905]}), encoding="utf-8")  # [22]'s leftovers
+    cfg.ask_mode = "one"
+    with get_session() as s:   # earlier sections' open orders close out of the way first
+        engine.tick(s, datetime(2026, 12, 11, 9, 0))
+
+    def to_team() -> list[tuple[str, str]]:
+        return [(to, b) for to, b in sent if to in (RAJ, ALAM, PRATEEK) and "R23" in b]
+
+    clock["now"] = datetime(2026, 12, 11, 10, 5)
+    group_posts.clear()
+    prateek_mark = len(to_prateek())
+    for sol, part, brand in ((12951, "R23H01", "HYUNDAI"), (12952, "R23T01", "TATA")):
+        cust(sol, part, brand=brand)
+        portal.rows[sol]["order_date"] = clock["now"].date().isoformat()
+    run_round()
+    check("batch: Hyundai part to Alpha + Beta groups, Tata part to the Tata group",
+          posts(GA, "R23H01") == 1 and posts(GB, "R23H01") == 1 and posts(GT, "R23T01") == 1)
+    reply("919100000001", "haan 2 din, 15%")     # Alpha: good
+    reply("919100000009", "haan 10 din, 12%")    # Tata: over 7 days
+    settle(1)
+    check("...a good answer waits while another vendor may still answer", payload_for(12951) is None)
+    clock["now"] = datetime(2026, 12, 11, 11, 40)  # +95 min
+    settle(1)
+    check("...ONE reminder at 1.5 hours, only to the vendor who has not answered",
+          posts(GB, "R23H01") == 2 and posts(GA, "R23H01") == 1 and posts(GT, "R23T01") == 1)
+    clock["now"] = datetime(2026, 12, 11, 12, 50)
+    settle(1)
+    check("...no second reminder", posts(GB, "R23H01") == 2)
+    check("...no 'silent vendor' message and nothing to the team before 3 hours",
+          not to_team() and not any("baar poochne" in b for b in to_prateek()[prateek_mark:]))
+    clock["now"] = datetime(2026, 12, 11, 13, 6)   # window (10:05 + 3 h) over
+    settle(2)
+    p951 = payload_for(12951) or {}
+    check("after 3 hours: the good answer wins -> PO-MST with Alpha, 2 days",
+          p951.get("supplier_dealer_id") == 27 and p951.get("quoted_tat_days") == 2)
+    team = to_team()
+    check("...the rest goes to Rajkumar, Alam sir and Prateek sir, one message each",
+          sorted(to for to, _ in team) == sorted([RAJ, ALAM, PRATEEK]))
+    text = team[0][1] if team else ""
+    check("...brand-wise: total, what was found, what to arrange (with why)",
+          "Purchase batch" in text and "Kul 2 part" in text and "*HYUNDAI*" in text and "*TATA*" in text
+          and "✅ Mil gaye" in text and "R23H01 x1 — Alpha Motors, 2 din, 15%" in text
+          and "❗ Arrange karna hai" in text and "R23T01 x1" in text and "Tata Only: 10 din, 12% — 7 din se zyada" in text)
+    check("...and no PO number reaches a vendor group", not any("PO-" in b for _c, b in group_posts))
+    clock["now"] = datetime(2026, 12, 11, 16, 5)
+    run_round()
+    settle(2)
+    check("after the escalation the batch parts are not asked again",
+          posts(GT, "R23T01") == 1 and posts(GB, "R23H01") == 2 and len(to_team()) == 3)
+    check("...the Portal line is marked 'no vendor'", demand(12952).state == m.NO_VENDOR)
+    reply("919100000002", "haan 1 din, 20%")       # Beta answers late
+    with get_session() as s:
+        beta_id = s.execute(select(Vendor.id).where(Vendor.vendor_code == "CT_B")).scalar_one()
+        late = rounds._vendor_record(s).get(beta_id, {}).get("late", 0)
+    check("a late reply is kept for the vendor record only", late >= 1
+          and (payload_for(12951) or {}).get("supplier_dealer_id") == 27)
+    print("\n--- team message ---\n" + text + "\n--------------------")
+    portal_settings.batch = False
     portal_settings.rounds = False
 
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")

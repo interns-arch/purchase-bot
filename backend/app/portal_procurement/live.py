@@ -139,6 +139,7 @@ def live(session: Session) -> dict:
             "vendor": names.get(vid, str(vid)), "delivered": rec["delivered"],
             "on_time_pct": round(100 * rec["on_time"] / rec["delivered"]) if rec["delivered"] else None,
             "asked": rec["asked"], "reply_pct": round(100 * rec["replied"] / rec["asked"]) if rec["asked"] else None,
+            "late": rec.get("late", 0),
         })
     vendors_out.sort(key=lambda v: (-(v["delivered"]), -(v["asked"])))
 
