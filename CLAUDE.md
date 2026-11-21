@@ -245,6 +245,32 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
   picks the Portal winner among equally fast vendors (`rounds.fill_ties`: `priority_rank = vendor_priority`), ahead of a
   bigger discount; equal positions still go by discount. Page text updated. Checks [21] "dashboard order".
   Ford pilot order then: Ark #2, Divine #3, S And S #4.
+- **21 Nov: Portal vendor-brand MAPPING and DISCOUNT are two separate records** (Portal team's guide
+  `Desktop\THIRD_PARTY_VENDOR_BRAND_MAPPING_INTEGRATION.md`):
+  - **Mapping** (who appears for a brand; decides Portal vendor options / PO-MST): `GET /masterpurchase/vendor-mappings`
+    (504 rows: mapping_id, dealer_id, dealer_name, vendor_group_id, vendor_group_name, brand), `POST .../vendor-mappings/upload`
+    CSV `Dealer Name,Brand`. Brand must be the EXACT master brand (`GET /parts/brands`), e.g. `HARISONS` not `HARISON`.
+  - **Discount**: `GET /masterpurchase/vendor-brand-discounts`, `.../export`, `.../template`, `POST .../upload` CSV
+    `Vendor Name,Brand,Discount%` (UPSERT by dealer + brand; also sets stock.discount). A discount alone does NOT map.
+  - Vendor create can take `"brands": [...]` once the Portal's enhanced contract is live (returns dealer_id + brand_mappings).
+  - Partap Singh: mapping 923 (Harisons Group, 99) and discount HARISONS 40.32 exist; bot's vendor_brands row 117 renamed
+    HARISON -> HARISONS. My wrong discount row **HARISON (id 390) is still on the Portal -- a Portal admin must remove it**
+    (no delete API). TROB: mapping 922 MAHINDRA exists, no discount yet. Backups: `backups/vendor_brand_discounts.before-*-20261121.csv`,
+    `backups/vendor_mappings.before-psa-20261121.json`.
+- **21 Nov, deployed** (backups `vendor-brands-20261121.tgz`, `vendor_mappings/vendor_brand_discounts.before-brands-20261121.json`;
+  container checks ALL PASSED; backfill applied: Portal mappings 504 -> 507 (Om Sai Ram FORD, HPP CASTROL, UMI AFTERMARKET),
+  discounts 131 -> 132 (Om Sai Ram FORD 8%), nothing removed; bot list + HPP CASTROL, UMI AFTERMARKET, TROB MAHINDRA).
+  Live Portal brand names: MARUTI (bot keeps MARUTI SUZUKI internally), LIQUIMOLI (NIRMAL's "Liqui Moly" left unmapped --
+  the backfill maps exact/alias/plural only; fuzzy needs a person). Vendor brands on creation:
+  - Form: "Brands supplied" is checked against the Portal brand list (`portal_brands.cached_master`, 6 h cache) in
+    `conversation._check_brands`: a misspelt/alias/unknown brand is shown with the Portal's name ("harison → HARISONS")
+    and saved only after OK (`answers["_brand_check"]`, offered via the question's `suggest`) or a corrected reply.
+    Portal list unreadable -> as typed. Discount is now asked RIGHT AFTER brands, naming them, as plain numbers in
+    order ("12" / "12, 10"; "Ford - 8" still works). Changing brands drops old discounts. Question numbers shifted by one.
+  - Creation: `portal_brands.apply_for_vendor` -> Portal mapping upload, then discount upload, each read back, then the
+    bot's vendor_brands (Portal names, end of the brand order). Approver message gets "Brands: ...".
+  - Backfill `backend/scripts/map_vendor_brands.py` (dry run; `--apply`). Live dry run: map Om Sai Ram FORD (+8%),
+    HPP CASTROL, UMI AFTERMARKET; bot list + TROB MAHINDRA. `check_vendor_followups` has 5 failures on HEAD too.
 
 ---
 

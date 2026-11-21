@@ -188,7 +188,8 @@ def main() -> int:
             whatsapp_number="919289015770", vendor_name="HINDUSTAN PETROLEUM PRODUCT AND LUBRICANT",
             gstin="07AGEPG4675R1ZR", status=m.REG_AWAITING_APPROVAL,
             answers={**old, "vendor_name": "HINDUSTAN PETROLEUM PRODUCT AND LUBRICANT", "gstin": "07AGEPG4675R1ZR",
-                     "mobile": "9811111111", "brand_discounts": []},
+                     "mobile": "9811111111", "brands_supplied": "ford, harison",
+                     "brand_discounts": [{"brand": "FORD", "discount_pct": "9"}]},
         )
         s.add(r)
         s.flush()
@@ -220,12 +221,31 @@ def main() -> int:
         def json(self):
             return self._b
 
-    def post(url, json=None, headers=None, timeout=None):
-        calls.append((url, json))
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    portal_maps: list[dict] = []
+    portal_discs: list[dict] = []
+
+    def post(url, json=None, headers=None, timeout=None, files=None):
+        calls.append((url, json if files is None else {"csv": files["file"][1].decode()}))
         if url.endswith("/auth/login"):
             return _R(200, {"access_token": "tok"})
         if url.endswith("/users/vendor/create"):
             return _R(200, {"account_id": 8701})
+        # 21 Nov 2026: the Portal's mapping and discount uploads (CSV)
+        if url.endswith("/masterpurchase/vendor-mappings/upload"):
+            rows = files["file"][1].decode().strip().splitlines()[1:]
+            for line in rows:
+                name, brand = line.split(",")
+                portal_maps.append({"dealer_id": 9210, "dealer_name": name, "brand": brand, "vendor_group_id": 7})
+            return _R(200, {"status": "success", "inserted_rows": len(rows), "failed_rows": 0, "errors": []})
+        if url.endswith("/masterpurchase/vendor-brand-discounts/upload"):
+            for line in files["file"][1].decode().strip().splitlines()[1:]:
+                name, brand, pct = line.split(",")
+                portal_discs.append({"dealer_id": 9210, "vendor_name": name, "brand": brand, "discount_percent": float(pct)})
+            return _R(200, {"status": "success", "successful": 1, "failed": 0, "failed_rows": []})
         return _R(200, {})
 
     api.httpx.post = post
@@ -236,6 +256,12 @@ def main() -> int:
         made = next((b for u, b in calls if u.endswith("/users/vendor/create")), None)
         if made and "/users/" in url:
             return _R(200, [{"username": made["username"], "dealer_id": 9210, "user_id": 2274}])
+        if url.endswith("/parts/brands"):
+            return _R(200, ["FORD", "HARISONS", "MAHINDRA", "MARUTI SUZUKI"])
+        if url.endswith("/masterpurchase/vendor-mappings"):
+            return _R(200, list(portal_maps))
+        if url.endswith("/masterpurchase/vendor-brand-discounts"):
+            return _R(200, list(portal_discs))
         return _R(200, [])
 
     api.httpx.get = get
@@ -267,6 +293,25 @@ def main() -> int:
           bool(entry.get("username")) and bool(entry.get("password")) and entry.get("enabled") is True
           and entry.get("vendors") and entry["vendors"][0].startswith("CT_") and entry.get("push_stock_after"))
     dps.accounts_file = None
+    # 21 Nov 2026: brands -> Portal mapping + discount + the bot's list
+    check("Portal mapping uploaded for FORD and HARISONS (exact master name, not 'harison')",
+          {r["brand"] for r in portal_maps} == {"FORD", "HARISONS"}
+          and all(r["dealer_name"] == "HINDUSTAN PETROLEUM PRODUCT AND LUBRICANT" for r in portal_maps))
+    check("discount uploaded only where he gave one (FORD 9%)",
+          [(r["brand"], r["discount_percent"]) for r in portal_discs] == [("FORD", 9.0)])
+    from sqlalchemy import select
+
+    with get_session() as s:
+        from backend.app.advance_orders import models as _am
+
+        mine = {b.brand: (b.discount_type, b.discount_pct) for b in s.execute(
+            select(_am.VendorBrand).where(_am.VendorBrand.vendor_id == s.get(m.VendorRegistrationRequest, old_id).vendor_id)).scalars()}
+    check("bot's list: FORD at 9% (standing), HARISONS asked each time",
+          set(mine) == {"FORD", "HARISONS"} and mine["FORD"][0] == "percent" and float(mine["FORD"][1]) == 9.0
+          and mine["HARISONS"][0] == "rate")
+    mapping_calls = [b for u, b in calls if u.endswith("/vendor-mappings/upload")]
+    check("mapping uploaded before the discount", bool(mapping_calls)
+          and [u for u, _b in calls if "upload" in u][0].endswith("/vendor-mappings/upload"))
     check("Portal vendor/create got also_add_as_customer=true (the Haan from the dashboard)",
           create is not None and create["also_add_as_customer"] is True and create["gst_no"] == "07AGEPG4675R1ZR")
     row = web.get(f"/api/vendor-registrations/{old_id}").json()

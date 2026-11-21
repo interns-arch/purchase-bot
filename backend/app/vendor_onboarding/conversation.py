@@ -118,7 +118,18 @@ def _context(request: m.VendorRegistrationRequest) -> dict:
 
 def _prompt(request: m.VendorRegistrationRequest, question: Question) -> str:
     position = index_of(question.key) + 1
-    lines = [f"({position}/{len(QUESTIONS)}) {question.prompt}"]
+    prompt = question.prompt
+    if question.key == "brand_discounts":
+        # 21 Nov 2026: the brands by name, the discount as a plain number.
+        from backend.app.vendor_onboarding.questions import form_brands
+
+        brands = form_brands(request.answers or {})
+        if len(brands) == 1:
+            prompt = f"*{brands[0]}* pe aap humein kitna discount denge? Sirf number likhiye (%), jaise 12"
+        elif brands:
+            prompt = (f"In brands pe discount kitna denge? Sirf numbers, isi order mein (%):\n{', '.join(brands)}\n"
+                      f"Jaise: {', '.join(str(10 + i) for i in range(len(brands)))}")
+    lines = [f"({position}/{len(QUESTIONS)}) {prompt}"]
     if question.choices:
         lines.extend(f"{i}. {option}" for i, option in enumerate(question.choices(), start=1))
     suggestion = question.suggest(request.answers or {}, _context(request)) if question.suggest else None
@@ -224,12 +235,54 @@ def start(number: str, session: Session, trigger_text: str = "") -> list[str]:
 
 def _store(request: m.VendorRegistrationRequest, key: str, value) -> None:
     answers = dict(request.answers or {})
+    if key == "brands_supplied" and answers.get(key) not in (None, value) and "brand_discounts" in answers:
+        answers.pop("brand_discounts")  # discounts were for the old brands: asked again
     answers[key] = value
     request.answers = answers  # reassign so the JSON column is marked dirty
     if key == "vendor_name":
         request.vendor_name = value
     if key == "gstin":
         request.gstin = value
+
+
+def _set_answer(request: m.VendorRegistrationRequest, key: str, value) -> None:
+    answers = dict(request.answers or {})
+    if value is None:
+        answers.pop(key, None)
+    else:
+        answers[key] = value
+    request.answers = answers  # reassign so the JSON column is marked dirty
+
+
+def _check_brands(request: m.VendorRegistrationRequest, typed: str) -> tuple[str | None, str | None]:
+    """(brands to save, None) or (None, a question for the vendor). 21 Nov 2026:
+    every brand is checked against the Dealer Portal's brand list. A name the
+    Portal spells differently ("harison" -> HARISONS) or does not have is
+    shown, and the vendor answers OK (the suggestion) or types it again.
+    The Portal list unreadable -> the brands are taken as typed, as before."""
+    from backend.app.vendor_onboarding import portal_brands
+
+    pending = (request.answers or {}).get("_brand_check") or {}
+    if pending.get("suggested") and " ".join(typed.split()).upper() == pending["suggested"].upper():
+        _set_answer(request, "_brand_check", None)  # he said OK to our spelling
+        return pending["suggested"], None
+    master = portal_brands.cached_master()
+    if not master:
+        return typed, None
+    names, changes, unknown = portal_brands.check_typed(typed, master)
+    if not changes and not unknown:
+        _set_answer(request, "_brand_check", None)
+        return names, None
+    _set_answer(request, "_brand_check", {"typed": typed, "suggested": names})
+    lines = []
+    if changes:
+        lines.append("Dealer Portal par brand ka sahi naam:")
+        lines.extend(f"• {t} → *{m_}*" for t, m_ in changes)
+    if unknown:
+        lines.append("Dealer Portal ki brand list mein nahi mila:")
+        lines.extend(f"• *{u}*" for u in unknown)
+    lines.append(f"\nSahi hai? *OK* likhiye — aise save hoga: *{names}*\nYa brand ka sahi naam dobara likhiye.")
+    return None, "\n".join(lines)
 
 
 def _check_gstin(request: m.VendorRegistrationRequest, gstin: str, session: Session) -> str | None:
@@ -316,6 +369,11 @@ def answer(number: str, text: str, session: Session) -> list[str] | None:
     value, error = question.validate(reply, request.answers or {})
     if error:
         return [error]
+    if question.key == "brands_supplied":
+        value, problem = _check_brands(request, value)
+        if problem:
+            session.flush()
+            return [problem]
     if question.key == "gstin":
         problem = _check_gstin(request, value, session)
         if problem:
@@ -432,6 +490,10 @@ def _apply_value(request: m.VendorRegistrationRequest, key: str, raw, session: S
     value, error = question.validate(str(raw), request.answers or {})
     if error:
         return error
+    if key == "brands_supplied":
+        value, problem = _check_brands(request, value)
+        if problem:
+            return problem
     if key == "gstin":
         previous = (request.answers or {}).get("gstin")
         problem = _check_gstin(request, value, session)

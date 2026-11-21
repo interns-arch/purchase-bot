@@ -52,7 +52,6 @@ def _vendor_whatsapp(request: m.VendorRegistrationRequest) -> str:
 
 
 def _ensure_procurehub_vendor(request: m.VendorRegistrationRequest, session: Session):
-    from backend.app.advance_orders.models import DISC_PERCENT, VendorBrand
     from backend.app.integrations.whatsapp import registry
     from core.models import Vendor
     from core.services import vendor_code_service, vendor_service
@@ -71,19 +70,9 @@ def _ensure_procurehub_vendor(request: m.VendorRegistrationRequest, session: Ses
     vendor.payment_terms = _terms_text(answers) or vendor.payment_terms
     request.vendor_id = vendor.id
 
-    transport = " / ".join(x for x in (answers.get("dispatch_mode"), answers.get("freight_terms")) if x) or None
-    for row in answers.get("brand_discounts") or []:
-        brand = row["brand"].strip().upper()
-        terms = session.execute(
-            select(VendorBrand).where(VendorBrand.brand == brand, VendorBrand.vendor_id == vendor.id)
-        ).scalar_one_or_none()
-        if terms is None:
-            terms = VendorBrand(brand=brand, vendor_id=vendor.id)
-            session.add(terms)
-        terms.discount_type = DISC_PERCENT
-        terms.discount_pct = Decimal(str(row["discount_pct"]))
-        terms.transport = transport
-        terms.payment_terms = _terms_text(answers)
+    # Brands (and their discounts) are saved after the Portal account is
+    # made -- with the Portal's exact brand names: portal_brands.apply_for_vendor
+    # (21 Nov 2026; before, only brands WITH a discount were kept).
 
     vendor_number = _vendor_whatsapp(request)
     try:
@@ -194,6 +183,7 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
         return False, f"ProcureHub: {exc}"
 
     api_note = None
+    result = None
     if not request.dealer_portal_ref or request.dealer_portal_ref == "DRY-RUN":
         result = dealer_portal_vendor.create_vendor(
             request.answers or {}, vendor_code=vendor.vendor_code, gst=request.gst_data
@@ -221,6 +211,18 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
     request.next_create_retry_at = None
     request.status = m.REG_CREATED
     session.flush()
+    # 21 Nov 2026: every brand from the form -> Portal mapping + discount (when
+    # the bot made the Portal account) and the bot's own brand list.
+    brand_lines: list[str] = []
+    try:
+        from backend.app.vendor_onboarding import portal_brands
+
+        made = getattr(result, "dealer_id", None)  # only a Portal account the bot made just now
+        brand_lines = portal_brands.apply_for_vendor(
+            vendor, request.answers or {}, made, (request.answers or {}).get("vendor_name"), session)
+        session.flush()
+    except Exception:  # noqa: BLE001 -- the vendor is created; brands can be fixed on the Vendors page
+        logger.exception("%s: brand mapping step failed.", code)
     # Full details to Shubham: "Create vendor on Tez ERP" (once; never raises).
     from backend.app.vendor_onboarding import tez
 
@@ -255,4 +257,5 @@ def create_vendor_from_request(request: m.VendorRegistrationRequest, session: Se
 
     vendor_group.create_for_vendor_in_background(vendor.vendor_code, vendor.name, _vendor_whatsapp(request))
     logger.info("%s: vendor %s created (%s, %s).", code, vendor.name, vendor.vendor_code, request.dealer_portal_ref)
-    return True, f"Created as {vendor.vendor_code}. {portal_note}"
+    brands_note = ("\nBrands: " + "; ".join(brand_lines)) if brand_lines else ""
+    return True, f"Created as {vendor.vendor_code}. {portal_note}{brands_note}"

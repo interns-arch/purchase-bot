@@ -64,6 +64,44 @@ def _mobile_from_number(_answers: dict, ctx: dict) -> str | None:
     return value
 
 
+def _brand_suggestion(answers: dict) -> str | None:
+    """The Portal's spelling of the brands just typed, offered with OK."""
+    return (answers.get("_brand_check") or {}).get("suggested")
+
+
+def form_brands(answers: dict) -> list[str]:
+    """The brands from "Brands supplied", in the order given."""
+    from backend.app.vendor_onboarding.portal_brands import split_brands
+
+    return [b.upper() for b in split_brands(answers.get("brands_supplied"))]
+
+
+def _brand_discount_answer(value: str, answers: dict):
+    """'12' (one brand), '12, 10' (in the brands' order), or the older
+    'Maruti - 12' lines -> [{"brand": ..., "discount_pct": ...}]."""
+    import re
+
+    brands = form_brands(answers)
+    text = (value or "").strip()
+    if brands and not re.search(r"[A-Za-z]{2,}", text):
+        numbers = re.findall(r"\d+(?:\.\d+)?", text)
+        if not numbers:
+            return None, "Discount number mein likhiye, jaise 12. Nahi hai to SKIP."
+        if len(numbers) == 1 and len(brands) > 1:
+            return None, (f"{len(brands)} brands hain ({', '.join(brands)}) — har brand ka discount isi order mein "
+                          f"likhiye, jaise: {', '.join(['12'] * len(brands))}")
+        if len(numbers) != len(brands):
+            return None, f"{len(brands)} brands ke liye {len(brands)} numbers likhiye ({', '.join(brands)})."
+        rows = []
+        for brand, number in zip(brands, numbers):
+            pct, error = v.percent(number)
+            if error:
+                return None, f"{brand}: {error}"
+            rows.append({"brand": brand, "discount_pct": str(pct)})
+        return rows, None
+    return v.brand_discounts(value)
+
+
 QUESTIONS: list[Question] = [
     # Founder, 28 Oct: only these eight are a must -- GSTIN, name, mobile, brands
     # and the bank account -- and they come first, so a vendor who has given
@@ -84,6 +122,16 @@ QUESTIONS: list[Question] = [
         "brands_supplied", "Brands supplied",
         "Which brands do you supply? (e.g. Maruti, Hyundai, Bosch)",
         lambda value, _a: v.text(value),
+        # 21 Nov 2026: checked against the Dealer Portal's brand list
+        # (conversation._apply_value); a corrected name is offered with OK.
+        suggest=lambda answers, _ctx: _brand_suggestion(answers),
+    ),
+    Question(
+        # Right after the brands, as plain numbers in the same order
+        # (21 Nov 2026). The prompt names the brands (conversation._prompt).
+        "brand_discounts", "Brand-wise discount",
+        "Discount you give us on these brands, as a number (%)? e.g. 12",
+        lambda value, answers: _brand_discount_answer(value, answers), optional=True,
     ),
     Question(
         "account_holder", "Account holder name", "Bank account holder name?",
@@ -131,11 +179,6 @@ QUESTIONS: list[Question] = [
     Question(
         "address", "Address", "Full business address?",
         lambda value, _a: v.text(value, min_length=10), suggest=_gst_address, optional=True,
-    ),
-    Question(
-        "brand_discounts", "Brand-wise discount",
-        "Brand-wise discount you give us. One brand per line, e.g.\nMaruti - 12\nHyundai - 10",
-        lambda value, _a: v.brand_discounts(value), optional=True,
     ),
     Question(
         "credit_days", "Credit period (days)", "Credit period you give us, in days? (e.g. 30)",
