@@ -271,6 +271,20 @@ Shubham 917355374975 (PO PDF, Ark contact) · NK Jain sir 9810238966 (approver) 
     bot's vendor_brands (Portal names, end of the brand order). Approver message gets "Brands: ...".
   - Backfill `backend/scripts/map_vendor_brands.py` (dry run; `--apply`). Live dry run: map Om Sai Ram FORD (+8%),
     HPP CASTROL, UMI AFTERMARKET; bot list + TROB MAHINDRA. `check_vendor_followups` has 5 failures on HEAD too.
+- **21 Nov, deployed** (backup `dup-checks-escalation-fix-20261121.tgz`, checks ALL PASSED incl. container): **bug fix** --
+  with ONE escalation waiting (AO-44, from the 6-hour rule), `escalation.handle_reply` took EVERY message from Prateek
+  sir: his "Hi" and his VR-27 Approve tap (13:32) got "AO-44: samajh nahi aaya" and VR-27 stayed waiting. Now it takes
+  only an "AO-n" message or a clear answer, never `_OTHER_DECISION` (VRBTN / APPROVE / REJECT / PASS / FAIL ...).
+  VR-27 ORAFOL INDIA was then processed with his tap (`approvals.handle_reply(..., "VRBTN APPROVE 27")`) at 16:15:
+  CT_OIP, dealer 9325, stock login OIP; brand "pent protection" is not a Portal brand (not mapped -- ask the real brand).
+- **21 Nov, deployed with the fix above: duplicate mobile / email REFUSED in the vendor form** (user: refuse, agent must enter another).
+  `vendor_onboarding/portal_directory.py` keeps who owns which phone/email on the Portal (`GET /users/` phone+email,
+  `GET /dealers/` dealer_contact), refreshed every 6 h (scheduler `portal_directory_refresh`, first run 2 min after
+  start). `conversation._check_contact`: another registration (waiting/created) or a Portal owner -> refused with who.
+  Re-checked at CONFIRM (`submit`): a duplicate sends the agent back to that field. GSTIN: bot duplicate check, then the
+  GST portal (paid; not repeated at CONFIRM). **The Portal's lists have NO GST number** -> the GSTIN cannot be checked on
+  the Portal (the creation-time `find_existing` GST match never fires; only its mobile match works). Asked of the
+  Portal team: a dealer search by GSTIN. Check: `check_vendor_brand_questions.py` [8]-[9].
 
 ---
 

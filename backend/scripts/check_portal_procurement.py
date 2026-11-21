@@ -1359,6 +1359,12 @@ def main() -> int:
     ao5 = f"AO-{demand(12805).advance_order_id}"
     check("6 hours: escalated with the new-vendor option",
           any(ao5 in b and "naya vendor" in b and "R21A05" in b for b in to_prateek()))
+    # 21 Nov 2026: with ONE escalation waiting, Prateek sir's vendor-approval
+    # tap and his "Hi" were taken here ("samajh nahi aaya") and VR-27 was lost.
+    with get_session() as s:
+        claimed = {t: esc.handle_reply(PRATEEK, t, s) for t in ("VRBTN APPROVE 27", "APPROVE VR-27", "Approved", "Hi")}
+    check("one escalation waiting: vendor-approval tap / APPROVE VR / 'Approved' / 'Hi' are NOT taken",
+          not any(claimed.values()))
     sent_before = len(sent)
     with get_session() as s:
         check("'AO vendor <name> <mobile>' is understood", esc.handle_reply(PRATEEK, f"{ao5} vendor Naya Motors 9811122233", s))

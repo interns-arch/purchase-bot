@@ -137,6 +137,69 @@ def main() -> int:
         conversation._store(r, "brands_supplied", "MAHINDRA")
         check("old FORD discount removed", "brand_discounts" not in (r.answers or {}))
 
+    print("\n[8] mobile / email already on the Dealer Portal or in another registration -> refused")
+    from backend.app.vendor_onboarding import portal_directory as pd
+
+    def at_step(step: str, extra: dict | None = None) -> None:
+        with get_session() as s:
+            for old in s.query(m.VendorRegistrationRequest).filter(m.VendorRegistrationRequest.whatsapp_number == number):
+                old.status = m.REG_CANCELLED
+            s.add(m.VendorRegistrationRequest(
+                whatsapp_number=number, current_step=step, status=m.REG_DRAFT,
+                answers={"gstin": "06AACCT1515E1ZV", "vendor_name": "TEST AUTO", **(extra or {})}))
+
+    check("before the first Portal read: no Portal check (None)", pd.phone_owner("9811111111") is None)
+    pd._current = pd.build(
+        [{"display_name": "Seema", "phone": "+91 92890 15770", "email": "seema@cartrends.net", "dealer_id": None}],
+        [{"dealer_name": "TROB AUTO INDIA PVT. LTD", "dealer_contact": "7388476911", "dealer_id": 9310}])
+    at_step("mobile")
+    reply = say("7388476911")
+    a, step = answers()
+    check("Portal dealer's mobile -> refused, names the dealer", "TROB AUTO INDIA" in reply and "doosra" in reply
+          and "mobile" not in a and step == "mobile")
+    reply = say("9289015770")
+    check("Portal login's mobile -> refused", "Seema" in reply and "mobile" not in answers()[0])
+    say("9811000001")
+    a, step = answers()
+    check("a new mobile -> accepted", a.get("mobile") == "9811000001" and step != "mobile")
+
+    with get_session() as s:
+        s.add(m.VendorRegistrationRequest(whatsapp_number="919100000888", status=m.REG_AWAITING_APPROVAL,
+                                          vendor_name="OTHER PARTS", gstin="07AAAAA0000A1Z5",
+                                          answers={"mobile": "9811000002", "email": "other@parts.in"}))
+    at_step("mobile")
+    reply = say("9811000002")
+    check("mobile of a registration waiting for approval -> refused", "OTHER PARTS" in reply and "approval" in reply
+          and "mobile" not in answers()[0])
+
+    at_step("email", {"mobile": "9811000003"})
+    reply = say("Seema@CarTrends.net")
+    check("Portal login's email (any case) -> refused", "Seema" in reply and "email" not in answers()[0])
+    reply = say("other@parts.in")
+    check("email of another registration -> refused", "OTHER PARTS" in reply and "email" not in answers()[0])
+    say("new@vendor.in")
+    check("a new email -> accepted", answers()[0].get("email") == "new@vendor.in")
+
+    print("\n[9] a duplicate that appears before CONFIRM sends the agent back to that field")
+    from backend.app.vendor_onboarding.questions import QUESTIONS
+
+    full = {q.key: None for q in QUESTIONS if q.optional}
+    full.update({"gstin": "06AACCT1515E1ZV", "vendor_name": "TEST AUTO", "mobile": "9811000004",
+                 "brands_supplied": "FORD", "account_holder": "TEST AUTO", "bank_name": "HDFC",
+                 "account_number": "50100123456789", "ifsc": "HDFC0001234", "also_customer": "Nahi"})
+    with get_session() as s:
+        for old in s.query(m.VendorRegistrationRequest).filter(m.VendorRegistrationRequest.whatsapp_number == number):
+            old.status = m.REG_CANCELLED
+        s.add(m.VendorRegistrationRequest(whatsapp_number=number, current_step=conversation.SUMMARY,
+                                          status=m.REG_DRAFT, answers=dict(full)))
+    pd._current = pd.build([{"display_name": "Late Login", "phone": "9811000004", "dealer_id": None}], [])
+    reply = say("confirm")
+    a, step = answers()
+    check("CONFIRM with a mobile now on the Portal -> not submitted, back to mobile",
+          "Late Login" in reply and step == "mobile" and "mobile" not in a)
+    with get_session() as s:
+        check("...still a draft", conversation.open_draft(number, s).status == m.REG_DRAFT)
+
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0
 

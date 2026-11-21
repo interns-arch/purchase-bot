@@ -352,6 +352,27 @@ def _schedule_vendor_portal_link() -> None:
                        portal_link.backfill_job)
 
 
+def _schedule_portal_directory() -> None:
+    """Who is on the Dealer Portal by mobile / email, for the vendor form's
+    duplicate check (21 Nov 2026): read every 6 hours, and once 2 minutes
+    after start so the form has it early."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from backend.app.vendor_onboarding import portal_directory
+
+    _scheduler.add_job(
+        lambda: _run_safely("portal_directory_refresh", portal_directory.refresh_job),
+        "interval",
+        seconds=portal_directory.REFRESH_SECONDS,
+        next_run_time=datetime.now(ZoneInfo(_IST_TZ)) + timedelta(minutes=2),
+        id="portal_directory_refresh",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+
 def _schedule_heartbeat() -> None:
     """Proof the scheduler is still running, read by /api/bot-status."""
     from backend.app import bot_status
@@ -368,6 +389,7 @@ def start_scheduler() -> None:
     _schedule_portal_procurement()
     _schedule_vendor_creation_retry()
     _schedule_vendor_portal_link()
+    _schedule_portal_directory()
     _schedule_google_sheet_daily_reset()
     _schedule_group_stock_requests()
     _schedule_mrp_requests()

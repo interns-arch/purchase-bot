@@ -285,8 +285,45 @@ def _check_brands(request: m.VendorRegistrationRequest, typed: str) -> tuple[str
     return None, "\n".join(lines)
 
 
+def _check_contact(request: m.VendorRegistrationRequest, key: str, value: str, session: Session) -> str | None:
+    """Mobile / email must be NEW (user, 21 Nov 2026: refused, not warned).
+    Checked against the bot's own registrations (waiting or created) and the
+    Dealer Portal's logins and dealers (portal_directory, read every 6 hours).
+    Returns the message for the agent, or None."""
+    from backend.app.vendor_onboarding import portal_directory
+
+    if key not in ("mobile", "email") or not value:
+        return None
+    word = "mobile number" if key == "mobile" else "email"
+    norm = (lambda x: re.sub(r"\D", "", str(x or ""))[-10:]) if key == "mobile" else (lambda x: str(x or "").strip().lower())
+    for other in session.execute(
+        select(m.VendorRegistrationRequest).where(
+            m.VendorRegistrationRequest.id != request.id,
+            m.VendorRegistrationRequest.status.in_([m.REG_AWAITING_APPROVAL, m.REG_CREATED]),
+        )
+    ).scalars():
+        if norm((other.answers or {}).get(key)) == norm(value):
+            state = "already registered" if other.status == m.REG_CREATED else "already waiting for approval"
+            return (f"Ye {word} pehle se {request_code(other)} ({other.vendor_name}) mein hai — {state}. "
+                    f"Vendor ka doosra {word} likhiye.")
+    owner = portal_directory.phone_owner(value) if key == "mobile" else portal_directory.email_owner(value)
+    if owner:
+        return (f"Ye {word} pehle se Dealer Portal par *{owner}* ke naam par hai. "
+                f"Vendor ka apna (doosra) {word} likhiye.")
+    return None
+
+
 def _check_gstin(request: m.VendorRegistrationRequest, gstin: str, session: Session) -> str | None:
     """Duplicate + GST-portal checks. Returns an error for the vendor, or None."""
+    problem = _gstin_duplicate(request, gstin, session)
+    if problem:
+        return problem
+    return _gst_portal(request, gstin)
+
+
+def _gstin_duplicate(request: m.VendorRegistrationRequest, gstin: str, session: Session) -> str | None:
+    """Another registration (waiting or created) with this GSTIN. No Portal
+    check: the Portal's dealer / login lists carry no GST number."""
     duplicate = session.execute(
         select(m.VendorRegistrationRequest).where(
             m.VendorRegistrationRequest.gstin == gstin,
@@ -297,7 +334,11 @@ def _check_gstin(request: m.VendorRegistrationRequest, gstin: str, session: Sess
     if duplicate is not None:
         state = "already registered" if duplicate.status == m.REG_CREATED else "already waiting for approval"
         return f"GSTIN {gstin} is {state} ({request_code(duplicate)}, {duplicate.vendor_name}). Please contact the purchase team."
+    return None
 
+
+def _gst_portal(request: m.VendorRegistrationRequest, gstin: str) -> str | None:
+    """The GST registry (paid per call): fills gst_data; refuses a GSTIN that is not Active."""
     record = gst_lookup.lookup(gstin)
     if record is None:
         request.gst_data = None
@@ -374,6 +415,9 @@ def answer(number: str, text: str, session: Session) -> list[str] | None:
         if problem:
             session.flush()
             return [problem]
+    problem = _check_contact(request, question.key, value, session)
+    if problem:
+        return [problem]
     if question.key == "gstin":
         problem = _check_gstin(request, value, session)
         if problem:
@@ -414,6 +458,21 @@ def submit(request: m.VendorRegistrationRequest, session: Session) -> list[str]:
     if missing:
         request.current_step = None
         return [f"Some details are still missing: {', '.join(missing)}."] + _advance(request)
+    # User, 21 Nov 2026: nothing duplicate leaves the form. Checked again here
+    # (the Portal copy may have been refreshed since the answer was given):
+    # a duplicate sends the agent back to that one field.
+    answers = request.answers or {}
+    for key in ("gstin", "mobile", "email"):
+        if not answers.get(key):
+            continue
+        problem = (_gstin_duplicate(request, answers[key], session) if key == "gstin"
+                   else _check_contact(request, key, answers[key], session))
+        if problem:
+            _set_answer(request, key, None)
+            request.current_step = key
+            request.editing = False
+            session.flush()
+            return [problem, _prompt(request, BY_KEY[key])]
     request.status = m.REG_AWAITING_APPROVAL
     request.current_step = None
     request.submitted_at = now_ist()
@@ -494,6 +553,9 @@ def _apply_value(request: m.VendorRegistrationRequest, key: str, raw, session: S
         value, problem = _check_brands(request, value)
         if problem:
             return problem
+    problem = _check_contact(request, key, value, session)
+    if problem:
+        return problem
     if key == "gstin":
         previous = (request.answers or {}).get("gstin")
         problem = _check_gstin(request, value, session)

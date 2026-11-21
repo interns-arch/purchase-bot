@@ -43,6 +43,13 @@ _NAME_NOISE = re.compile(
     r"pucho|poocho|puchho|poochho|poochh|lo|ask|try|karo|kar|do|isse|iss|is|this|par|pe|whatsapp|wa)\b\.?",
     re.IGNORECASE,
 )
+# Replies that belong to other decisions: vendor approval (buttons "VRBTN ...",
+# "APPROVE VR-27", a bare "Approved"), ledger checks ("PASS LG-3"), purchase
+# approvals ("APPROVE ADV-..."). Never an escalated part's answer.
+_OTHER_DECISION = re.compile(
+    r"^\s*(?:vrbtn\b|(?:ok\s+|yes\s+|haan\s+)?(?:approve|approved|reject|rejected|pass|passed|fail|failed)\b)",
+    re.IGNORECASE,
+)
 _CANCEL = re.compile(
     r"\b(cancel+(ed)?|not\s*available|n/?a|nahi+|nahin|nhi|no|unavailable|nai|mat\s*karo|band\s*karo)\b",
     re.IGNORECASE,
@@ -123,20 +130,27 @@ def handle_reply(sender: str, text: str, session: Session) -> bool:
     if not waiting:
         return False
     body = (text or "").strip()
+    # 21 Nov 2026: a vendor-approval / ledger reply (button or typed) is never
+    # an escalation answer -- Prateek sir's "Approve" tap for VR-27 was taken
+    # here while AO-44 waited, and the vendor was never approved.
+    if _OTHER_DECISION.match(body):
+        return False
     match = _ORDER_REF.search(body)
     if match:
         order = next((o for o in waiting if o.id == int(match.group(1))), None)
         if order is None:
             return False  # an order number that is not waiting on him: not ours
-    elif len(waiting) == 1:
-        order = waiting[0]
     else:
-        # Only claim the message if it looks like an answer.
+        # Without an AO number, claim the message only if it looks like an
+        # answer -- even with ONE order waiting ("Hi" is not an answer).
         if not (
             _CANCEL.search(body) or _MOBILE.search(body)
             or re.search(r"\b(haan|ha|yes|available|din|days?|vendor)\b", body, re.I)
         ):
             return False
+    if not match and len(waiting) == 1:
+        order = waiting[0]
+    elif not match:
         service._send_text(
             number,
             "Kaunse order ke liye? Order number ke saath likhiye, jaise:\n"
